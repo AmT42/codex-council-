@@ -16,8 +16,8 @@ import uuid
 
 
 COUNCIL_DIRNAME = ".codex-council"
-GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked"}
-REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked"}
+GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked", "needs_human"}
+REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
 TMUX_PANE_POLL_SECONDS = 0.5
 TMUX_PASTE_SETTLE_SECONDS = 0.1
 TMUX_CAPTURE_HISTORY_LINES = 1000
@@ -49,13 +49,15 @@ DEFAULT_CONFIG_TOML = textwrap.dedent(
 
 DEFAULT_TASK_PLACEHOLDER = textwrap.dedent(
     """\
-    Describe the task here.
+    Describe the requested work here as the canonical plan and brief for the council.
 
     Include:
-    - the intended outcome
+    - goal / intended outcome
     - acceptance criteria
-    - constraints or non-goals
-    - any relevant files, endpoints, or UI flows
+    - constraints
+    - non-goals
+    - relevant files, systems, endpoints, or UI flows
+    - plan details, sequencing, or important implementation notes from the user
     """
 )
 
@@ -63,14 +65,30 @@ DEFAULT_COUNCIL_BRIEF = textwrap.dedent(
     """\
     # Council Brief
 
-    This file is injected into the generator and reviewer prompts for this task.
-    It does not automatically scope repo-root edits through Codex AGENTS semantics.
+    This task is handled by a two-agent council:
+    - the generator implements or fixes the requested work
+    - the reviewer checks fidelity to intent, correctness, risk, and test adequacy
+
+    ## Mission
+    - Deliver the user-requested outcome while adhering as closely as possible to the intent described in `task.md`.
+    - Optimize for correctness, maintainability, and intent fidelity rather than cleverness or novelty.
+
+    ## Source of truth
+    - `task.md` is the canonical user brief and plan for the requested work.
+    - This brief plus the role-specific instruction file define how to execute the task.
+    - If you need to know whether the plan or instructions changed between turns, inspect the canonical files directly and use git as needed.
+    - The per-turn `inputs/` copies are trace snapshots, not the canonical source of truth.
 
     ## Shared expectations
-    - Respect the existing architecture and coding style unless the task explicitly changes them.
+    - Respect the existing architecture, style, and constraints unless the task explicitly requires change.
     - Prefer minimal, coherent changes over broad rewrites.
-    - Keep behavior understandable and maintainable.
-    - Use the task brief plus role-specific instructions as the source of truth for this council run.
+    - Do not silently change scope.
+    - Surface contradictions, missing decisions, or dangerous assumptions explicitly.
+    - Treat each turn as a focused sprint with a concrete deliverable, not an open-ended coding session.
+
+    ## Human intervention rule
+    - If `task.md` is contradictory, dangerously underspecified, technically unsound, or would force harmful tradeoffs, stop and emit `needs_human`.
+    - Use `human_message` to tell the user exactly what must be clarified, corrected, or added before work should continue.
     """
 )
 
@@ -78,12 +96,31 @@ DEFAULT_GENERATOR_INSTRUCTIONS = textwrap.dedent(
     """\
     # Generator Instructions
 
-    - Resolve root cause rather than symptoms.
-    - Do not introduce unnecessary complexity or tech debt.
-    - Keep diffs minimal and aligned with the existing codebase style.
-    - Avoid speculative refactors that are not needed for the task.
-    - Add or update tests when they materially reduce risk.
-    - Do not leave partial work; make the implementation coherent and runnable.
+    ## Mission
+    - Implement the requested change so the result matches the intent and acceptance criteria in `task.md`, not just the superficial wording.
+
+    ## Implementation bar
+    - Resolve root cause, not symptoms.
+    - Do not introduce unnecessary complexity, tech debt, speculative abstractions, or avoidable risk.
+    - Keep diffs minimal, coherent, and aligned with the existing codebase.
+    - Preserve architecture and style unless the task explicitly requires otherwise.
+
+    ## Change strategy
+    - Read the current task inputs carefully before changing code.
+    - Work in a focused sprint-sized chunk rather than trying to solve everything at once.
+    - Prefer straightforward, production-quality solutions over clever shortcuts.
+    - Do not silently skip difficult parts or paper over broken behavior.
+    - If the task requires a tradeoff, choose the option that best preserves correctness and maintainability.
+
+    ## Quality rules
+    - Avoid regressions, broken migrations, unsafe assumptions, and partial implementations.
+    - Update or add tests when the risk profile warrants it.
+    - Keep changes explainable and reviewable.
+    - Before ending the turn, sanity-check that the change actually satisfies the intended sprint goal and does not obviously violate the task constraints.
+
+    ## Human intervention rule
+    - Emit `needs_human` if the plan in `task.md` is missing a critical decision, is contradictory, or appears wrong/unsafe after implementation starts.
+    - Use `human_message` to describe exactly what the user must clarify or change.
     """
 )
 
@@ -91,11 +128,37 @@ DEFAULT_REVIEWER_INSTRUCTIONS = textwrap.dedent(
     """\
     # Reviewer Instructions
 
-    - Verify the implementation matches the task intent and council brief.
-    - Look for correctness bugs, regressions, security issues, migration/data-loss risk, and performance traps.
-    - Check for missing tests or weak verification where the change is risky.
-    - Prefer concrete blocking issues over vague style feedback.
+    ## Review objective
+    - Verify the implementation matches the intent, constraints, and acceptance criteria in `task.md`.
+    - Act as a rigorous production code reviewer, not a stylistic nitpicker.
+    - Be skeptical by default; do not give credit for work that only looks plausible.
+
+    ## Approval bar
     - Use `approved` only when no blocking issues remain.
+    - Use `changes_requested` for fixable implementation issues that should go back to the generator.
+    - Use `blocked` only for external blockers unrelated to plan quality.
+    - Use `needs_human` when the plan itself is flawed, contradictory, unsafe, or requires a product/architecture decision beyond reviewer judgment.
+    - If any critical review dimension fails, the turn fails.
+
+    ## What to inspect
+    - fidelity to the requested sprint goal and `task.md`
+    - correctness of behavior versus intent
+    - regressions relative to existing behavior
+    - security, data loss, migration, and operational risk
+    - API, UX, and contract mismatches
+    - missing tests or weak verification for risky areas
+    - concurrency, performance, and edge-case failures where relevant
+    - code quality and maintainability of the implemented approach
+
+    ## Review style
+    - Prefer concrete, actionable blocking issues tied to code paths or behaviors.
+    - Distinguish blocking findings from optional suggestions.
+    - Avoid vague “improve this” feedback.
+    - Use git and the latest commit range aggressively to understand exactly what changed before judging it.
+
+    ## Human intervention rule
+    - Emit `needs_human` if continuing would require inventing product intent, overriding the user’s plan, or accepting a dangerous compromise.
+    - Use `human_message` to tell the user what must be clarified or corrected in `task.md` or the instructions.
     """
 )
 
@@ -171,6 +234,70 @@ def git_root_for(path: Path) -> Path | None:
     if proc.returncode != 0:
         return None
     return Path(proc.stdout.strip()).resolve()
+
+
+def git_stdout(repo_root: Path, *args: str) -> str:
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), *args],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise SupervisorRuntimeError(
+            "git_command",
+            f"git {' '.join(args)} failed: {proc.stderr.strip() or proc.stdout.strip()}",
+            details={
+                "command": ["git", "-C", str(repo_root), *args],
+                "stderr": proc.stderr,
+                "stdout": proc.stdout,
+            },
+        )
+    return proc.stdout.strip()
+
+
+def git_preflight(repo_root: Path) -> dict:
+    status_porcelain = git_stdout(repo_root, "status", "--porcelain")
+    if status_porcelain:
+        raise SystemExit(
+            f"{repo_root} has uncommitted changes. Clean or stash the worktree before starting the council."
+        )
+
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "symbolic-ref", "--quiet", "--short", "HEAD"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise SystemExit(f"{repo_root} is in detached HEAD state. Switch to a branch before starting the council.")
+    current_branch = proc.stdout.strip()
+
+    head_proc = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+    )
+    if head_proc.returncode != 0 or not head_proc.stdout.strip():
+        raise SystemExit(f"{repo_root} has no commits yet. Create an initial commit before starting the council.")
+    base_commit_sha = head_proc.stdout.strip()
+
+    upstream_proc = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        text=True,
+        capture_output=True,
+    )
+    if upstream_proc.returncode != 0 or not upstream_proc.stdout.strip():
+        raise SystemExit(
+            f"{repo_root} current branch `{current_branch}` has no upstream configured. Configure upstream before starting the council."
+        )
+    upstream_ref = upstream_proc.stdout.strip()
+
+    return {
+        "enabled": True,
+        "current_branch": current_branch,
+        "upstream_ref": upstream_ref,
+        "base_commit_sha": base_commit_sha,
+        "last_generator_commit_sha": None,
+    }
 
 
 def coerce_str(value, default: str, field_name: str) -> str:
@@ -576,6 +703,15 @@ def load_task_materials(task_root: Path) -> dict:
     }
 
 
+def canonical_task_paths(task_root: Path) -> dict:
+    return {
+        "task": task_root / "task.md",
+        "agents": task_root / "AGENTS.md",
+        "generator": task_root / "generator.instructions.md",
+        "reviewer": task_root / "reviewer.instructions.md",
+    }
+
+
 def prepare_turn(run_dir: Path, turn_number: int, materials: dict) -> Path:
     current = run_dir / "turns" / turn_name(turn_number)
     inputs_dir = current / "inputs"
@@ -643,10 +779,39 @@ def validate_generator_status(data: dict) -> dict:
     changed_files = data.get("changed_files", [])
     if not isinstance(changed_files, list) or not all(isinstance(item, str) for item in changed_files):
         raise ValueError("generator changed_files must be a list of strings")
+    human_message = data.get("human_message")
+    if result == "needs_human":
+        if not isinstance(human_message, str) or not human_message.strip():
+            raise ValueError("generator human_message must be a non-empty string when result is needs_human")
+    elif human_message is not None and not isinstance(human_message, str):
+        raise ValueError("generator human_message must be a string when present")
+    commit_sha = data.get("commit_sha")
+    compare_base_sha = data.get("compare_base_sha")
+    branch = data.get("branch")
+    if result == "implemented":
+        for field_name, value in {
+            "commit_sha": commit_sha,
+            "compare_base_sha": compare_base_sha,
+            "branch": branch,
+        }.items():
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"generator {field_name} must be a non-empty string when result is implemented")
+    else:
+        for field_name, value in {
+            "commit_sha": commit_sha,
+            "compare_base_sha": compare_base_sha,
+            "branch": branch,
+        }.items():
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"generator {field_name} must be a string when present")
     return {
         "result": result,
         "summary": summary.strip(),
         "changed_files": [item.strip() for item in changed_files],
+        "commit_sha": commit_sha.strip() if isinstance(commit_sha, str) else None,
+        "compare_base_sha": compare_base_sha.strip() if isinstance(compare_base_sha, str) else None,
+        "branch": branch.strip() if isinstance(branch, str) else None,
+        "human_message": human_message.strip() if isinstance(human_message, str) else None,
     }
 
 
@@ -662,89 +827,158 @@ def validate_reviewer_status(data: dict) -> dict:
         isinstance(item, str) for item in blocking_issues
     ):
         raise ValueError("reviewer blocking_issues must be a list of strings")
+    human_message = data.get("human_message")
+    if verdict == "needs_human":
+        if not isinstance(human_message, str) or not human_message.strip():
+            raise ValueError("reviewer human_message must be a non-empty string when verdict is needs_human")
+    elif human_message is not None and not isinstance(human_message, str):
+        raise ValueError("reviewer human_message must be a string when present")
+    reviewed_commit_sha = data.get("reviewed_commit_sha")
+    if verdict in {"approved", "changes_requested"}:
+        if not isinstance(reviewed_commit_sha, str) or not reviewed_commit_sha.strip():
+            raise ValueError("reviewer reviewed_commit_sha must be a non-empty string when verdict is approved or changes_requested")
+    elif reviewed_commit_sha is not None and not isinstance(reviewed_commit_sha, str):
+        raise ValueError("reviewer reviewed_commit_sha must be a string when present")
     return {
         "verdict": verdict,
         "summary": summary.strip(),
         "blocking_issues": [item.strip() for item in blocking_issues],
+        "reviewed_commit_sha": reviewed_commit_sha.strip() if isinstance(reviewed_commit_sha, str) else None,
+        "human_message": human_message.strip() if isinstance(human_message, str) else None,
     }
+
+
+def format_turn_one_context(task_root: Path, role: str) -> str:
+    paths = canonical_task_paths(task_root)
+    role_path = paths[role]
+    sections = [
+        "Canonical council files for this task:",
+        f"- {paths['task']}",
+        f"- {paths['agents']}",
+        f"- {role_path}",
+        "",
+        f"Shared council brief from {paths['agents']}:",
+        paths["agents"].read_text(encoding="utf-8").strip(),
+        "",
+        f"Role instructions from {role_path}:",
+        role_path.read_text(encoding="utf-8").strip(),
+        "",
+        f"Current plan from {paths['task']}:",
+        paths["task"].read_text(encoding="utf-8").strip(),
+    ]
+    return "\n".join(sections).rstrip()
+
+
+def format_later_turn_context(task_root: Path, role: str) -> str:
+    paths = canonical_task_paths(task_root)
+    role_path = paths[role]
+    return textwrap.dedent(
+        f"""\
+        If you need current guidance or want to see whether the task changed since your last turn, inspect these canonical files directly:
+        - {paths["task"]}
+        - {paths["agents"]}
+        - {role_path}
+        
+        Use git if you need to understand what changed between turns.
+        """
+    ).rstrip()
 
 
 def build_generator_turn_prompt(
     repo_root: Path,
+    task_root: Path,
     turn_dir: Path,
     turn_number: int,
+    task_name: str,
+    git_state: dict | None,
     *,
-    include_council_brief: bool,
+    inline_context: bool,
 ) -> str:
-    inputs_dir = turn_dir / "inputs"
     sections: list[str] = [f"Repository root:\n{repo_root}"]
-    if include_council_brief:
-        sections.extend(
-            [
-                f"Council brief from {inputs_dir / 'AGENTS.md'}:\n"
-                f"{(inputs_dir / 'AGENTS.md').read_text(encoding='utf-8').strip()}",
-                f"Generator instructions from {inputs_dir / 'generator.instructions.md'}:\n"
-                f"{(inputs_dir / 'generator.instructions.md').read_text(encoding='utf-8').strip()}",
-            ]
-        )
-    sections.extend(
-        [
-            f"Task brief from {inputs_dir / 'task.md'}:\n"
-            f"{(inputs_dir / 'task.md').read_text(encoding='utf-8').strip()}",
-            f"Turn {turn_name(turn_number)}.",
-        ]
-    )
+    if inline_context:
+        sections.append(format_turn_one_context(task_root, "generator"))
+    else:
+        sections.append(format_later_turn_context(task_root, "generator"))
+    sections.append(f"Turn {turn_name(turn_number)}.")
     if turn_number > 1:
         previous_turn_dir = turn_dir.parent / turn_name(turn_number - 1)
         sections.append(
-            "Before making changes, read the previous reviewer artifacts:\n"
+            "Before making changes, read the previous reviewer artifacts carefully:\n"
             f"- {previous_turn_dir / 'reviewer.md'}\n"
             f"- {previous_turn_dir / 'reviewer.status.json'}"
         )
+    if git_state and git_state.get("enabled"):
+        sections.append(
+            textwrap.dedent(
+                f"""\
+                This run is operating on git branch `{git_state["current_branch"]}` with upstream `{git_state["upstream_ref"]}`.
+                If you implement code changes in this turn:
+                - commit them on the current branch with message `council({task_name}): turn {turn_name(turn_number)}`
+                - push the branch upstream before writing final artifacts
+                - report `commit_sha`, `compare_base_sha`, and `branch` in `generator.status.json`
+
+                For turn {turn_name(turn_number)}, `compare_base_sha` must be:
+                `{git_state["last_generator_commit_sha"] or git_state["base_commit_sha"]}`
+                """
+            ).rstrip()
+        )
     sections.append(
+        "Implement the requested change carefully. If the plan is critically flawed, contradictory, or unsafe to continue, emit `needs_human` instead of guessing.\n\n"
         "When the implementation is complete, write exactly these files:\n"
         f"- {turn_dir / 'generator.md'}\n"
         f"- {turn_dir / 'generator.status.json'}\n\n"
         "The status JSON must be exactly this shape:\n"
-        '{"result":"implemented|no_changes_needed|blocked","summary":"short string","changed_files":["relative/path"]}'
+        '{"result":"implemented|no_changes_needed|blocked|needs_human","summary":"short string","changed_files":["relative/path"],"commit_sha":"required when implemented","compare_base_sha":"required when implemented","branch":"required when implemented","human_message":"required when needs_human"}'
     )
-    sections.append("After both files are complete and accurate, stop and wait for further instructions.")
+    sections.append("After producing the required artifacts for this turn, end your turn. Do not continue with extra speculative work beyond the requested deliverables for this turn.")
     return "\n\n".join(sections).rstrip()
 
 
 def build_reviewer_turn_prompt(
     repo_root: Path,
+    task_root: Path,
     turn_dir: Path,
     turn_number: int,
+    git_state: dict | None,
     *,
-    include_council_brief: bool,
+    inline_context: bool,
 ) -> str:
-    inputs_dir = turn_dir / "inputs"
     sections: list[str] = [f"Repository root:\n{repo_root}"]
-    if include_council_brief:
-        sections.extend(
-            [
-                f"Council brief from {inputs_dir / 'AGENTS.md'}:\n"
-                f"{(inputs_dir / 'AGENTS.md').read_text(encoding='utf-8').strip()}",
-                f"Reviewer instructions from {inputs_dir / 'reviewer.instructions.md'}:\n"
-                f"{(inputs_dir / 'reviewer.instructions.md').read_text(encoding='utf-8').strip()}",
-            ]
+    if inline_context:
+        sections.append(format_turn_one_context(task_root, "reviewer"))
+    else:
+        sections.append(format_later_turn_context(task_root, "reviewer"))
+    sections.extend(
+        [
+            f"Turn {turn_name(turn_number)}.",
+            "The generator has completed a change. Review the current repository state and these files carefully:\n"
+            f"- {turn_dir / 'generator.md'}\n"
+            f"- {turn_dir / 'generator.status.json'}",
+        ]
+    )
+    if git_state and git_state.get("enabled"):
+        sections.append(
+            textwrap.dedent(
+                """\
+                Use git as the primary source of what changed.
+                Read `generator.status.json` to get `branch`, `compare_base_sha`, and `commit_sha`, then inspect:
+                - `git show <commit_sha>`
+                - `git diff <compare_base_sha>..<commit_sha>`
+                - any other git commands you need to understand the latest generator change set
+                Treat git history as the primary record of the latest change set, and use repository state plus artifacts as supporting context.
+                If generator reported `no_changes_needed`, inspect the current HEAD and write that HEAD commit as `reviewed_commit_sha`.
+                """
+            ).rstrip()
         )
     sections.extend(
         [
-            f"Task brief from {inputs_dir / 'task.md'}:\n"
-            f"{(inputs_dir / 'task.md').read_text(encoding='utf-8').strip()}",
-            f"Turn {turn_name(turn_number)}.",
-            "Review the current repository state and these files:\n"
-            f"- {turn_dir / 'generator.md'}\n"
-            f"- {turn_dir / 'generator.status.json'}",
             "When the review is complete, write exactly these files:\n"
             f"- {turn_dir / 'reviewer.md'}\n"
             f"- {turn_dir / 'reviewer.status.json'}\n\n"
             "The status JSON must be exactly this shape:\n"
-            '{"verdict":"approved|changes_requested|blocked","summary":"short string","blocking_issues":["issue"]}',
-            "Use `approved` only when no blocking issues remain. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers.",
-            "After both files are complete and accurate, stop and wait for further instructions.",
+            '{"verdict":"approved|changes_requested|blocked|needs_human","summary":"short string","blocking_issues":["issue"],"reviewed_commit_sha":"required for approved or changes_requested","human_message":"required when needs_human"}',
+            "Use `approved` only when no blocking issues remain. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers. Use `needs_human` when the plan or instructions themselves require user clarification.",
+            "After producing the required artifacts for this turn, end your turn. Do not continue with extra speculative work beyond the requested deliverables for this turn.",
         ]
     )
     return "\n\n".join(sections).rstrip()
@@ -759,7 +993,31 @@ def write_final_message_artifact(turn_dir: Path, role: str, message: str) -> Non
 
 
 def write_raw_final_output_artifact(turn_dir: Path, role: str, tmux_name: str) -> None:
+    # Trace/debug only. This file must never be used as a control signal.
     write_text(turn_dir / role / "raw_final_output.md", capture_last_tmux_slice(tmux_name))
+
+
+def pause_for_human(
+    run_dir: Path,
+    state: dict,
+    *,
+    role: str,
+    turn_dir: Path,
+    summary: str,
+    human_message: str | None,
+) -> None:
+    state["status"] = "paused_needs_human"
+    state["stop_reason"] = summary
+    save_run_state(run_dir, state)
+    print(f"{role} paused the council and requested human intervention.", flush=True)
+    print(f"read: {turn_dir / f'{role}.md'}", flush=True)
+    print(f"read: {turn_dir / f'{role}.status.json'}", flush=True)
+    if human_message:
+        print(f"human_message: {human_message}", flush=True)
+    print(
+        "update task.md / AGENTS.md / role instructions as needed, then start a fresh run.",
+        flush=True,
+    )
 
 
 def create_run_state(
@@ -769,6 +1027,7 @@ def create_run_state(
     task_name: str,
     run_id: str,
     council_config: dict,
+    git_state: dict | None,
     generator_session: str,
     reviewer_session: str,
 ) -> dict:
@@ -779,6 +1038,7 @@ def create_run_state(
         "council_root": str(council_root_for(repo_root)),
         "current_turn": 1,
         "diagnostics_dir": str(run_dir / "diagnostics"),
+        "git": git_state,
         "repo_root": str(repo_root),
         "roles": {
             "generator": {
@@ -837,6 +1097,57 @@ def create_tmux_sessions(run_dir: Path, state: dict) -> None:
     save_run_state(run_dir, state)
 
 
+def verify_generator_git_metadata(
+    repo_root: Path, git_state: dict, generator_status: dict, task_name: str, turn_number: int
+) -> str:
+    commit_sha = generator_status["commit_sha"]
+    compare_base_sha = generator_status["compare_base_sha"]
+    branch = generator_status["branch"]
+    expected_branch = git_state["current_branch"]
+    expected_base = git_state["last_generator_commit_sha"] or git_state["base_commit_sha"]
+
+    if branch != expected_branch:
+        raise SupervisorRuntimeError(
+            "generator_git_metadata",
+            f"generator reported branch {branch} but expected {expected_branch}",
+            role="generator",
+        )
+    if compare_base_sha != expected_base:
+        raise SupervisorRuntimeError(
+            "generator_git_metadata",
+            f"generator reported compare_base_sha {compare_base_sha} but expected {expected_base}",
+            role="generator",
+        )
+    head_sha = git_stdout(repo_root, "rev-parse", "HEAD")
+    if head_sha != commit_sha:
+        raise SupervisorRuntimeError(
+            "generator_git_metadata",
+            f"generator reported commit_sha {commit_sha} but repo HEAD is {head_sha}",
+            role="generator",
+        )
+    expected_message = f"council({task_name}): turn {turn_name(turn_number)}"
+    actual_message = git_stdout(repo_root, "log", "-1", "--pretty=%s")
+    if actual_message != expected_message:
+        raise SupervisorRuntimeError(
+            "generator_git_metadata",
+            f"latest commit message is `{actual_message}` but expected `{expected_message}`",
+            role="generator",
+        )
+    return commit_sha
+
+
+def verify_reviewer_commit_reference(
+    expected_reviewed_commit_sha: str | None, reviewer_status: dict
+) -> None:
+    reviewed_commit_sha = reviewer_status["reviewed_commit_sha"]
+    if reviewed_commit_sha != expected_reviewed_commit_sha:
+        raise SupervisorRuntimeError(
+            "reviewer_git_metadata",
+            f"reviewer reported reviewed_commit_sha {reviewed_commit_sha} but expected {expected_reviewed_commit_sha}",
+            role="reviewer",
+        )
+
+
 def wait_for_tmux_sessions_ready(run_dir: Path, state: dict) -> None:
     launch_timeout_seconds = float(state["council_config"]["council"]["launch_timeout_seconds"])
     for role in ("generator", "reviewer"):
@@ -853,6 +1164,7 @@ def wait_for_tmux_sessions_ready(run_dir: Path, state: dict) -> None:
 def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
     repo_root = Path(state["repo_root"])
     turn_timeout_seconds = float(state["council_config"]["council"]["turn_timeout_seconds"])
+    git_state = state.get("git")
 
     for turn_number in range(1, int(state["council_config"]["council"]["max_turns"]) + 1):
         state["current_turn"] = turn_number
@@ -862,9 +1174,12 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
 
         generator_prompt = build_generator_turn_prompt(
             repo_root,
+            task_root,
             current_turn_dir,
             turn_number,
-            include_council_brief=True,
+            state["task_name"],
+            git_state,
+            inline_context=turn_number == 1,
         )
         write_prompt_artifact(current_turn_dir, "generator", generator_prompt)
         state["status"] = "waiting_generator"
@@ -899,6 +1214,25 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
             "generator",
             state["roles"]["generator"]["tmux_session"],
         )
+        if git_state and git_state.get("enabled") and generator_status["result"] == "implemented":
+            git_state["last_generator_commit_sha"] = verify_generator_git_metadata(
+                repo_root,
+                git_state,
+                generator_status,
+                state["task_name"],
+                turn_number,
+            )
+            save_run_state(run_dir, state)
+        if generator_status["result"] == "needs_human":
+            pause_for_human(
+                run_dir,
+                state,
+                role="generator",
+                turn_dir=current_turn_dir,
+                summary=generator_status["summary"],
+                human_message=generator_status["human_message"],
+            )
+            return
         if generator_status["result"] == "blocked":
             state["status"] = "blocked"
             state["stop_reason"] = generator_status["summary"]
@@ -907,9 +1241,11 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
 
         reviewer_prompt = build_reviewer_turn_prompt(
             repo_root,
+            task_root,
             current_turn_dir,
             turn_number,
-            include_council_brief=True,
+            git_state,
+            inline_context=turn_number == 1,
         )
         write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
         state["status"] = "waiting_reviewer"
@@ -945,10 +1281,26 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
             state["roles"]["reviewer"]["tmux_session"],
         )
 
+        if git_state and git_state.get("enabled") and reviewer_status["verdict"] in {"approved", "changes_requested"}:
+            verify_reviewer_commit_reference(
+                git_state["last_generator_commit_sha"] or git_state["base_commit_sha"],
+                reviewer_status,
+            )
+
         if reviewer_status["verdict"] == "approved":
             state["status"] = "approved"
             state["stop_reason"] = reviewer_status["summary"]
             save_run_state(run_dir, state)
+            return
+        if reviewer_status["verdict"] == "needs_human":
+            pause_for_human(
+                run_dir,
+                state,
+                role="reviewer",
+                turn_dir=current_turn_dir,
+                summary=reviewer_status["summary"],
+                human_message=reviewer_status["human_message"],
+            )
             return
         if reviewer_status["verdict"] == "blocked":
             state["status"] = "blocked"
@@ -979,6 +1331,7 @@ def start_run(args: argparse.Namespace) -> int:
         raise SystemExit(
             f"{task_root / 'task.md'} is still a placeholder. Fill it in before running start."
         )
+    git_state = git_preflight(repo_root) if is_git else None
 
     run_id = args.run_id or run_id_value()
     run_dir = task_root / "runs" / run_id
@@ -995,6 +1348,7 @@ def start_run(args: argparse.Namespace) -> int:
         task_name=task_name,
         run_id=run_id,
         council_config=council_config,
+        git_state=git_state,
         generator_session=generator_session,
         reviewer_session=reviewer_session,
     )
@@ -1006,6 +1360,10 @@ def start_run(args: argparse.Namespace) -> int:
         print(f"task_root: {task_root}")
         print(f"run_id: {run_id}")
         print(f"run_dir: {run_dir}")
+        if git_state and git_state.get("enabled"):
+            print(f"git branch: {git_state['current_branch']}")
+            print(f"git upstream: {git_state['upstream_ref']}")
+            print(f"git base_commit: {git_state['base_commit_sha']}")
         print(f"generator tmux: {generator_session}")
         print(f"reviewer tmux: {reviewer_session}")
         print(f"attach generator: tmux attach -t {generator_session}")

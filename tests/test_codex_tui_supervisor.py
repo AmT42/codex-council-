@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -25,10 +27,23 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 "result": "implemented",
                 "summary": "Changed the parser and added tests.",
                 "changed_files": ["src/parser.py", "tests/test_parser.py"],
+                "commit_sha": "abc123",
+                "compare_base_sha": "def456",
+                "branch": "main",
             }
         )
         self.assertEqual(status["result"], "implemented")
         self.assertEqual(len(status["changed_files"]), 2)
+
+    def test_validate_generator_status_requires_commit_metadata_for_implemented(self) -> None:
+        with self.assertRaises(ValueError):
+            MODULE.validate_generator_status(
+                {
+                    "result": "implemented",
+                    "summary": "Changed the parser and added tests.",
+                    "changed_files": ["src/parser.py"],
+                }
+            )
 
     def test_validate_reviewer_status_accepts_approved(self) -> None:
         status = MODULE.validate_reviewer_status(
@@ -36,9 +51,62 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 "verdict": "approved",
                 "summary": "No blocking issues remain.",
                 "blocking_issues": [],
+                "reviewed_commit_sha": "abc123",
             }
         )
         self.assertEqual(status["verdict"], "approved")
+
+    def test_validate_reviewer_status_requires_reviewed_commit_for_approved(self) -> None:
+        with self.assertRaises(ValueError):
+            MODULE.validate_reviewer_status(
+                {
+                    "verdict": "approved",
+                    "summary": "No blocking issues remain.",
+                    "blocking_issues": [],
+                }
+            )
+
+    def test_validate_generator_status_requires_human_message_for_needs_human(self) -> None:
+        with self.assertRaises(ValueError):
+            MODULE.validate_generator_status(
+                {
+                    "result": "needs_human",
+                    "summary": "Task plan is contradictory.",
+                    "changed_files": [],
+                }
+            )
+
+        status = MODULE.validate_generator_status(
+            {
+                "result": "needs_human",
+                "summary": "Task plan is contradictory.",
+                "changed_files": [],
+                "human_message": "Clarify whether API A or API B is the intended target.",
+            }
+        )
+        self.assertEqual(status["result"], "needs_human")
+        self.assertIn("Clarify", status["human_message"])
+
+    def test_validate_reviewer_status_requires_human_message_for_needs_human(self) -> None:
+        with self.assertRaises(ValueError):
+            MODULE.validate_reviewer_status(
+                {
+                    "verdict": "needs_human",
+                    "summary": "Plan conflicts with current architecture.",
+                    "blocking_issues": [],
+                }
+            )
+
+        status = MODULE.validate_reviewer_status(
+            {
+                "verdict": "needs_human",
+                "summary": "Plan conflicts with current architecture.",
+                "blocking_issues": [],
+                "human_message": "Decide whether the task should preserve the current API or introduce a breaking change.",
+            }
+        )
+        self.assertEqual(status["verdict"], "needs_human")
+        self.assertIn("Decide", status["human_message"])
 
     def test_extract_last_tmux_slice_uses_last_two_prompts(self) -> None:
         pane = "\n".join(
@@ -70,6 +138,33 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             with self.assertRaises(SystemExit):
                 MODULE.resolve_target_root(Path(tmp_dir), allow_non_git=False)
+
+    def test_git_preflight_rejects_dirty_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            repo_root.mkdir()
+            subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_root, check=True, capture_output=True, text=True)
+            (repo_root / "file.txt").write_text("x", encoding="utf-8")
+            subprocess.run(["git", "add", "file.txt"], cwd=repo_root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
+            (repo_root / "file.txt").write_text("changed", encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                MODULE.git_preflight(repo_root)
+
+    def test_git_preflight_rejects_missing_upstream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            repo_root.mkdir()
+            subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_root, check=True, capture_output=True, text=True)
+            (repo_root / "file.txt").write_text("x", encoding="utf-8")
+            subprocess.run(["git", "add", "file.txt"], cwd=repo_root, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
+            with self.assertRaises(SystemExit):
+                MODULE.git_preflight(repo_root)
 
     def test_scaffold_task_root_creates_expected_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -137,21 +232,73 @@ class CodexTuiSupervisorTests(unittest.TestCase):
 
     def test_build_generator_turn_prompt_includes_task_files_and_not_supervisor_language(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             turn_dir = Path(tmp_dir) / "turns" / "0001"
-            (turn_dir / "inputs").mkdir(parents=True)
-            (turn_dir / "inputs" / "task.md").write_text("Implement feature.", encoding="utf-8")
-            (turn_dir / "inputs" / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
-            (turn_dir / "inputs" / "generator.instructions.md").write_text("Generator additions.", encoding="utf-8")
+            task_root.mkdir(parents=True)
+            (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
+            (task_root / "generator.instructions.md").write_text("Generator additions.", encoding="utf-8")
             prompt = MODULE.build_generator_turn_prompt(
                 Path("/repo"),
+                task_root,
                 turn_dir,
                 1,
-                include_council_brief=True,
+                "demo-task",
+                {"enabled": False},
+                inline_context=True,
             )
             self.assertIn("Shared rules.", prompt)
             self.assertIn("Generator additions.", prompt)
             self.assertIn("Implement feature.", prompt)
             self.assertNotIn("supervisor controls turn order", prompt.lower())
+            self.assertIn("needs_human", prompt)
+            self.assertNotIn("stop and wait for further instructions", prompt.lower())
+
+    def test_build_generator_turn_prompt_later_turn_references_paths_not_inlined_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0002"
+            previous_turn_dir = turn_dir.parent / "0001"
+            task_root.mkdir(parents=True)
+            previous_turn_dir.mkdir(parents=True)
+            (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
+            (task_root / "generator.instructions.md").write_text("Generator additions.", encoding="utf-8")
+            (previous_turn_dir / "reviewer.md").write_text("Review text", encoding="utf-8")
+            (previous_turn_dir / "reviewer.status.json").write_text("{}", encoding="utf-8")
+            prompt = MODULE.build_generator_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                2,
+                "demo-task",
+                {"enabled": False},
+                inline_context=False,
+            )
+            self.assertIn(str(task_root / "task.md"), prompt)
+            self.assertNotIn("Shared rules.", prompt)
+            self.assertNotIn("Generator additions.", prompt)
+
+    def test_build_reviewer_turn_prompt_mentions_changes_requested_and_needs_human(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            task_root.mkdir(parents=True)
+            (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
+            (task_root / "reviewer.instructions.md").write_text("Reviewer additions.", encoding="utf-8")
+            prompt = MODULE.build_reviewer_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                {"enabled": True},
+                inline_context=True,
+            )
+            self.assertIn("Reviewer additions.", prompt)
+            self.assertIn("changes_requested", prompt)
+            self.assertIn("needs_human", prompt)
+            self.assertIn("Use git as the primary source of what changed.", prompt)
 
     def test_wait_for_role_artifacts_returns_valid_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -163,6 +310,9 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                         "result": "implemented",
                         "summary": "Added feature.",
                         "changed_files": ["scripts/feature.py"],
+                        "commit_sha": "abc123",
+                        "compare_base_sha": "def456",
+                        "branch": "main",
                     }
                 ),
                 encoding="utf-8",
@@ -210,6 +360,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                     "require_git": True,
                 },
             },
+            git_state=None,
             generator_session="gen",
             reviewer_session="rev",
         )
@@ -224,6 +375,28 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             task_root.mkdir(parents=True)
             with self.assertRaises(SystemExit):
                 MODULE.ensure_task_workspace_exists(task_root)
+
+    def test_pause_for_human_updates_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            state = {
+                "status": "waiting_generator",
+                "stop_reason": None,
+            }
+            MODULE.save_json(run_dir / "state.json", state)
+            turn_dir = run_dir / "turns" / "0001"
+            turn_dir.mkdir(parents=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                MODULE.pause_for_human(
+                    run_dir,
+                    state,
+                    role="reviewer",
+                    turn_dir=turn_dir,
+                    summary="Task plan needs clarification.",
+                    human_message="Clarify whether the endpoint change is allowed.",
+                )
+            self.assertEqual(state["status"], "paused_needs_human")
+            self.assertEqual(state["stop_reason"], "Task plan needs clarification.")
 
 
 if __name__ == "__main__":

@@ -55,9 +55,12 @@ Every execution creates a fresh run under:
 The supervisor will:
 
 - resolve the target directory to its git root by default
+- refuse to start on a dirty repo, detached HEAD, or a branch with no configured upstream
 - launch two real `codex` TUIs in `tmux` inside that target repo
 - build each turn prompt from `.codex-council/<task_name>/task.md`, `AGENTS.md`, and the role-specific instruction file
+- inline the canonical task files on turn 1, then only reference their canonical paths on later turns so the agents can inspect the current files directly and use git to understand changes between turns
 - advance turns only when the required artifact pair exists and validates
+- pause when generator or reviewer emits `needs_human`
 - stop when reviewer writes `{"verdict":"approved",...}`, `{"verdict":"blocked",...}`, or max turns is reached
 
 Attach from two terminals with the commands printed by `start`, for example:
@@ -71,15 +74,30 @@ Important:
 
 - watch the sessions, but do not type into them unless you intentionally want to override the council
 - the authoritative control signal is only the artifact pair for the role
+- generator is expected to commit and push on the current branch for implemented turns before writing final artifacts
+- reviewer is expected to use git as the primary source of what changed
 - generator must write `generator.md` and `generator.status.json`
 - reviewer must write `reviewer.md` and `reviewer.status.json`
 - `raw_final_output.md` is trace-only and is captured only after valid final artifacts exist
 - `.codex-council/<task_name>/AGENTS.md` is injected into prompts as a council brief; it does not automatically scope repo-root edits through Codex AGENTS semantics
+- either role may emit `needs_human` when `task.md` or the task instructions are flawed enough that continuing would be unsafe or misleading
 
 Reviewer stop conditions are structured, not guessed from prose:
 
 ```json
-{"verdict":"approved","summary":"No blocking issues remain.","blocking_issues":[]}
+{"verdict":"approved","summary":"No blocking issues remain.","blocking_issues":[],"reviewed_commit_sha":"<sha>"}
+```
+
+Human-intervention pause example:
+
+```json
+{"verdict":"needs_human","summary":"The plan is contradictory.","blocking_issues":[],"human_message":"Clarify whether the API change should be breaking or backward compatible."}
+```
+
+Generator implemented example:
+
+```json
+{"result":"implemented","summary":"Implemented the requested change.","changed_files":["src/example.py"],"commit_sha":"<sha>","compare_base_sha":"<sha>","branch":"main"}
 ```
 
 Inspect the latest run state:
