@@ -1,0 +1,15 @@
+.codex-handoff/
+.pytest_cache/
+__pycache__/
+autoresearch/
+harness/runs/*
+!harness/runs/.gitignore
+
+# Generated or unrelated example outputs/tasks
+task.md
+task_snake_tetris.md
+scripts/snake_game.py
+scripts/snake_game_3d.py
+scripts/snake_tetris_game.py
+tests/test_snake_game.py
+tests/test_snake_tetris_game.py
