@@ -61,6 +61,25 @@ DEFAULT_TASK_PLACEHOLDER = textwrap.dedent(
     """
 )
 
+DEFAULT_CONTRACT_PLACEHOLDER = textwrap.dedent(
+    """\
+    # Success Contract
+
+    Write the definition of done for this task here as a checklist.
+
+    Guidelines:
+    - Keep this file short and audit-oriented.
+    - Each bullet should describe something that must be true before approval.
+    - The reviewer will copy this checklist into `reviewer.md` and mark items with `[x]` / `[ ]`.
+    - Keep detailed architecture and implementation reasoning in `task.md`, not here.
+
+    Example:
+    - [ ] The main user-facing behavior works as intended.
+    - [ ] Existing core behavior has not regressed.
+    - [ ] Required tests were added or updated.
+    """
+)
+
 DEFAULT_COUNCIL_BRIEF = textwrap.dedent(
     """\
     # Council Brief
@@ -74,21 +93,23 @@ DEFAULT_COUNCIL_BRIEF = textwrap.dedent(
     - Optimize for correctness, maintainability, and intent fidelity rather than cleverness or novelty.
 
     ## Source of truth
-    - `task.md` is the canonical user brief and plan for the requested work.
+    - `task.md` is the canonical implementation plan and context for the requested work.
+    - `contract.md` is the canonical definition of done and approval checklist for the task.
     - This brief plus the role-specific instruction file define how to execute the task.
     - If you need to know whether the plan or instructions changed between turns, inspect the canonical files directly and use git as needed.
-    - The per-turn `inputs/` copies are trace snapshots, not the canonical source of truth.
 
     ## Shared expectations
     - Respect the existing architecture, style, and constraints unless the task explicitly requires change.
     - Prefer minimal, coherent changes over broad rewrites.
     - Do not silently change scope.
     - Surface contradictions, missing decisions, or dangerous assumptions explicitly.
-    - Treat each turn as a focused sprint with a concrete deliverable, not an open-ended coding session.
+    - Prefer clear contracts and verifiable outcomes over vague progress.
+    - Generator implements against both `task.md` and `contract.md`.
+    - Reviewer approves only when the checklist in `contract.md` is satisfied.
 
     ## Human intervention rule
-    - If `task.md` is contradictory, dangerously underspecified, technically unsound, or would force harmful tradeoffs, stop and emit `needs_human`.
-    - Use `human_message` to tell the user exactly what must be clarified, corrected, or added before work should continue.
+    - If `task.md`, `contract.md`, this brief, or the role-specific instructions conflict or are too ambiguous to continue safely, stop and emit `needs_human`.
+    - Use `human_message` to tell the user exactly what must be clarified, corrected, or added before work should continue, and name the faulty source explicitly.
     """
 )
 
@@ -97,7 +118,7 @@ DEFAULT_GENERATOR_INSTRUCTIONS = textwrap.dedent(
     # Generator Instructions
 
     ## Mission
-    - Implement the requested change so the result matches the intent and acceptance criteria in `task.md`, not just the superficial wording.
+    - Implement the requested change so the result matches the intent in `task.md` and moves the codebase toward satisfying `contract.md`.
 
     ## Implementation bar
     - Resolve root cause, not symptoms.
@@ -105,22 +126,36 @@ DEFAULT_GENERATOR_INSTRUCTIONS = textwrap.dedent(
     - Keep diffs minimal, coherent, and aligned with the existing codebase.
     - Preserve architecture and style unless the task explicitly requires otherwise.
 
+    ## Required reading
+    - Read `task.md` first to understand the architecture, plan, and intended implementation.
+    - Read `contract.md` before coding. It is the non-negotiable definition of done.
+    - If these files disagree, do not guess. Emit `needs_human`.
+
     ## Change strategy
-    - Read the current task inputs carefully before changing code.
-    - Work in a focused sprint-sized chunk rather than trying to solve everything at once.
+    - Work in clear, reviewable increments that materially advance the plan in `task.md`.
     - Prefer straightforward, production-quality solutions over clever shortcuts.
     - Do not silently skip difficult parts or paper over broken behavior.
-    - If the task requires a tradeoff, choose the option that best preserves correctness and maintainability.
+    - If the task requires a tradeoff, choose the option that best preserves correctness, maintainability, and contract satisfaction.
+    - Do not redefine success criteria yourself. `contract.md` owns the success criteria.
 
     ## Quality rules
     - Avoid regressions, broken migrations, unsafe assumptions, and partial implementations.
     - Update or add tests when the risk profile warrants it.
     - Keep changes explainable and reviewable.
-    - Before ending the turn, sanity-check that the change actually satisfies the intended sprint goal and does not obviously violate the task constraints.
+    - Before ending the turn, sanity-check that your changes plausibly satisfy the relevant items in `contract.md` and do not obviously violate the task constraints.
+
+    ## Required turn output
+    - In `generator.md`, include:
+      - What changed
+      - Why those changes move the code toward satisfying `contract.md`
+      - Verification performed
+      - Remaining contract items not yet satisfied
+      - Known risks or blockers
+    - Do not claim completion unless the change plausibly satisfies the contract items it is supposed to address.
 
     ## Human intervention rule
-    - Emit `needs_human` if the plan in `task.md` is missing a critical decision, is contradictory, or appears wrong/unsafe after implementation starts.
-    - Use `human_message` to describe exactly what the user must clarify or change.
+    - Emit `needs_human` if `task.md` and `contract.md` conflict, if satisfying one contract item would clearly violate another, or if a missing design decision prevents a safe implementation.
+    - Use `human_message` to describe exactly what the user must clarify or change, and name the faulty source explicitly.
     """
 )
 
@@ -129,9 +164,12 @@ DEFAULT_REVIEWER_INSTRUCTIONS = textwrap.dedent(
     # Reviewer Instructions
 
     ## Review objective
-    - Verify the implementation matches the intent, constraints, and acceptance criteria in `task.md`.
+    - Use `task.md` to understand the plan, architecture, and intended implementation.
+    - Use `contract.md` as the actual definition of done.
+    - Verify the implementation matches the plan in `task.md` and satisfies the checklist in `contract.md`.
     - Act as a rigorous production code reviewer, not a stylistic nitpicker.
     - Be skeptical by default; do not give credit for work that only looks plausible.
+    - Treat yourself as an external evaluator, not a collaborator trying to help the generator look good.
 
     ## Approval bar
     - Use `approved` only when no blocking issues remain.
@@ -139,9 +177,11 @@ DEFAULT_REVIEWER_INSTRUCTIONS = textwrap.dedent(
     - Use `blocked` only for external blockers unrelated to plan quality.
     - Use `needs_human` when the plan itself is flawed, contradictory, unsafe, or requires a product/architecture decision beyond reviewer judgment.
     - If any critical review dimension fails, the turn fails.
+    - Approval means the checklist in `contract.md` is satisfied, not merely that the patch looks reasonable.
 
     ## What to inspect
-    - fidelity to the requested sprint goal and `task.md`
+    - fidelity to `task.md`
+    - satisfaction of each checklist item in `contract.md`
     - correctness of behavior versus intent
     - regressions relative to existing behavior
     - security, data loss, migration, and operational risk
@@ -156,9 +196,19 @@ DEFAULT_REVIEWER_INSTRUCTIONS = textwrap.dedent(
     - Avoid vague “improve this” feedback.
     - Use git and the latest commit range aggressively to understand exactly what changed before judging it.
 
+    ## Required review structure
+    - In `reviewer.md`, include:
+      - Verdict summary
+      - Contract checklist copied from `contract.md`, using `[x]` for satisfied and `[ ]` for not yet satisfied
+      - Blocking issues
+      - Verification performed
+      - Residual risks or follow-up notes
+    - The checklist should be the clearest answer to whether the loop is done: approval means every relevant contract point is satisfied.
+    - Every unchecked contract item blocks approval unless it is clearly out of scope for the current task wording, and if that happens you must explain why.
+
     ## Human intervention rule
-    - Emit `needs_human` if continuing would require inventing product intent, overriding the user’s plan, or accepting a dangerous compromise.
-    - Use `human_message` to tell the user what must be clarified or corrected in `task.md` or the instructions.
+    - Emit `needs_human` if `contract.md` is ambiguous or incomplete, if `task.md` does not actually support the contract, or if approval would require guessing the intended interpretation of an unchecked contract item.
+    - Use `human_message` to tell the user what must be clarified or corrected, and name the faulty source explicitly.
     """
 )
 
@@ -362,6 +412,7 @@ def latest_run_dir(task_root: Path) -> Path:
 def required_task_files(task_root: Path) -> list[Path]:
     return [
         task_root / "task.md",
+        task_root / "contract.md",
         task_root / "AGENTS.md",
         task_root / "generator.instructions.md",
         task_root / "reviewer.instructions.md",
@@ -389,6 +440,7 @@ def scaffold_task_root(
         task_root / "task.md",
         initial_task_text.strip() if initial_task_text else DEFAULT_TASK_PLACEHOLDER,
     )
+    contract_created = write_if_missing(task_root / "contract.md", DEFAULT_CONTRACT_PLACEHOLDER)
     agents_created = write_if_missing(task_root / "AGENTS.md", DEFAULT_COUNCIL_BRIEF)
     generator_created = write_if_missing(
         task_root / "generator.instructions.md", DEFAULT_GENERATOR_INSTRUCTIONS
@@ -399,6 +451,7 @@ def scaffold_task_root(
     return {
         "task_created": task_created,
         "task_needs_edit": task_created and not initial_task_text,
+        "contract_created": contract_created,
         "agents_created": agents_created,
         "generator_created": generator_created,
         "reviewer_created": reviewer_created,
@@ -682,6 +735,8 @@ def load_task_materials(task_root: Path) -> dict:
     return {
         "task_path": task_root / "task.md",
         "task_text": (task_root / "task.md").read_text(encoding="utf-8").strip(),
+        "contract_path": task_root / "contract.md",
+        "contract_text": (task_root / "contract.md").read_text(encoding="utf-8").strip(),
         "agents_path": task_root / "AGENTS.md",
         "agents_text": (task_root / "AGENTS.md").read_text(encoding="utf-8").strip(),
         "generator_path": task_root / "generator.instructions.md",
@@ -694,6 +749,7 @@ def load_task_materials(task_root: Path) -> dict:
 def canonical_task_paths(task_root: Path) -> dict:
     return {
         "task": task_root / "task.md",
+        "contract": task_root / "contract.md",
         "agents": task_root / "AGENTS.md",
         "generator": task_root / "generator.instructions.md",
         "reviewer": task_root / "reviewer.instructions.md",
@@ -705,6 +761,7 @@ def prepare_turn(run_dir: Path, turn_number: int, materials: dict) -> Path:
     inputs_dir = current / "inputs"
     ensure_dir(inputs_dir)
     write_text(inputs_dir / "task.md", materials["task_text"])
+    write_text(inputs_dir / "contract.md", materials["contract_text"])
     write_text(inputs_dir / "AGENTS.md", materials["agents_text"])
     write_text(inputs_dir / "generator.instructions.md", materials["generator_text"])
     write_text(inputs_dir / "reviewer.instructions.md", materials["reviewer_text"])
@@ -842,6 +899,7 @@ def format_turn_one_context(task_root: Path, role: str) -> str:
     sections = [
         "Canonical council files for this task:",
         f"- {paths['task']}",
+        f"- {paths['contract']}",
         f"- {paths['agents']}",
         f"- {role_path}",
         "",
@@ -853,6 +911,9 @@ def format_turn_one_context(task_root: Path, role: str) -> str:
         "",
         f"Current plan from {paths['task']}:",
         paths["task"].read_text(encoding="utf-8").strip(),
+        "",
+        f"Definition of done from {paths['contract']}:",
+        paths["contract"].read_text(encoding="utf-8").strip(),
     ]
     return "\n".join(sections).rstrip()
 
@@ -864,6 +925,7 @@ def format_later_turn_context(task_root: Path, role: str) -> str:
         f"""\
         If you need current guidance or want to see whether the task changed since your last turn, inspect these canonical files directly:
         - {paths["task"]}
+        - {paths["contract"]}
         - {paths["agents"]}
         - {role_path}
         
@@ -914,6 +976,12 @@ def build_generator_turn_prompt(
         "When the implementation is complete, write exactly these files:\n"
         f"- {turn_dir / 'generator.md'}\n"
         f"- {turn_dir / 'generator.status.json'}\n\n"
+        "In `generator.md`, include at minimum:\n"
+        "- What changed\n"
+        "- Why those changes move the code toward satisfying `contract.md`\n"
+        "- Verification performed\n"
+        "- Remaining contract items not yet satisfied\n"
+        "- Known risks or blockers\n\n"
         "The status JSON must be exactly this shape:\n"
         '{"result":"implemented|no_changes_needed|blocked|needs_human","summary":"short string","changed_files":["relative/path"],"commit_sha":"required when implemented","compare_base_sha":"required when implemented","branch":"required when implemented","human_message":"required when needs_human"}'
     )
@@ -962,6 +1030,12 @@ def build_reviewer_turn_prompt(
             "When the review is complete, write exactly these files:\n"
             f"- {turn_dir / 'reviewer.md'}\n"
             f"- {turn_dir / 'reviewer.status.json'}\n\n"
+            "In `reviewer.md`, include at minimum:\n"
+            "- Verdict summary\n"
+            "- Contract checklist copied from `contract.md`, using `[x]` and `[ ]`\n"
+            "- Blocking issues\n"
+            "- Verification performed\n"
+            "- Residual risks or follow-up notes\n\n"
             "The status JSON must be exactly this shape:\n"
             '{"verdict":"approved|changes_requested|blocked|needs_human","summary":"short string","blocking_issues":["issue"],"reviewed_commit_sha":"required for approved or changes_requested","human_message":"required when needs_human"}',
             "Use `approved` only when no blocking issues remain. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers. Use `needs_human` when the plan or instructions themselves require user clarification.",
@@ -1349,7 +1423,6 @@ def start_run(args: argparse.Namespace) -> int:
         print(f"run_dir: {run_dir}")
         if git_state and git_state.get("enabled"):
             print(f"git branch: {git_state['current_branch']}")
-            print(f"git upstream: {git_state['upstream_ref']}")
             print(f"git base_commit: {git_state['base_commit_sha']}")
         print(f"generator tmux: {generator_session}")
         print(f"reviewer tmux: {reviewer_session}")
@@ -1401,6 +1474,7 @@ def init_task(args: argparse.Namespace) -> int:
     print(f"task_root: {task_root}")
     print(f"config: {config_path_for(repo_root)}")
     print(f"task: {task_root / 'task.md'}")
+    print(f"contract: {task_root / 'contract.md'}")
     print(f"agents: {task_root / 'AGENTS.md'}")
     print(f"generator: {task_root / 'generator.instructions.md'}")
     print(f"reviewer: {task_root / 'reviewer.instructions.md'}")

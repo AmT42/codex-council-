@@ -26,6 +26,7 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
 /path/to/target-repo/.codex-council/config.toml
 /path/to/target-repo/.codex-council/.gitignore
 /path/to/target-repo/.codex-council/my-task/task.md
+/path/to/target-repo/.codex-council/my-task/contract.md
 /path/to/target-repo/.codex-council/my-task/AGENTS.md
 /path/to/target-repo/.codex-council/my-task/generator.instructions.md
 /path/to/target-repo/.codex-council/my-task/reviewer.instructions.md
@@ -57,7 +58,7 @@ The supervisor will:
 - resolve the target directory to its git root by default
 - refuse to start on a dirty repo or detached HEAD
 - launch two real `codex` TUIs in `tmux` inside that target repo
-- build each turn prompt from `.codex-council/<task_name>/task.md`, `AGENTS.md`, and the role-specific instruction file
+- build each turn prompt from `.codex-council/<task_name>/task.md`, `contract.md`, `AGENTS.md`, and the role-specific instruction file
 - inline the canonical task files on turn 1, then only reference their canonical paths on later turns so the agents can inspect the current files directly and use git to understand changes between turns
 - advance turns only when the required artifact pair exists and validates
 - pause when generator or reviewer emits `needs_human`
@@ -76,6 +77,7 @@ Important:
 - the authoritative control signal is only the artifact pair for the role
 - generator is expected to commit on the current branch for implemented turns before writing final artifacts
 - reviewer is expected to use git as the primary source of what changed
+- `contract.md` is the canonical definition of done; approval means the contract checklist is satisfied
 - generator must write `generator.md` and `generator.status.json`
 - reviewer must write `reviewer.md` and `reviewer.status.json`
 - `raw_final_output.md` is trace-only and is captured only after valid final artifacts exist

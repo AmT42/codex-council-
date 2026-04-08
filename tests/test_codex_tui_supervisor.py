@@ -181,6 +181,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertTrue((repo_root / ".codex-council" / "config.toml").exists())
             self.assertTrue((repo_root / ".codex-council" / ".gitignore").exists())
             self.assertTrue((task_root / "task.md").exists())
+            self.assertTrue((task_root / "contract.md").exists())
             self.assertTrue((task_root / "AGENTS.md").exists())
             self.assertTrue((task_root / "generator.instructions.md").exists())
             self.assertTrue((task_root / "reviewer.instructions.md").exists())
@@ -197,8 +198,9 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
             missing = MODULE.missing_task_files(task_root)
-            self.assertEqual(len(missing), 4)
+            self.assertEqual(len(missing), 5)
             self.assertTrue(any(path.name == "task.md" for path in missing))
+            self.assertTrue(any(path.name == "contract.md" for path in missing))
 
     def test_build_codex_command_includes_configured_flags(self) -> None:
         repo_root = Path("/repo")
@@ -223,12 +225,14 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             run_dir = Path(tmp_dir) / "task" / "runs" / "run-1"
             materials = {
                 "task_text": "Do the task.",
+                "contract_text": "- [ ] Done",
                 "agents_text": "Shared rules.",
                 "generator_text": "Generator rules.",
                 "reviewer_text": "Reviewer rules.",
             }
             turn_dir = MODULE.prepare_turn(run_dir, 1, materials)
             self.assertEqual((turn_dir / "inputs" / "task.md").read_text(encoding="utf-8").strip(), "Do the task.")
+            self.assertEqual((turn_dir / "inputs" / "contract.md").read_text(encoding="utf-8").strip(), "- [ ] Done")
             self.assertEqual((turn_dir / "inputs" / "AGENTS.md").read_text(encoding="utf-8").strip(), "Shared rules.")
 
     def test_build_generator_turn_prompt_includes_task_files_and_not_supervisor_language(self) -> None:
@@ -237,6 +241,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             turn_dir = Path(tmp_dir) / "turns" / "0001"
             task_root.mkdir(parents=True)
             (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "contract.md").write_text("- [ ] Contract item", encoding="utf-8")
             (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
             (task_root / "generator.instructions.md").write_text("Generator additions.", encoding="utf-8")
             prompt = MODULE.build_generator_turn_prompt(
@@ -251,9 +256,12 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("Shared rules.", prompt)
             self.assertIn("Generator additions.", prompt)
             self.assertIn("Implement feature.", prompt)
+            self.assertIn("Contract item", prompt)
             self.assertNotIn("supervisor controls turn order", prompt.lower())
             self.assertIn("needs_human", prompt)
             self.assertNotIn("stop and wait for further instructions", prompt.lower())
+            self.assertIn("Why those changes move the code toward satisfying `contract.md`", prompt)
+            self.assertIn("Verification performed", prompt)
 
     def test_build_generator_turn_prompt_later_turn_references_paths_not_inlined_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -263,6 +271,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             task_root.mkdir(parents=True)
             previous_turn_dir.mkdir(parents=True)
             (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "contract.md").write_text("- [ ] Contract item", encoding="utf-8")
             (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
             (task_root / "generator.instructions.md").write_text("Generator additions.", encoding="utf-8")
             (previous_turn_dir / "reviewer.md").write_text("Review text", encoding="utf-8")
@@ -277,6 +286,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 inline_context=False,
             )
             self.assertIn(str(task_root / "task.md"), prompt)
+            self.assertIn(str(task_root / "contract.md"), prompt)
             self.assertNotIn("Shared rules.", prompt)
             self.assertNotIn("Generator additions.", prompt)
 
@@ -286,6 +296,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             turn_dir = Path(tmp_dir) / "turns" / "0001"
             task_root.mkdir(parents=True)
             (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "contract.md").write_text("- [ ] Contract item", encoding="utf-8")
             (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
             (task_root / "reviewer.instructions.md").write_text("Reviewer additions.", encoding="utf-8")
             prompt = MODULE.build_reviewer_turn_prompt(
@@ -300,6 +311,10 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("changes_requested", prompt)
             self.assertIn("needs_human", prompt)
             self.assertIn("Use git as the primary source of what changed.", prompt)
+            self.assertIn("contract.md", prompt)
+            self.assertIn("Contract checklist copied from `contract.md`", prompt)
+            self.assertIn("[x]", prompt)
+            self.assertIn("[ ]", prompt)
 
     def test_wait_for_role_artifacts_returns_valid_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
