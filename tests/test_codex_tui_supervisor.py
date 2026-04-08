@@ -153,7 +153,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 MODULE.git_preflight(repo_root)
 
-    def test_git_preflight_rejects_missing_upstream(self) -> None:
+    def test_git_preflight_allows_branch_without_upstream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir) / "repo"
             repo_root.mkdir()
@@ -163,8 +163,9 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             (repo_root / "file.txt").write_text("x", encoding="utf-8")
             subprocess.run(["git", "add", "file.txt"], cwd=repo_root, check=True, capture_output=True, text=True)
             subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
-            with self.assertRaises(SystemExit):
-                MODULE.git_preflight(repo_root)
+            state = MODULE.git_preflight(repo_root)
+            self.assertEqual(state["current_branch"], "master")
+            self.assertIsNotNone(state["base_commit_sha"])
 
     def test_scaffold_task_root_creates_expected_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

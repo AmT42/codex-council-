@@ -55,7 +55,7 @@ Every execution creates a fresh run under:
 The supervisor will:
 
 - resolve the target directory to its git root by default
-- refuse to start on a dirty repo, detached HEAD, or a branch with no configured upstream
+- refuse to start on a dirty repo or detached HEAD
 - launch two real `codex` TUIs in `tmux` inside that target repo
 - build each turn prompt from `.codex-council/<task_name>/task.md`, `AGENTS.md`, and the role-specific instruction file
 - inline the canonical task files on turn 1, then only reference their canonical paths on later turns so the agents can inspect the current files directly and use git to understand changes between turns
@@ -74,7 +74,7 @@ Important:
 
 - watch the sessions, but do not type into them unless you intentionally want to override the council
 - the authoritative control signal is only the artifact pair for the role
-- generator is expected to commit and push on the current branch for implemented turns before writing final artifacts
+- generator is expected to commit on the current branch for implemented turns before writing final artifacts
 - reviewer is expected to use git as the primary source of what changed
 - generator must write `generator.md` and `generator.status.json`
 - reviewer must write `reviewer.md` and `reviewer.status.json`

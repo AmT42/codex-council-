@@ -280,21 +280,9 @@ def git_preflight(repo_root: Path) -> dict:
         raise SystemExit(f"{repo_root} has no commits yet. Create an initial commit before starting the council.")
     base_commit_sha = head_proc.stdout.strip()
 
-    upstream_proc = subprocess.run(
-        ["git", "-C", str(repo_root), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-        text=True,
-        capture_output=True,
-    )
-    if upstream_proc.returncode != 0 or not upstream_proc.stdout.strip():
-        raise SystemExit(
-            f"{repo_root} current branch `{current_branch}` has no upstream configured. Configure upstream before starting the council."
-        )
-    upstream_ref = upstream_proc.stdout.strip()
-
     return {
         "enabled": True,
         "current_branch": current_branch,
-        "upstream_ref": upstream_ref,
         "base_commit_sha": base_commit_sha,
         "last_generator_commit_sha": None,
     }
@@ -911,10 +899,9 @@ def build_generator_turn_prompt(
         sections.append(
             textwrap.dedent(
                 f"""\
-                This run is operating on git branch `{git_state["current_branch"]}` with upstream `{git_state["upstream_ref"]}`.
+                This run is operating on git branch `{git_state["current_branch"]}`.
                 If you implement code changes in this turn:
                 - commit them on the current branch with message `council({task_name}): turn {turn_name(turn_number)}`
-                - push the branch upstream before writing final artifacts
                 - report `commit_sha`, `compare_base_sha`, and `branch` in `generator.status.json`
 
                 For turn {turn_name(turn_number)}, `compare_base_sha` must be:
