@@ -85,6 +85,23 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertIn("Implement feature X.", text)
         self.assertIn("iteration 2", text)
 
+    def test_extract_last_tmux_slice_uses_last_two_prompts(self) -> None:
+        pane = "\n".join(
+            [
+                "header",
+                "› old prompt",
+                "",
+                "old output",
+                "› current prompt",
+                "",
+                "last output line 1",
+                "last output line 2",
+                "",
+            ]
+        )
+        result = MODULE.extract_last_tmux_slice(pane)
+        self.assertEqual(result, "old output\n")
+
     def test_find_matching_new_tui_session_file_uses_prompt_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             session_root = Path(tmp_dir)

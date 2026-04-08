@@ -40,6 +40,7 @@ Important:
 - the supervisor tracks real TUI sessions from `~/.codex/sessions/...`, not from `~/.codex/session_index.jsonl`
 - there is no separate "ready and wait" bootstrap turn anymore
 - the actual go/no-go signal is the artifact pair for the role: once both files exist and the status JSON validates, the supervisor moves on
+- for traceability, the supervisor also captures the last tmux slice into `turns/<turn>/<role>/raw_final_output.md`
 
 Reviewer stop conditions are structured, not guessed from prose:
 

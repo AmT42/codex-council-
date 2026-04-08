@@ -19,6 +19,7 @@ GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked"}
 REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked"}
 TMUX_PANE_POLL_SECONDS = 0.5
 TMUX_PASTE_SETTLE_SECONDS = 0.1
+TMUX_CAPTURE_HISTORY_LINES = 1000
 SESSION_POLL_SECONDS = 0.5
 
 
@@ -146,6 +147,42 @@ def tmux_capture_pane(name: str) -> str:
     if proc.returncode != 0:
         return f"[capture failed for {name}]\n{proc.stderr.strip()}\n"
     return proc.stdout
+
+
+def tmux_capture_joined_pane(name: str, history_lines: int = TMUX_CAPTURE_HISTORY_LINES) -> str:
+    proc = subprocess.run(
+        ["tmux", "capture-pane", "-pJ", "-S", f"-{history_lines}", "-t", name],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return f"[capture failed for {name}]\n{proc.stderr.strip()}\n"
+    return proc.stdout
+
+
+def extract_last_tmux_slice(pane_text: str) -> str:
+    lines = pane_text.splitlines()
+    prompt_lines = [idx for idx, line in enumerate(lines) if line.lstrip().startswith("› ")]
+    if len(prompt_lines) >= 2:
+        start = prompt_lines[-2] + 1
+        end = prompt_lines[-1]
+    elif len(prompt_lines) == 1:
+        start = prompt_lines[-1] + 1
+        end = len(lines)
+    else:
+        start = 0
+        end = len(lines)
+
+    snippet = lines[start:end]
+    while snippet and not snippet[0].strip():
+        snippet.pop(0)
+    while snippet and not snippet[-1].strip():
+        snippet.pop()
+    return "\n".join(snippet).rstrip() + ("\n" if snippet else "")
+
+
+def capture_last_tmux_slice(name: str) -> str:
+    return extract_last_tmux_slice(tmux_capture_joined_pane(name))
 
 
 def pane_shows_prompt(pane_text: str) -> bool:
@@ -609,6 +646,13 @@ def write_final_message_artifact(
     write_text(turn_dir(run_dir, turn_number) / f"{role}.final_message.md", message)
 
 
+def write_raw_final_output_artifact(run_dir: Path, turn_number: int, role: str, tmux_name: str) -> None:
+    write_text(
+        turn_dir(run_dir, turn_number) / role / "raw_final_output.md",
+        capture_last_tmux_slice(tmux_name),
+    )
+
+
 def prepare_turn(run_dir: Path, turn_number: int, original_task: str) -> Path:
     current = turn_dir(run_dir, turn_number)
     ensure_dir(current)
@@ -829,6 +873,12 @@ def supervisor_loop(run_dir: Path, state: dict, original_task: str) -> None:
             "generator",
             generator_artifact_path.read_text(encoding="utf-8"),
         )
+        write_raw_final_output_artifact(
+            run_dir,
+            turn_number,
+            "generator",
+            state["roles"]["generator"]["tmux_session"],
+        )
         if generator_status["result"] == "blocked":
             state["status"] = "blocked"
             state["stop_reason"] = generator_status["summary"]
@@ -869,6 +919,12 @@ def supervisor_loop(run_dir: Path, state: dict, original_task: str) -> None:
             turn_number,
             "reviewer",
             reviewer_artifact_path.read_text(encoding="utf-8"),
+        )
+        write_raw_final_output_artifact(
+            run_dir,
+            turn_number,
+            "reviewer",
+            state["roles"]["reviewer"]["tmux_session"],
         )
 
         if reviewer_status["verdict"] == "approved":
