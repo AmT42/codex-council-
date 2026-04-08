@@ -1,46 +1,80 @@
-# Codex Handoff
+# Codex Council
 
-This repo contains a small coordinator for a sequential Codex generator/reviewer loop.
+This repo contains local supervisors for a sequential generator/reviewer Codex council.
 
 ## Real TUI Mode
 
-If you want two actual `codex` TUIs that you can watch in separate terminals, use the tmux-based supervisor:
+The TUI supervisor now works against a target repository and stores its task workspace inside that repository.
+
+Primary usage:
 
 ```bash
-python3 scripts/codex_tui_supervisor.py start \
-  --task-file /absolute/path/to/task.md \
-  --generator-prompt-file prompts/generator.txt \
-  --reviewer-prompt-file prompts/reviewer.txt
+cd /path/to/target-repo
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task
+```
+
+Or, from anywhere:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
+  --dir /path/to/target-repo
+```
+
+`init` scaffolds:
+
+```text
+/path/to/target-repo/.codex-council/config.toml
+/path/to/target-repo/.codex-council/.gitignore
+/path/to/target-repo/.codex-council/my-task/task.md
+/path/to/target-repo/.codex-council/my-task/AGENTS.md
+/path/to/target-repo/.codex-council/my-task/generator.instructions.md
+/path/to/target-repo/.codex-council/my-task/reviewer.instructions.md
+```
+
+If you already know the task brief, you can seed it during init:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
+  --dir /path/to/target-repo \
+  --task "Implement feature X"
+```
+
+Then edit the scaffolded files as needed and start the council:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
+  --dir /path/to/target-repo
+```
+
+Every execution creates a fresh run under:
+
+```text
+.codex-council/<task_name>/runs/<run_id>/
 ```
 
 The supervisor will:
 
-- create a run folder under `harness/runs/<run_id>/`
-- launch two real `codex --no-alt-screen` sessions in tmux and wait until both are ready for input
-- send the first real task to generator as the generator's first prompt
-- keep reviewer idle until there is generator output to review
-- send turn prompts sequentially
-- advance turns from filesystem artifacts, not from Codex internal session events
+- resolve the target directory to its git root by default
+- launch two real `codex` TUIs in `tmux` inside that target repo
+- build each turn prompt from `.codex-council/<task_name>/task.md`, `AGENTS.md`, and the role-specific instruction file
+- advance turns only when the required artifact pair exists and validates
 - stop when reviewer writes `{"verdict":"approved",...}`, `{"verdict":"blocked",...}`, or max turns is reached
 
 Attach from two terminals with the commands printed by `start`, for example:
 
 ```bash
-tmux attach -t codex-generator-<run_id>
-tmux attach -t codex-reviewer-<run_id>
+tmux attach -t codex-generator-my-task-<run_id>
+tmux attach -t codex-reviewer-my-task-<run_id>
 ```
 
 Important:
 
-- watch the sessions, but do not type into them unless you intentionally want to override the supervisor
-- both `tmux attach` targets should exist immediately after `start` prints them
-- the structured turn artifacts are written under `harness/runs/<run_id>/turns/0001/`, `0002/`, and so on
+- watch the sessions, but do not type into them unless you intentionally want to override the council
+- the authoritative control signal is only the artifact pair for the role
 - generator must write `generator.md` and `generator.status.json`
 - reviewer must write `reviewer.md` and `reviewer.status.json`
-- the supervisor tracks real TUI sessions from `~/.codex/sessions/...`, not from `~/.codex/session_index.jsonl`
-- there is no separate "ready and wait" bootstrap turn anymore
-- the actual go/no-go signal is the artifact pair for the role: once both files exist and the status JSON validates, the supervisor moves on
-- for traceability, the supervisor also captures the last tmux slice into `turns/<turn>/<role>/raw_final_output.md`
+- `raw_final_output.md` is trace-only and is captured only after valid final artifacts exist
+- `.codex-council/<task_name>/AGENTS.md` is injected into prompts as a council brief; it does not automatically scope repo-root edits through Codex AGENTS semantics
 
 Reviewer stop conditions are structured, not guessed from prose:
 
@@ -48,17 +82,22 @@ Reviewer stop conditions are structured, not guessed from prose:
 {"verdict":"approved","summary":"No blocking issues remain.","blocking_issues":[]}
 ```
 
-You can inspect the run state with:
+Inspect the latest run state:
 
 ```bash
-python3 scripts/codex_tui_supervisor.py status <run_id>
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task \
+  --dir /path/to/target-repo
 ```
 
-If bootstrap or a turn times out, the supervisor keeps the tmux sessions alive and writes diagnostics under:
+Or a specific run:
 
-```text
-harness/runs/<run_id>/diagnostics/
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task \
+  --dir /path/to/target-repo \
+  --run-id 20260408-123456-abcdef
 ```
+
+Generated runtime state and traces live under the task run tree and are ignored by `.codex-council/.gitignore`.
 
 ## Headless Mode
 

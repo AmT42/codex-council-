@@ -3,33 +3,101 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import tempfile
 import textwrap
 import time
+import tomllib
 import uuid
 
 
-RUNS_ROOT = Path("harness/runs")
-SESSION_ROOT = Path.home() / ".codex" / "sessions"
+COUNCIL_DIRNAME = ".codex-council"
 GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked"}
 REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked"}
 TMUX_PANE_POLL_SECONDS = 0.5
 TMUX_PASTE_SETTLE_SECONDS = 0.1
 TMUX_CAPTURE_HISTORY_LINES = 1000
-SESSION_POLL_SECONDS = 0.5
+ROLE_ARTIFACT_POLL_SECONDS = 1.0
+TASK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
+DEFAULT_COUNCIL_GITIGNORE = textwrap.dedent(
+    """\
+    # Generated council runtime data
+    */runs/
+    """
+)
 
-@dataclass
-class SessionSummary:
-    session_file: Path
-    thread_id: str | None
-    cwd: str | None
-    originator: str | None
-    first_user_message: str
+DEFAULT_CONFIG_TOML = textwrap.dedent(
+    """\
+    [codex]
+    model = "gpt-5.4"
+    model_reasoning_effort = "xhigh"
+    dangerously_bypass_approvals_and_sandbox = true
+    no_alt_screen = true
+
+    [council]
+    max_turns = 6
+    launch_timeout_seconds = 60
+    turn_timeout_seconds = 1800
+    require_git = true
+    """
+)
+
+DEFAULT_TASK_PLACEHOLDER = textwrap.dedent(
+    """\
+    Describe the task here.
+
+    Include:
+    - the intended outcome
+    - acceptance criteria
+    - constraints or non-goals
+    - any relevant files, endpoints, or UI flows
+    """
+)
+
+DEFAULT_COUNCIL_BRIEF = textwrap.dedent(
+    """\
+    # Council Brief
+
+    This file is injected into the generator and reviewer prompts for this task.
+    It does not automatically scope repo-root edits through Codex AGENTS semantics.
+
+    ## Shared expectations
+    - Respect the existing architecture and coding style unless the task explicitly changes them.
+    - Prefer minimal, coherent changes over broad rewrites.
+    - Keep behavior understandable and maintainable.
+    - Use the task brief plus role-specific instructions as the source of truth for this council run.
+    """
+)
+
+DEFAULT_GENERATOR_INSTRUCTIONS = textwrap.dedent(
+    """\
+    # Generator Instructions
+
+    - Resolve root cause rather than symptoms.
+    - Do not introduce unnecessary complexity or tech debt.
+    - Keep diffs minimal and aligned with the existing codebase style.
+    - Avoid speculative refactors that are not needed for the task.
+    - Add or update tests when they materially reduce risk.
+    - Do not leave partial work; make the implementation coherent and runnable.
+    """
+)
+
+DEFAULT_REVIEWER_INSTRUCTIONS = textwrap.dedent(
+    """\
+    # Reviewer Instructions
+
+    - Verify the implementation matches the task intent and council brief.
+    - Look for correctness bugs, regressions, security issues, migration/data-loss risk, and performance traps.
+    - Check for missing tests or weak verification where the change is risky.
+    - Prefer concrete blocking issues over vague style feedback.
+    - Use `approved` only when no blocking issues remain.
+    """
+)
 
 
 class SupervisorRuntimeError(RuntimeError):
@@ -70,22 +138,16 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def read_text_arg(value: str | None, file_path: str | None, default: str = "") -> str:
-    if value and file_path:
-        raise SystemExit("pass either a literal value or a file, not both")
-    if file_path:
-        path = Path(file_path)
-        if not path.exists():
-            raise SystemExit(f"missing file: {file_path}")
-        return path.read_text(encoding="utf-8")
-    if value is not None:
-        return value
-    return default
-
-
 def write_text(path: Path, text: str) -> None:
     ensure_dir(path.parent)
     path.write_text(text.rstrip() + "\n", encoding="utf-8")
+
+
+def write_if_missing(path: Path, text: str) -> bool:
+    if path.exists():
+        return False
+    write_text(path, text)
+    return True
 
 
 def run_subprocess(
@@ -100,6 +162,243 @@ def run_subprocess(
     )
 
 
+def git_root_for(path: Path) -> Path | None:
+    proc = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    return Path(proc.stdout.strip()).resolve()
+
+
+def coerce_str(value, default: str, field_name: str) -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise SystemExit(f"invalid config value for {field_name}: expected string")
+    return value
+
+
+def coerce_bool(value, default: bool, field_name: str) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise SystemExit(f"invalid config value for {field_name}: expected boolean")
+    return value
+
+
+def coerce_int(value, default: int, field_name: str) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, int):
+        raise SystemExit(f"invalid config value for {field_name}: expected integer")
+    return value
+
+
+def read_text_arg(value: str | None, file_path: str | None, default: str = "") -> str:
+    if value and file_path:
+        raise SystemExit("pass either a literal value or a file, not both")
+    if file_path:
+        path = Path(file_path)
+        if not path.exists():
+            raise SystemExit(f"missing file: {file_path}")
+        return path.read_text(encoding="utf-8")
+    if value is not None:
+        return value
+    return default
+
+
+def validate_task_name(task_name: str) -> str:
+    if not TASK_NAME_RE.fullmatch(task_name):
+        raise SystemExit(
+            "task_name must match [A-Za-z0-9._-]+ so it can safely map to a directory name"
+        )
+    return task_name
+
+
+def council_root_for(repo_root: Path) -> Path:
+    return repo_root / COUNCIL_DIRNAME
+
+
+def task_root_for(repo_root: Path, task_name: str) -> Path:
+    return council_root_for(repo_root) / task_name
+
+
+def config_path_for(repo_root: Path) -> Path:
+    return council_root_for(repo_root) / "config.toml"
+
+
+def council_gitignore_path_for(repo_root: Path) -> Path:
+    return council_root_for(repo_root) / ".gitignore"
+
+
+def latest_run_dir(task_root: Path) -> Path:
+    runs_root = task_root / "runs"
+    if not runs_root.exists():
+        raise SystemExit(f"missing runs directory: {runs_root}")
+    candidates = sorted(path for path in runs_root.iterdir() if path.is_dir())
+    if not candidates:
+        raise SystemExit(f"no runs found for task: {task_root.name}")
+    return candidates[-1]
+
+
+def required_task_files(task_root: Path) -> list[Path]:
+    return [
+        task_root / "task.md",
+        task_root / "AGENTS.md",
+        task_root / "generator.instructions.md",
+        task_root / "reviewer.instructions.md",
+    ]
+
+
+def missing_task_files(task_root: Path) -> list[Path]:
+    return [path for path in required_task_files(task_root) if not path.exists()]
+
+
+def scaffold_council_root(repo_root: Path) -> None:
+    council_root = council_root_for(repo_root)
+    ensure_dir(council_root)
+    write_if_missing(council_gitignore_path_for(repo_root), DEFAULT_COUNCIL_GITIGNORE)
+    write_if_missing(config_path_for(repo_root), DEFAULT_CONFIG_TOML)
+
+
+def scaffold_task_root(
+    task_root: Path,
+    *,
+    initial_task_text: str | None,
+) -> dict:
+    ensure_dir(task_root)
+    task_created = write_if_missing(
+        task_root / "task.md",
+        initial_task_text.strip() if initial_task_text else DEFAULT_TASK_PLACEHOLDER,
+    )
+    agents_created = write_if_missing(task_root / "AGENTS.md", DEFAULT_COUNCIL_BRIEF)
+    generator_created = write_if_missing(
+        task_root / "generator.instructions.md", DEFAULT_GENERATOR_INSTRUCTIONS
+    )
+    reviewer_created = write_if_missing(
+        task_root / "reviewer.instructions.md", DEFAULT_REVIEWER_INSTRUCTIONS
+    )
+    return {
+        "task_created": task_created,
+        "task_needs_edit": task_created and not initial_task_text,
+        "agents_created": agents_created,
+        "generator_created": generator_created,
+        "reviewer_created": reviewer_created,
+    }
+
+
+def ensure_task_workspace_exists(task_root: Path) -> None:
+    missing = missing_task_files(task_root)
+    if missing:
+        missing_lines = "\n".join(f"- {path}" for path in missing)
+        raise SystemExit(
+            f"task workspace is not initialized for {task_root.name}.\n"
+            f"Run `init {task_root.name}` first.\n"
+            f"Missing files:\n{missing_lines}"
+        )
+
+
+def load_council_config(repo_root: Path) -> dict:
+    config_path = config_path_for(repo_root)
+    if not config_path.exists():
+        write_text(config_path, DEFAULT_CONFIG_TOML)
+    try:
+        data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"invalid TOML in {config_path}: {exc}") from exc
+
+    codex_cfg = data.get("codex", {})
+    council_cfg = data.get("council", {})
+
+    return {
+        "codex": {
+            "dangerously_bypass_approvals_and_sandbox": coerce_bool(
+                codex_cfg.get("dangerously_bypass_approvals_and_sandbox"),
+                True,
+                "codex.dangerously_bypass_approvals_and_sandbox",
+            ),
+            "model": coerce_str(codex_cfg.get("model"), "gpt-5.4", "codex.model"),
+            "model_reasoning_effort": coerce_str(
+                codex_cfg.get("model_reasoning_effort"),
+                "xhigh",
+                "codex.model_reasoning_effort",
+            ),
+            "no_alt_screen": coerce_bool(
+                codex_cfg.get("no_alt_screen"),
+                True,
+                "codex.no_alt_screen",
+            ),
+        },
+        "council": {
+            "launch_timeout_seconds": coerce_int(
+                council_cfg.get("launch_timeout_seconds"),
+                60,
+                "council.launch_timeout_seconds",
+            ),
+            "max_turns": coerce_int(
+                council_cfg.get("max_turns"),
+                6,
+                "council.max_turns",
+            ),
+            "require_git": coerce_bool(
+                council_cfg.get("require_git"),
+                True,
+                "council.require_git",
+            ),
+            "turn_timeout_seconds": coerce_int(
+                council_cfg.get("turn_timeout_seconds"),
+                1800,
+                "council.turn_timeout_seconds",
+            ),
+        },
+    }
+
+
+def resolve_target_root(target: Path, *, allow_non_git: bool) -> tuple[Path, bool]:
+    target = target.resolve()
+    git_root = git_root_for(target)
+    if git_root is not None:
+        return git_root, True
+
+    if allow_non_git:
+        return target, False
+
+    config_path = target / COUNCIL_DIRNAME / "config.toml"
+    if config_path.exists():
+        try:
+            data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError:
+            raise SystemExit(f"invalid TOML in {config_path}") from None
+        council_cfg = data.get("council", {})
+        require_git = coerce_bool(
+            council_cfg.get("require_git"),
+            True,
+            "council.require_git",
+        )
+        if not require_git:
+            return target, False
+
+    raise SystemExit(
+        f"{target} is not inside a git worktree. Use --allow-non-git to target a plain directory."
+    )
+
+
+def build_codex_command(repo_root: Path, codex_cfg: dict) -> list[str]:
+    cmd = ["codex", "-C", str(repo_root)]
+    if codex_cfg["model"]:
+        cmd.extend(["--model", codex_cfg["model"]])
+    if codex_cfg["model_reasoning_effort"]:
+        cmd.extend(["-c", f'model_reasoning_effort="{codex_cfg["model_reasoning_effort"]}"'])
+    if codex_cfg["dangerously_bypass_approvals_and_sandbox"]:
+        cmd.append("--dangerously-bypass-approvals-and-sandbox")
+    if codex_cfg["no_alt_screen"]:
+        cmd.append("--no-alt-screen")
+    return cmd
+
+
 def tmux_session_exists(name: str) -> bool:
     proc = subprocess.run(
         ["tmux", "has-session", "-t", name],
@@ -109,7 +408,7 @@ def tmux_session_exists(name: str) -> bool:
     return proc.returncode == 0
 
 
-def tmux_new_session(name: str, workspace_root: Path, *, role: str) -> None:
+def tmux_new_session(name: str, workspace_root: Path, command: list[str], *, role: str) -> None:
     if tmux_session_exists(name):
         raise SystemExit(f"tmux session already exists: {name}")
     try:
@@ -122,7 +421,7 @@ def tmux_new_session(name: str, workspace_root: Path, *, role: str) -> None:
                 name,
                 "-c",
                 str(workspace_root),
-                "codex --no-alt-screen",
+                shlex.join(command),
             ]
         )
     except subprocess.CalledProcessError as exc:
@@ -149,7 +448,9 @@ def tmux_capture_pane(name: str) -> str:
     return proc.stdout
 
 
-def tmux_capture_joined_pane(name: str, history_lines: int = TMUX_CAPTURE_HISTORY_LINES) -> str:
+def tmux_capture_joined_pane(
+    name: str, history_lines: int = TMUX_CAPTURE_HISTORY_LINES
+) -> str:
     proc = subprocess.run(
         ["tmux", "capture-pane", "-pJ", "-S", f"-{history_lines}", "-t", name],
         text=True,
@@ -218,7 +519,7 @@ def wait_for_tmux_prompt(
 
 
 def tmux_send_prompt(tmux_name: str, prompt: str, *, phase: str, role: str) -> None:
-    buffer_name = f"codex-supervisor-{uuid.uuid4().hex}"
+    buffer_name = f"codex-council-{uuid.uuid4().hex}"
     try:
         try:
             run_subprocess(
@@ -250,421 +551,40 @@ def tmux_send_prompt(tmux_name: str, prompt: str, *, phase: str, role: str) -> N
         )
 
 
-def list_session_files(session_root: Path = SESSION_ROOT) -> list[Path]:
-    if not session_root.exists():
-        return []
-    return sorted(session_root.rglob("*.jsonl"))
-
-
-def extract_user_message_from_response_item(payload: dict) -> str:
-    if payload.get("type") != "message" or payload.get("role") != "user":
-        return ""
-    texts: list[str] = []
-    for item in payload.get("content", []):
-        if item.get("type") == "input_text":
-            texts.append(item.get("text", ""))
-    return "\n".join(texts).strip()
-
-
-def read_session_summary(session_file: Path) -> SessionSummary:
-    thread_id = None
-    cwd = None
-    originator = None
-    first_user_message = ""
-    for line in session_file.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        record = json.loads(line)
-        record_type = record.get("type")
-        payload = record.get("payload", {})
-        if record_type == "session_meta" and thread_id is None:
-            thread_id = payload.get("id")
-            cwd = payload.get("cwd")
-            originator = payload.get("originator")
-        elif record_type == "event_msg" and payload.get("type") == "user_message":
-            first_user_message = payload.get("message", "").strip()
-            break
-        elif record_type == "response_item":
-            candidate = extract_user_message_from_response_item(payload)
-            if candidate:
-                first_user_message = candidate
-                break
-    return SessionSummary(
-        session_file=session_file,
-        thread_id=thread_id,
-        cwd=cwd,
-        originator=originator,
-        first_user_message=first_user_message,
-    )
-
-
-def build_turn_marker(run_id: str, role: str, turn_number: int) -> str:
-    return f"SUPERVISOR_TURN_MARKER run_id={run_id} role={role} turn={turn_name(turn_number)}"
-
-
-def summarize_session_candidate(summary: SessionSummary) -> dict:
-    return {
-        "session_file": str(summary.session_file),
-        "thread_id": summary.thread_id,
-        "cwd": summary.cwd,
-        "originator": summary.originator,
-        "first_user_message_excerpt": summary.first_user_message[:400],
-    }
-
-
-def session_matches_prompt_marker(
-    summary: SessionSummary,
-    *,
-    workspace_root: Path,
-    prompt_marker: str,
-) -> bool:
-    if not summary.thread_id:
-        return False
-    if summary.cwd != str(workspace_root):
-        return False
-    if summary.originator != "codex-tui":
-        return False
-    if prompt_marker not in summary.first_user_message:
-        return False
-    return True
-
-
-def find_matching_new_tui_session_file(
-    *,
-    session_root: Path,
-    known_files: set[Path],
-    workspace_root: Path,
-    prompt_marker: str,
-) -> tuple[SessionSummary | None, list[dict]]:
-    candidates: list[dict] = []
-    for session_file in list_session_files(session_root):
-        if session_file in known_files:
-            continue
-        summary = read_session_summary(session_file)
-        if session_matches_prompt_marker(
-            summary,
-            workspace_root=workspace_root,
-            prompt_marker=prompt_marker,
-        ):
-            return summary, candidates
-        candidates.append(summarize_session_candidate(summary))
-    return None, candidates
-
-
-def wait_for_new_tui_session_file(
-    *,
-    session_root: Path,
-    known_files: set[Path],
-    workspace_root: Path,
-    prompt_marker: str,
-    timeout_seconds: float,
-    phase: str,
-    role: str,
-) -> SessionSummary:
-    deadline = time.time() + timeout_seconds
-    seen_candidates: dict[str, dict] = {}
-    while time.time() < deadline:
-        match, candidates = find_matching_new_tui_session_file(
-            session_root=session_root,
-            known_files=known_files,
-            workspace_root=workspace_root,
-            prompt_marker=prompt_marker,
-        )
-        for candidate in candidates:
-            seen_candidates[candidate["session_file"]] = candidate
-        if match is not None:
-            return match
-        time.sleep(SESSION_POLL_SECONDS)
-    raise SupervisorRuntimeError(
-        phase,
-        f"timed out waiting for a new Codex TUI session file for {role}",
-        role=role,
-        details={"session_candidates": list(seen_candidates.values())},
-    )
-
-
-def task_complete_events(session_file: Path) -> list[dict]:
-    events: list[dict] = []
-    for line in session_file.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        record = json.loads(line)
-        if record.get("type") != "event_msg":
-            continue
-        payload = record.get("payload", {})
-        if payload.get("type") == "task_complete":
-            events.append(payload)
-    return events
-
-
-def wait_for_task_complete_count(
-    session_file: Path,
-    previous_count: int,
-    timeout_seconds: float,
-    *,
-    phase: str,
-    role: str,
-) -> dict:
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        events = task_complete_events(session_file)
-        if len(events) > previous_count:
-            return events[-1]
-        time.sleep(1.0)
-    raise SupervisorRuntimeError(
-        phase,
-        f"timed out waiting for task completion in {session_file}",
-        role=role,
-        details={"session_file": str(session_file), "previous_count": previous_count},
-    )
-
-
-def require_string(value, field_name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field_name} must be a non-empty string")
-    return value.strip()
-
-
-def require_string_list(value, field_name: str) -> list[str]:
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError(f"{field_name} must be a list of strings")
-    return [item.strip() for item in value]
-
-
-def validate_generator_status(data: dict) -> dict:
-    result = require_string(data.get("result"), "result")
-    if result not in GENERATOR_RESULTS:
-        raise ValueError(f"invalid generator result: {result}")
-    summary = require_string(data.get("summary"), "summary")
-    changed_files = require_string_list(data.get("changed_files", []), "changed_files")
-    return {
-        "result": result,
-        "summary": summary,
-        "changed_files": changed_files,
-    }
-
-
-def validate_reviewer_status(data: dict) -> dict:
-    verdict = require_string(data.get("verdict"), "verdict")
-    if verdict not in REVIEWER_VERDICTS:
-        raise ValueError(f"invalid reviewer verdict: {verdict}")
-    summary = require_string(data.get("summary"), "summary")
-    blocking_issues = require_string_list(
-        data.get("blocking_issues", []), "blocking_issues"
-    )
-    return {
-        "verdict": verdict,
-        "summary": summary,
-        "blocking_issues": blocking_issues,
-    }
-
-
 def turn_name(turn_number: int) -> str:
     return f"{turn_number:04d}"
 
 
-def turn_dir(run_dir: Path, turn_number: int) -> Path:
-    return run_dir / "turns" / turn_name(turn_number)
+def run_id_value() -> str:
+    return time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
 
 
-def build_turn_task(original_task: str, turn_number: int) -> str:
-    if turn_number == 1:
-        return original_task.rstrip()
-    return textwrap.dedent(
-        f"""\
-        Original task:
-
-        {original_task.rstrip()}
-
-        This is iteration {turn_number}. Address the reviewer feedback from the previous turn before doing anything else.
-        """
-    ).rstrip()
+def build_tmux_session_name(task_name: str, role: str, run_id: str) -> str:
+    return f"codex-{role}-{task_name}-{run_id}"
 
 
-def build_generator_protocol(run_dir: Path, base_prompt: str) -> str:
-    return textwrap.dedent(
-        f"""\
-        You are the generator in a two-agent Codex workflow.
-
-        Collaboration root:
-        {run_dir}
-
-        Protocol:
-        - The supervisor controls turn order. Do not poll or loop on your own.
-        - Only act when the supervisor sends you a turn message in this Codex session.
-        - You are the only agent allowed to modify source files.
-        - For each turn N, write:
-          - {run_dir}/turns/NNNN/generator.md
-          - {run_dir}/turns/NNNN/generator.status.json
-        - The status file must be valid JSON with exactly this shape:
-          {{"result":"implemented|no_changes_needed|blocked","summary":"short string","changed_files":["relative/path"]}}
-        - After writing both files, stop and wait for the next supervisor message.
-
-        Base role instructions:
-        {base_prompt.strip()}
-        """
-    ).rstrip()
+def load_task_materials(task_root: Path) -> dict:
+    return {
+        "task_path": task_root / "task.md",
+        "task_text": (task_root / "task.md").read_text(encoding="utf-8").strip(),
+        "agents_path": task_root / "AGENTS.md",
+        "agents_text": (task_root / "AGENTS.md").read_text(encoding="utf-8").strip(),
+        "generator_path": task_root / "generator.instructions.md",
+        "generator_text": (task_root / "generator.instructions.md").read_text(encoding="utf-8").strip(),
+        "reviewer_path": task_root / "reviewer.instructions.md",
+        "reviewer_text": (task_root / "reviewer.instructions.md").read_text(encoding="utf-8").strip(),
+    }
 
 
-def build_reviewer_protocol(run_dir: Path, base_prompt: str) -> str:
-    return textwrap.dedent(
-        f"""\
-        You are the reviewer in a two-agent Codex workflow.
-
-        Collaboration root:
-        {run_dir}
-
-        Protocol:
-        - The supervisor controls turn order. Do not poll or loop on your own.
-        - Only act when the supervisor sends you a review message in this Codex session.
-        - Do not modify source files. Only write review artifacts under the collaboration root.
-        - For each turn N, write:
-          - {run_dir}/turns/NNNN/reviewer.md
-          - {run_dir}/turns/NNNN/reviewer.status.json
-        - The status file must be valid JSON with exactly this shape:
-          {{"verdict":"approved|changes_requested|blocked","summary":"short string","blocking_issues":["issue"]}}
-        - Use verdict "approved" when there are no blocking issues left.
-        - After writing both files, stop and wait for the next supervisor message.
-
-        Base role instructions:
-        {base_prompt.strip()}
-        """
-    ).rstrip()
-
-
-def build_generator_turn_prompt(
-    run_dir: Path,
-    turn_number: int,
-    run_id: str,
-    base_prompt: str,
-    *,
-    include_protocol: bool,
-) -> str:
-    current_turn_dir = turn_dir(run_dir, turn_number)
-    marker = build_turn_marker(run_id, "generator", turn_number)
-    sections: list[str] = []
-    if include_protocol:
-        sections.append(build_generator_protocol(run_dir, base_prompt))
-        sections.append("Your first task is below.")
-        sections.append("")
-    sections.append(
-        textwrap.dedent(
-            f"""\
-            Generator turn {turn_name(turn_number)}.
-
-            Supervisor turn marker:
-            {marker}
-
-            Read:
-            - {current_turn_dir / "task.md"}
-            """
-        ).rstrip()
-    )
-    if turn_number > 1:
-        previous_turn_dir = turn_dir(run_dir, turn_number - 1)
-        sections.append(
-            textwrap.dedent(
-                f"""\
-                - {previous_turn_dir / "reviewer.md"}
-                - {previous_turn_dir / "reviewer.status.json"}
-                """
-            ).rstrip()
-        )
-    sections.append(
-        textwrap.dedent(
-            f"""\
-
-            Apply the required repository changes now.
-
-            Then write:
-            - {current_turn_dir / "generator.md"}
-            - {current_turn_dir / "generator.status.json"}
-
-            The status file must use:
-            {{"result":"implemented|no_changes_needed|blocked","summary":"short string","changed_files":["relative/path"]}}
-
-            After both files are written, stop and wait.
-            """
-        ).rstrip()
-    )
-    return "\n".join(sections).rstrip()
-
-
-def build_reviewer_turn_prompt(
-    run_dir: Path,
-    turn_number: int,
-    run_id: str,
-    base_prompt: str,
-    *,
-    include_protocol: bool,
-) -> str:
-    current_turn_dir = turn_dir(run_dir, turn_number)
-    marker = build_turn_marker(run_id, "reviewer", turn_number)
-    sections: list[str] = []
-    if include_protocol:
-        sections.append(build_reviewer_protocol(run_dir, base_prompt))
-        sections.append("Your first review task is below.")
-        sections.append("")
-    sections.append(
-        textwrap.dedent(
-            f"""\
-            Reviewer turn {turn_name(turn_number)}.
-
-            Supervisor turn marker:
-            {marker}
-
-            Review the current repository state and these files:
-            - {current_turn_dir / "task.md"}
-            - {current_turn_dir / "generator.md"}
-            - {current_turn_dir / "generator.status.json"}
-
-            Then write:
-            - {current_turn_dir / "reviewer.md"}
-            - {current_turn_dir / "reviewer.status.json"}
-
-            The status file must use:
-            {{"verdict":"approved|changes_requested|blocked","summary":"short string","blocking_issues":["issue"]}}
-
-            Use "approved" when no blocking issues remain.
-            Use "changes_requested" when generator work is still required.
-            Use "blocked" only for external blockers.
-
-            After both files are written, stop and wait.
-            """
-        ).rstrip()
-    )
-    return "\n".join(sections).rstrip()
-
-
-def write_prompt_artifact(run_dir: Path, turn_number: int, role: str, prompt: str) -> None:
-    write_text(turn_dir(run_dir, turn_number) / f"supervisor_to_{role}.md", prompt)
-
-
-def write_final_message_artifact(
-    run_dir: Path, turn_number: int, role: str, message: str
-) -> None:
-    write_text(turn_dir(run_dir, turn_number) / f"{role}.final_message.md", message)
-
-
-def write_raw_final_output_artifact(run_dir: Path, turn_number: int, role: str, tmux_name: str) -> None:
-    write_text(
-        turn_dir(run_dir, turn_number) / role / "raw_final_output.md",
-        capture_last_tmux_slice(tmux_name),
-    )
-
-
-def prepare_turn(run_dir: Path, turn_number: int, original_task: str) -> Path:
-    current = turn_dir(run_dir, turn_number)
-    ensure_dir(current)
-    write_text(current / "task.md", build_turn_task(original_task, turn_number))
+def prepare_turn(run_dir: Path, turn_number: int, materials: dict) -> Path:
+    current = run_dir / "turns" / turn_name(turn_number)
+    inputs_dir = current / "inputs"
+    ensure_dir(inputs_dir)
+    write_text(inputs_dir / "task.md", materials["task_text"])
+    write_text(inputs_dir / "AGENTS.md", materials["agents_text"])
+    write_text(inputs_dir / "generator.instructions.md", materials["generator_text"])
+    write_text(inputs_dir / "reviewer.instructions.md", materials["reviewer_text"])
     return current
-
-
-def load_status_file(path: Path, validator) -> dict:
-    if not path.exists():
-        raise FileNotFoundError(f"missing status file: {path}")
-    data = load_json(path)
-    return validator(data)
 
 
 def role_artifact_paths(current_turn_dir: Path, role: str) -> tuple[Path, Path]:
@@ -672,6 +592,13 @@ def role_artifact_paths(current_turn_dir: Path, role: str) -> tuple[Path, Path]:
         current_turn_dir / f"{role}.md",
         current_turn_dir / f"{role}.status.json",
     )
+
+
+def load_status_file(path: Path, validator) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"missing status file: {path}")
+    data = load_json(path)
+    return validator(data)
 
 
 def wait_for_role_artifacts(
@@ -691,7 +618,7 @@ def wait_for_role_artifacts(
                 return artifact_path, status_path, load_status_file(status_path, validator)
             except Exception as exc:
                 last_error = str(exc)
-        time.sleep(1.0)
+        time.sleep(ROLE_ARTIFACT_POLL_SECONDS)
     details = {
         "artifact_path": str(artifact_path),
         "status_path": str(status_path),
@@ -706,35 +633,160 @@ def wait_for_role_artifacts(
     )
 
 
+def validate_generator_status(data: dict) -> dict:
+    result = data.get("result")
+    if not isinstance(result, str) or result not in GENERATOR_RESULTS:
+        raise ValueError(f"invalid generator result: {result}")
+    summary = data.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("generator summary must be a non-empty string")
+    changed_files = data.get("changed_files", [])
+    if not isinstance(changed_files, list) or not all(isinstance(item, str) for item in changed_files):
+        raise ValueError("generator changed_files must be a list of strings")
+    return {
+        "result": result,
+        "summary": summary.strip(),
+        "changed_files": [item.strip() for item in changed_files],
+    }
+
+
+def validate_reviewer_status(data: dict) -> dict:
+    verdict = data.get("verdict")
+    if not isinstance(verdict, str) or verdict not in REVIEWER_VERDICTS:
+        raise ValueError(f"invalid reviewer verdict: {verdict}")
+    summary = data.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("reviewer summary must be a non-empty string")
+    blocking_issues = data.get("blocking_issues", [])
+    if not isinstance(blocking_issues, list) or not all(
+        isinstance(item, str) for item in blocking_issues
+    ):
+        raise ValueError("reviewer blocking_issues must be a list of strings")
+    return {
+        "verdict": verdict,
+        "summary": summary.strip(),
+        "blocking_issues": [item.strip() for item in blocking_issues],
+    }
+
+
+def build_generator_turn_prompt(
+    repo_root: Path,
+    turn_dir: Path,
+    turn_number: int,
+    *,
+    include_council_brief: bool,
+) -> str:
+    inputs_dir = turn_dir / "inputs"
+    sections: list[str] = [f"Repository root:\n{repo_root}"]
+    if include_council_brief:
+        sections.extend(
+            [
+                f"Council brief from {inputs_dir / 'AGENTS.md'}:\n"
+                f"{(inputs_dir / 'AGENTS.md').read_text(encoding='utf-8').strip()}",
+                f"Generator instructions from {inputs_dir / 'generator.instructions.md'}:\n"
+                f"{(inputs_dir / 'generator.instructions.md').read_text(encoding='utf-8').strip()}",
+            ]
+        )
+    sections.extend(
+        [
+            f"Task brief from {inputs_dir / 'task.md'}:\n"
+            f"{(inputs_dir / 'task.md').read_text(encoding='utf-8').strip()}",
+            f"Turn {turn_name(turn_number)}.",
+        ]
+    )
+    if turn_number > 1:
+        previous_turn_dir = turn_dir.parent / turn_name(turn_number - 1)
+        sections.append(
+            "Before making changes, read the previous reviewer artifacts:\n"
+            f"- {previous_turn_dir / 'reviewer.md'}\n"
+            f"- {previous_turn_dir / 'reviewer.status.json'}"
+        )
+    sections.append(
+        "When the implementation is complete, write exactly these files:\n"
+        f"- {turn_dir / 'generator.md'}\n"
+        f"- {turn_dir / 'generator.status.json'}\n\n"
+        "The status JSON must be exactly this shape:\n"
+        '{"result":"implemented|no_changes_needed|blocked","summary":"short string","changed_files":["relative/path"]}'
+    )
+    sections.append("After both files are complete and accurate, stop and wait for further instructions.")
+    return "\n\n".join(sections).rstrip()
+
+
+def build_reviewer_turn_prompt(
+    repo_root: Path,
+    turn_dir: Path,
+    turn_number: int,
+    *,
+    include_council_brief: bool,
+) -> str:
+    inputs_dir = turn_dir / "inputs"
+    sections: list[str] = [f"Repository root:\n{repo_root}"]
+    if include_council_brief:
+        sections.extend(
+            [
+                f"Council brief from {inputs_dir / 'AGENTS.md'}:\n"
+                f"{(inputs_dir / 'AGENTS.md').read_text(encoding='utf-8').strip()}",
+                f"Reviewer instructions from {inputs_dir / 'reviewer.instructions.md'}:\n"
+                f"{(inputs_dir / 'reviewer.instructions.md').read_text(encoding='utf-8').strip()}",
+            ]
+        )
+    sections.extend(
+        [
+            f"Task brief from {inputs_dir / 'task.md'}:\n"
+            f"{(inputs_dir / 'task.md').read_text(encoding='utf-8').strip()}",
+            f"Turn {turn_name(turn_number)}.",
+            "Review the current repository state and these files:\n"
+            f"- {turn_dir / 'generator.md'}\n"
+            f"- {turn_dir / 'generator.status.json'}",
+            "When the review is complete, write exactly these files:\n"
+            f"- {turn_dir / 'reviewer.md'}\n"
+            f"- {turn_dir / 'reviewer.status.json'}\n\n"
+            "The status JSON must be exactly this shape:\n"
+            '{"verdict":"approved|changes_requested|blocked","summary":"short string","blocking_issues":["issue"]}',
+            "Use `approved` only when no blocking issues remain. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers.",
+            "After both files are complete and accurate, stop and wait for further instructions.",
+        ]
+    )
+    return "\n\n".join(sections).rstrip()
+
+
+def write_prompt_artifact(turn_dir: Path, role: str, prompt: str) -> None:
+    write_text(turn_dir / f"supervisor_to_{role}.md", prompt)
+
+
+def write_final_message_artifact(turn_dir: Path, role: str, message: str) -> None:
+    write_text(turn_dir / f"{role}.final_message.md", message)
+
+
+def write_raw_final_output_artifact(turn_dir: Path, role: str, tmux_name: str) -> None:
+    write_text(turn_dir / role / "raw_final_output.md", capture_last_tmux_slice(tmux_name))
+
+
 def create_run_state(
+    *,
+    repo_root: Path,
+    task_root: Path,
+    task_name: str,
     run_id: str,
-    run_dir: Path,
-    workspace_root: Path,
-    max_turns: int,
-    turn_timeout_seconds: float,
-    launch_timeout_seconds: float,
+    council_config: dict,
     generator_session: str,
     reviewer_session: str,
 ) -> dict:
+    run_dir = task_root / "runs" / run_id
     return {
         "created_at": now_ts(),
+        "council_config": council_config,
+        "council_root": str(council_root_for(repo_root)),
         "current_turn": 1,
         "diagnostics_dir": str(run_dir / "diagnostics"),
-        "launch_timeout_seconds": launch_timeout_seconds,
-        "max_turns": max_turns,
+        "repo_root": str(repo_root),
         "roles": {
             "generator": {
-                "codex_thread_id": None,
                 "last_wait_phase": None,
-                "session_file": None,
-                "task_complete_count": 0,
                 "tmux_session": generator_session,
             },
             "reviewer": {
-                "codex_thread_id": None,
                 "last_wait_phase": None,
-                "session_file": None,
-                "task_complete_count": 0,
                 "tmux_session": reviewer_session,
             },
         },
@@ -742,8 +794,8 @@ def create_run_state(
         "run_id": run_id,
         "status": "booting",
         "stop_reason": None,
-        "turn_timeout_seconds": turn_timeout_seconds,
-        "workspace_root": str(workspace_root),
+        "task_name": task_name,
+        "task_root": str(task_root),
     }
 
 
@@ -751,102 +803,72 @@ def save_run_state(run_dir: Path, state: dict) -> None:
     save_json(run_dir / "state.json", state)
 
 
+def write_failure_diagnostics(run_dir: Path, state: dict, error: SupervisorRuntimeError) -> Path:
+    diagnostics_root = Path(state["diagnostics_dir"])
+    ensure_dir(diagnostics_root)
+    failure_dir = diagnostics_root / f"{time.strftime('%Y%m%d-%H%M%S')}-{error.phase}"
+    ensure_dir(failure_dir)
+    save_json(
+        failure_dir / "error.json",
+        {
+            "details": error.details,
+            "message": str(error),
+            "phase": error.phase,
+            "role": error.role,
+            "timestamp": now_ts(),
+        },
+    )
+    save_json(failure_dir / "state_snapshot.json", state)
+    for role in ("generator", "reviewer"):
+        tmux_name = state["roles"][role]["tmux_session"]
+        write_text(failure_dir / f"{role}.pane.txt", tmux_capture_joined_pane(tmux_name))
+    return failure_dir
+
+
 def create_tmux_sessions(run_dir: Path, state: dict) -> None:
-    workspace_root = Path(state["workspace_root"])
+    repo_root = Path(state["repo_root"])
+    codex_command = build_codex_command(repo_root, state["council_config"]["codex"])
     for role in ("generator", "reviewer"):
         role_state = state["roles"][role]
         phase = f"{role}_session_start"
         role_state["last_wait_phase"] = phase
         save_run_state(run_dir, state)
-        tmux_new_session(
-            state["roles"][role]["tmux_session"],
-            workspace_root,
-            role=role,
-        )
+        tmux_new_session(role_state["tmux_session"], repo_root, codex_command, role=role)
     save_run_state(run_dir, state)
 
 
 def wait_for_tmux_sessions_ready(run_dir: Path, state: dict) -> None:
-    launch_timeout_seconds = float(state["launch_timeout_seconds"])
+    launch_timeout_seconds = float(state["council_config"]["council"]["launch_timeout_seconds"])
     for role in ("generator", "reviewer"):
-        phase = f"{role}_tmux_boot"
-        state["roles"][role]["last_wait_phase"] = phase
+        state["roles"][role]["last_wait_phase"] = f"{role}_tmux_boot"
         save_run_state(run_dir, state)
         wait_for_tmux_prompt(
             state["roles"][role]["tmux_session"],
             launch_timeout_seconds,
-            phase=phase,
+            phase=f"{role}_tmux_boot",
             role=role,
         )
 
 
-def wait_for_role_completion(
-    run_dir: Path,
-    state: dict,
-    role: str,
-    timeout_seconds: float,
-    *,
-    phase: str,
-    known_files_before_prompt: set[Path] | None = None,
-) -> str:
-    role_state = state["roles"][role]
-    role_state["last_wait_phase"] = phase
-    save_run_state(run_dir, state)
-    previous_count = int(role_state["task_complete_count"])
-    session_file_value = role_state.get("session_file")
-    session_file: Path
-    if session_file_value:
-        session_file = Path(session_file_value)
-    else:
-        known_files = (
-            known_files_before_prompt
-            if known_files_before_prompt is not None
-            else set(list_session_files(SESSION_ROOT))
-        )
-        prompt_marker = build_turn_marker(state["run_id"], role, state["current_turn"])
-        summary = wait_for_new_tui_session_file(
-            session_root=SESSION_ROOT,
-            known_files=known_files,
-            workspace_root=Path(state["workspace_root"]),
-            prompt_marker=prompt_marker,
-            timeout_seconds=timeout_seconds,
-            phase=phase,
-            role=role,
-        )
-        session_file = summary.session_file
-        role_state["session_file"] = str(session_file)
-        role_state["codex_thread_id"] = summary.thread_id
-        save_run_state(run_dir, state)
-    event = wait_for_task_complete_count(
-        session_file,
-        previous_count=previous_count,
-        timeout_seconds=timeout_seconds,
-        phase=phase,
-        role=role,
-    )
-    role_state["task_complete_count"] = len(task_complete_events(session_file))
-    save_run_state(run_dir, state)
-    return event.get("last_agent_message", "")
+def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
+    repo_root = Path(state["repo_root"])
+    turn_timeout_seconds = float(state["council_config"]["council"]["turn_timeout_seconds"])
 
-
-def supervisor_loop(run_dir: Path, state: dict, original_task: str) -> None:
-    turn_timeout_seconds = float(state["turn_timeout_seconds"])
-    run_id = state["run_id"]
-
-    for turn_number in range(1, int(state["max_turns"]) + 1):
+    for turn_number in range(1, int(state["council_config"]["council"]["max_turns"]) + 1):
         state["current_turn"] = turn_number
-        current_turn_dir = prepare_turn(run_dir, turn_number, original_task)
+        materials = load_task_materials(task_root)
+        current_turn_dir = prepare_turn(run_dir, turn_number, materials)
         save_run_state(run_dir, state)
 
         generator_prompt = build_generator_turn_prompt(
-            run_dir,
+            repo_root,
+            current_turn_dir,
             turn_number,
-            run_id,
-            state["generator_base_prompt"],
-            include_protocol=state["roles"]["generator"]["session_file"] is None,
+            include_council_brief=True,
         )
-        write_prompt_artifact(run_dir, turn_number, "generator", generator_prompt)
+        write_prompt_artifact(current_turn_dir, "generator", generator_prompt)
         state["status"] = "waiting_generator"
+        state["roles"]["generator"]["last_wait_phase"] = "generator_prompt_ready"
         save_run_state(run_dir, state)
         wait_for_tmux_prompt(
             state["roles"]["generator"]["tmux_session"],
@@ -868,14 +890,12 @@ def supervisor_loop(run_dir: Path, state: dict, original_task: str) -> None:
             phase="generator_artifacts",
         )
         write_final_message_artifact(
-            run_dir,
-            turn_number,
+            current_turn_dir,
             "generator",
             generator_artifact_path.read_text(encoding="utf-8"),
         )
         write_raw_final_output_artifact(
-            run_dir,
-            turn_number,
+            current_turn_dir,
             "generator",
             state["roles"]["generator"]["tmux_session"],
         )
@@ -886,14 +906,14 @@ def supervisor_loop(run_dir: Path, state: dict, original_task: str) -> None:
             return
 
         reviewer_prompt = build_reviewer_turn_prompt(
-            run_dir,
+            repo_root,
+            current_turn_dir,
             turn_number,
-            run_id,
-            state["reviewer_base_prompt"],
-            include_protocol=state["roles"]["reviewer"]["session_file"] is None,
+            include_council_brief=True,
         )
-        write_prompt_artifact(run_dir, turn_number, "reviewer", reviewer_prompt)
+        write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
         state["status"] = "waiting_reviewer"
+        state["roles"]["reviewer"]["last_wait_phase"] = "reviewer_prompt_ready"
         save_run_state(run_dir, state)
         wait_for_tmux_prompt(
             state["roles"]["reviewer"]["tmux_session"],
@@ -915,14 +935,12 @@ def supervisor_loop(run_dir: Path, state: dict, original_task: str) -> None:
             phase="reviewer_artifacts",
         )
         write_final_message_artifact(
-            run_dir,
-            turn_number,
+            current_turn_dir,
             "reviewer",
             reviewer_artifact_path.read_text(encoding="utf-8"),
         )
         write_raw_final_output_artifact(
-            run_dir,
-            turn_number,
+            current_turn_dir,
             "reviewer",
             state["roles"]["reviewer"]["tmux_session"],
         )
@@ -939,91 +957,66 @@ def supervisor_loop(run_dir: Path, state: dict, original_task: str) -> None:
             return
 
     state["status"] = "max_turns_reached"
-    state["stop_reason"] = f"reached max turns ({state['max_turns']})"
+    state["stop_reason"] = f"reached max turns ({state['council_config']['council']['max_turns']})"
     save_run_state(run_dir, state)
 
 
-def write_failure_diagnostics(
-    run_dir: Path, state: dict, error: SupervisorRuntimeError
-) -> Path:
-    diagnostics_root = Path(state["diagnostics_dir"])
-    ensure_dir(diagnostics_root)
-    failure_dir = diagnostics_root / f"{time.strftime('%Y%m%d-%H%M%S')}-{error.phase}"
-    ensure_dir(failure_dir)
-    save_json(
-        failure_dir / "error.json",
-        {
-            "details": error.details,
-            "message": str(error),
-            "phase": error.phase,
-            "role": error.role,
-            "timestamp": now_ts(),
-        },
-    )
-    save_json(failure_dir / "state_snapshot.json", state)
-    for role in ("generator", "reviewer"):
-        tmux_name = state["roles"][role]["tmux_session"]
-        write_text(failure_dir / f"{role}.pane.txt", tmux_capture_pane(tmux_name))
-    return failure_dir
+def start_run(args: argparse.Namespace) -> int:
+    task_name = validate_task_name(args.task_name)
+    target_input = Path(args.dir or Path.cwd()).resolve()
+    repo_root, is_git = resolve_target_root(target_input, allow_non_git=args.allow_non_git)
 
+    task_root = task_root_for(repo_root, task_name)
+    if not task_root.exists():
+        raise SystemExit(
+            f"missing task workspace: {task_root}\n"
+            f"Run `init {task_name}` first."
+        )
+    ensure_task_workspace_exists(task_root)
+    council_config = load_council_config(repo_root)
+    materials = load_task_materials(task_root)
+    if not materials["task_text"] or materials["task_text"] == DEFAULT_TASK_PLACEHOLDER.strip():
+        raise SystemExit(
+            f"{task_root / 'task.md'} is still a placeholder. Fill it in before running start."
+        )
 
-def cmd_start(args: argparse.Namespace) -> int:
-    workspace_root = Path.cwd().resolve()
-    run_id = args.run_id or time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-    run_dir = workspace_root / RUNS_ROOT / run_id
+    run_id = args.run_id or run_id_value()
+    run_dir = task_root / "runs" / run_id
     if run_dir.exists():
         raise SystemExit(f"run directory already exists: {run_dir}")
-
-    original_task = read_text_arg(
-        args.task,
-        args.task_file,
-        default="",
-    ).strip()
-    if not original_task:
-        raise SystemExit("task is empty")
-
-    generator_prompt = read_text_arg(
-        args.generator_prompt,
-        args.generator_prompt_file,
-        default="You are the code generator. Make the requested repository changes directly.",
-    )
-    reviewer_prompt = read_text_arg(
-        args.reviewer_prompt,
-        args.reviewer_prompt_file,
-        default="You are the code reviewer. Find blocking issues and state clearly whether the work is approved.",
-    )
-
     ensure_dir(run_dir / "turns")
-    write_text(run_dir / "original_task.md", original_task)
+
+    generator_session = args.generator_session or build_tmux_session_name(task_name, "generator", run_id)
+    reviewer_session = args.reviewer_session or build_tmux_session_name(task_name, "reviewer", run_id)
+
     state = create_run_state(
+        repo_root=repo_root,
+        task_root=task_root,
+        task_name=task_name,
         run_id=run_id,
-        run_dir=run_dir,
-        workspace_root=workspace_root,
-        max_turns=args.max_turns,
-        turn_timeout_seconds=args.turn_timeout_seconds,
-        launch_timeout_seconds=args.launch_timeout_seconds,
-        generator_session=args.generator_session or f"codex-generator-{run_id}",
-        reviewer_session=args.reviewer_session or f"codex-reviewer-{run_id}",
+        council_config=council_config,
+        generator_session=generator_session,
+        reviewer_session=reviewer_session,
     )
-    state["generator_base_prompt"] = generator_prompt
-    state["reviewer_base_prompt"] = reviewer_prompt
     save_run_state(run_dir, state)
 
     try:
         create_tmux_sessions(run_dir, state)
+        print(f"repo_root: {repo_root}")
+        print(f"task_root: {task_root}")
         print(f"run_id: {run_id}")
         print(f"run_dir: {run_dir}")
-        print(f"generator tmux: {state['roles']['generator']['tmux_session']}")
-        print(f"reviewer tmux: {state['roles']['reviewer']['tmux_session']}")
-        print(f"attach generator: tmux attach -t {state['roles']['generator']['tmux_session']}")
-        print(f"attach reviewer: tmux attach -t {state['roles']['reviewer']['tmux_session']}")
+        print(f"generator tmux: {generator_session}")
+        print(f"reviewer tmux: {reviewer_session}")
+        print(f"attach generator: tmux attach -t {generator_session}")
+        print(f"attach reviewer: tmux attach -t {reviewer_session}")
 
         wait_for_tmux_sessions_ready(run_dir, state)
         print("both Codex TUI sessions are ready")
-        supervisor_loop(run_dir, state, original_task)
+        supervisor_loop(run_dir, state, task_root)
     except SupervisorRuntimeError as error:
         state = load_json(run_dir / "state.json")
-        state["status"] = "bootstrap_failed" if "bootstrap" in error.phase else "blocked"
+        state["status"] = "blocked"
         state["stop_reason"] = f"{error.phase}: {error}"
         failure_dir = write_failure_diagnostics(run_dir, state, error)
         save_run_state(run_dir, state)
@@ -1048,40 +1041,83 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_status(args: argparse.Namespace) -> int:
-    run_dir = Path.cwd().resolve() / RUNS_ROOT / args.run_id
+def init_task(args: argparse.Namespace) -> int:
+    task_name = validate_task_name(args.task_name)
+    target_input = Path(args.dir or Path.cwd()).resolve()
+    repo_root, _ = resolve_target_root(target_input, allow_non_git=args.allow_non_git)
+
+    scaffold_council_root(repo_root)
+    task_root = task_root_for(repo_root, task_name)
+    initial_task_text = read_text_arg(args.task, args.task_file, default="").strip()
+    result = scaffold_task_root(task_root, initial_task_text=initial_task_text or None)
+
+    print(f"repo_root: {repo_root}")
+    print(f"council_root: {council_root_for(repo_root)}")
+    print(f"task_root: {task_root}")
+    print(f"config: {config_path_for(repo_root)}")
+    print(f"task: {task_root / 'task.md'}")
+    print(f"agents: {task_root / 'AGENTS.md'}")
+    print(f"generator: {task_root / 'generator.instructions.md'}")
+    print(f"reviewer: {task_root / 'reviewer.instructions.md'}")
+    if result["task_needs_edit"]:
+        print("next: edit task.md and any instruction files, then run `start`")
+    else:
+        print("next: review/edit the scaffolded files if needed, then run `start`")
+    return 0
+
+
+def show_status(args: argparse.Namespace) -> int:
+    task_name = validate_task_name(args.task_name)
+    target_input = Path(args.dir or Path.cwd()).resolve()
+    repo_root, _ = resolve_target_root(target_input, allow_non_git=args.allow_non_git)
+    task_root = task_root_for(repo_root, task_name)
+    if not task_root.exists():
+        raise SystemExit(f"missing task workspace: {task_root}")
+
+    run_id = args.run_id
+    if run_id in (None, "latest"):
+        run_dir = latest_run_dir(task_root)
+    else:
+        run_dir = task_root / "runs" / run_id
+        if not run_dir.exists():
+            raise SystemExit(f"missing run directory: {run_dir}")
+
     state_path = run_dir / "state.json"
     if not state_path.exists():
         raise SystemExit(f"missing run state: {state_path}")
-    state = load_json(state_path)
-    print(json.dumps(state, indent=2, sort_keys=True))
+    print(json.dumps(load_json(state_path), indent=2, sort_keys=True))
     return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run two real Codex TUIs in tmux and coordinate them with a filesystem turn protocol."
+        description="Run two real Codex TUIs against a target repo using a repo-local .codex-council workspace."
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    start = sub.add_parser("start", help="start a new coordinated TUI run")
+    init = sub.add_parser("init", help="initialize .codex-council and a task workspace")
+    init.add_argument("task_name")
+    init.add_argument("--dir", help="target repository or working directory")
+    init.add_argument("--allow-non-git", action="store_true")
+    init.add_argument("--task")
+    init.add_argument("--task-file")
+    init.set_defaults(func=init_task)
+
+    start = sub.add_parser("start", help="start a council run for a task name")
+    start.add_argument("task_name")
+    start.add_argument("--dir", help="target repository or working directory")
+    start.add_argument("--allow-non-git", action="store_true")
     start.add_argument("--run-id")
-    start.add_argument("--task")
-    start.add_argument("--task-file")
-    start.add_argument("--generator-prompt")
-    start.add_argument("--generator-prompt-file")
-    start.add_argument("--reviewer-prompt")
-    start.add_argument("--reviewer-prompt-file")
     start.add_argument("--generator-session")
     start.add_argument("--reviewer-session")
-    start.add_argument("--max-turns", type=int, default=6)
-    start.add_argument("--launch-timeout-seconds", type=float, default=60.0)
-    start.add_argument("--turn-timeout-seconds", type=float, default=1800.0)
-    start.set_defaults(func=cmd_start)
+    start.set_defaults(func=start_run)
 
-    status = sub.add_parser("status", help="show the state of an existing run")
-    status.add_argument("run_id")
-    status.set_defaults(func=cmd_status)
+    status = sub.add_parser("status", help="show the latest or chosen run state for a task")
+    status.add_argument("task_name")
+    status.add_argument("--dir", help="target repository or working directory")
+    status.add_argument("--allow-non-git", action="store_true")
+    status.add_argument("--run-id", default="latest")
+    status.set_defaults(func=show_status)
 
     return parser
 
