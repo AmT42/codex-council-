@@ -18,6 +18,23 @@ import uuid
 COUNCIL_DIRNAME = ".codex-council"
 GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked", "needs_human"}
 REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
+HUMAN_SOURCES = {
+    "task.md",
+    "contract.md",
+    "AGENTS.md",
+    "generator.instructions.md",
+    "reviewer.instructions.md",
+    "repo_state",
+}
+REVIEW_DIMENSION_STATUSES = {"pass", "fail", "uncertain"}
+CRITICAL_REVIEW_DIMENSIONS = (
+    "correctness_vs_intent",
+    "regression_risk",
+    "failure_mode_and_fallback",
+    "state_and_metadata_integrity",
+    "test_adequacy",
+    "maintainability",
+)
 TMUX_PANE_POLL_SECONDS = 0.5
 TMUX_PASTE_SETTLE_SECONDS = 0.1
 TMUX_CAPTURE_HISTORY_LINES = 1000
@@ -105,7 +122,7 @@ DEFAULT_COUNCIL_BRIEF = textwrap.dedent(
     - Surface contradictions, missing decisions, or dangerous assumptions explicitly.
     - Prefer clear contracts and verifiable outcomes over vague progress.
     - Generator implements against both `task.md` and `contract.md`.
-    - Reviewer approves only when the checklist in `contract.md` is satisfied.
+    - Reviewer approves only when both the checklist in `contract.md` is satisfied and all critical review dimensions pass.
 
     ## Human intervention rule
     - If `task.md`, `contract.md`, this brief, or the role-specific instructions conflict or are too ambiguous to continue safely, stop and emit `needs_human`.
@@ -137,6 +154,7 @@ DEFAULT_GENERATOR_INSTRUCTIONS = textwrap.dedent(
     - Do not silently skip difficult parts or paper over broken behavior.
     - If the task requires a tradeoff, choose the option that best preserves correctness, maintainability, and contract satisfaction.
     - Do not redefine success criteria yourself. `contract.md` owns the success criteria.
+    - If you change a state, metadata, cache, checkpoint, fallback, or health/coverage contract, inspect both the writers and the downstream readers/consumers before ending the turn.
 
     ## Quality rules
     - Avoid regressions, broken migrations, unsafe assumptions, and partial implementations.
@@ -148,6 +166,9 @@ DEFAULT_GENERATOR_INSTRUCTIONS = textwrap.dedent(
     - In `generator.md`, include:
       - What changed
       - Why those changes move the code toward satisfying `contract.md`
+      - Changed invariants / preserved invariants
+      - Downstream readers / consumers checked
+      - Failure modes and fallback behavior considered
       - Verification performed
       - Remaining contract items not yet satisfied
       - Known risks or blockers
@@ -156,6 +177,7 @@ DEFAULT_GENERATOR_INSTRUCTIONS = textwrap.dedent(
     ## Human intervention rule
     - Emit `needs_human` if `task.md` and `contract.md` conflict, if satisfying one contract item would clearly violate another, or if a missing design decision prevents a safe implementation.
     - Use `human_message` to describe exactly what the user must clarify or change, and name the faulty source explicitly.
+    - Set `human_source` to the file or state boundary that caused the pause.
     """
 )
 
@@ -176,8 +198,10 @@ DEFAULT_REVIEWER_INSTRUCTIONS = textwrap.dedent(
     - Use `changes_requested` for fixable implementation issues that should go back to the generator.
     - Use `blocked` only for external blockers unrelated to plan quality.
     - Use `needs_human` when the plan itself is flawed, contradictory, unsafe, or requires a product/architecture decision beyond reviewer judgment.
-    - If any critical review dimension fails, the turn fails.
-    - Approval means the checklist in `contract.md` is satisfied, not merely that the patch looks reasonable.
+    - Approval means both:
+      - every relevant checklist item in `contract.md` is satisfied
+      - every critical review dimension passes
+    - If any critical review dimension fails or is still uncertain, the turn is not approvable.
 
     ## What to inspect
     - fidelity to `task.md`
@@ -195,20 +219,26 @@ DEFAULT_REVIEWER_INSTRUCTIONS = textwrap.dedent(
     - Distinguish blocking findings from optional suggestions.
     - Avoid vague “improve this” feedback.
     - Use git and the latest commit range aggressively to understand exactly what changed before judging it.
+    - Distrust the generator narrative by default; verify the code, the consumers, and the failure behavior yourself.
+    - If the change touches state, metadata, checkpoints, caches, fallback paths, rebuild logic, or health/coverage semantics, inspect both writers and downstream readers/consumers.
+    - Perform at least one independent falsification attempt on the riskiest changed invariant when the change touches silent degradation, partial failure, metadata drift, or fallback correctness.
 
     ## Required review structure
     - In `reviewer.md`, include:
       - Verdict summary
       - Contract checklist copied from `contract.md`, using `[x]` for satisfied and `[ ]` for not yet satisfied
+      - Critical review dimensions, using `[pass]`, `[fail]`, or `[uncertain]`
       - Blocking issues
-      - Verification performed
+      - Independent verification performed
       - Residual risks or follow-up notes
-    - The checklist should be the clearest answer to whether the loop is done: approval means every relevant contract point is satisfied.
+    - The checklist should be the clearest answer to whether the loop is done.
     - Every unchecked contract item blocks approval unless it is clearly out of scope for the current task wording, and if that happens you must explain why.
+    - Every critical review dimension must be explicitly marked; `approved` is invalid if any dimension is `[fail]` or `[uncertain]`.
 
     ## Human intervention rule
     - Emit `needs_human` if `contract.md` is ambiguous or incomplete, if `task.md` does not actually support the contract, or if approval would require guessing the intended interpretation of an unchecked contract item.
     - Use `human_message` to tell the user what must be clarified or corrected, and name the faulty source explicitly.
+    - Set `human_source` to the file or state boundary that caused the pause.
     """
 )
 
@@ -814,6 +844,14 @@ def wait_for_role_artifacts(
     )
 
 
+def normalize_human_source(value, *, role: str):
+    if not isinstance(value, str) or value not in HUMAN_SOURCES:
+        raise ValueError(
+            f"{role} human_source must be one of: {', '.join(sorted(HUMAN_SOURCES))}"
+        )
+    return value
+
+
 def validate_generator_status(data: dict) -> dict:
     result = data.get("result")
     if not isinstance(result, str) or result not in GENERATOR_RESULTS:
@@ -825,11 +863,15 @@ def validate_generator_status(data: dict) -> dict:
     if not isinstance(changed_files, list) or not all(isinstance(item, str) for item in changed_files):
         raise ValueError("generator changed_files must be a list of strings")
     human_message = data.get("human_message")
+    human_source = data.get("human_source")
     if result == "needs_human":
         if not isinstance(human_message, str) or not human_message.strip():
             raise ValueError("generator human_message must be a non-empty string when result is needs_human")
+        human_source = normalize_human_source(human_source, role="generator")
     elif human_message is not None and not isinstance(human_message, str):
         raise ValueError("generator human_message must be a string when present")
+    elif human_source is not None:
+        human_source = normalize_human_source(human_source, role="generator")
     commit_sha = data.get("commit_sha")
     compare_base_sha = data.get("compare_base_sha")
     branch = data.get("branch")
@@ -857,6 +899,7 @@ def validate_generator_status(data: dict) -> dict:
         "compare_base_sha": compare_base_sha.strip() if isinstance(compare_base_sha, str) else None,
         "branch": branch.strip() if isinstance(branch, str) else None,
         "human_message": human_message.strip() if isinstance(human_message, str) else None,
+        "human_source": human_source,
     }
 
 
@@ -873,23 +916,46 @@ def validate_reviewer_status(data: dict) -> dict:
     ):
         raise ValueError("reviewer blocking_issues must be a list of strings")
     human_message = data.get("human_message")
+    human_source = data.get("human_source")
     if verdict == "needs_human":
         if not isinstance(human_message, str) or not human_message.strip():
             raise ValueError("reviewer human_message must be a non-empty string when verdict is needs_human")
+        human_source = normalize_human_source(human_source, role="reviewer")
     elif human_message is not None and not isinstance(human_message, str):
         raise ValueError("reviewer human_message must be a string when present")
+    elif human_source is not None:
+        human_source = normalize_human_source(human_source, role="reviewer")
     reviewed_commit_sha = data.get("reviewed_commit_sha")
     if verdict in {"approved", "changes_requested"}:
         if not isinstance(reviewed_commit_sha, str) or not reviewed_commit_sha.strip():
             raise ValueError("reviewer reviewed_commit_sha must be a non-empty string when verdict is approved or changes_requested")
     elif reviewed_commit_sha is not None and not isinstance(reviewed_commit_sha, str):
         raise ValueError("reviewer reviewed_commit_sha must be a string when present")
+    critical_dimensions = data.get("critical_dimensions")
+    if not isinstance(critical_dimensions, dict):
+        raise ValueError("reviewer critical_dimensions must be a dict")
+    normalized_dimensions: dict[str, str] = {}
+    for key in CRITICAL_REVIEW_DIMENSIONS:
+        value = critical_dimensions.get(key)
+        if not isinstance(value, str) or value not in REVIEW_DIMENSION_STATUSES:
+            raise ValueError(
+                f"reviewer critical_dimensions.{key} must be one of: {', '.join(sorted(REVIEW_DIMENSION_STATUSES))}"
+            )
+        normalized_dimensions[key] = value
+    if verdict == "approved":
+        failing = [key for key, value in normalized_dimensions.items() if value != "pass"]
+        if failing:
+            raise ValueError(
+                "reviewer approved verdict requires all critical review dimensions to be `pass`"
+            )
     return {
         "verdict": verdict,
         "summary": summary.strip(),
         "blocking_issues": [item.strip() for item in blocking_issues],
         "reviewed_commit_sha": reviewed_commit_sha.strip() if isinstance(reviewed_commit_sha, str) else None,
         "human_message": human_message.strip() if isinstance(human_message, str) else None,
+        "human_source": human_source,
+        "critical_dimensions": normalized_dimensions,
     }
 
 
@@ -916,6 +982,19 @@ def format_turn_one_context(task_root: Path, role: str) -> str:
         paths["contract"].read_text(encoding="utf-8").strip(),
     ]
     return "\n".join(sections).rstrip()
+
+
+def format_contract_migration_warning(task_root: Path) -> str:
+    task_text = (task_root / "task.md").read_text(encoding="utf-8")
+    if "Success contract:" not in task_text:
+        return ""
+    return textwrap.dedent(
+        """\
+        Migration note:
+        - `contract.md` is the canonical definition of done.
+        - Any embedded “Success contract” prose inside `task.md` is secondary context only and must not override `contract.md`.
+        """
+    ).rstrip()
 
 
 def format_later_turn_context(task_root: Path, role: str) -> str:
@@ -949,6 +1028,9 @@ def build_generator_turn_prompt(
         sections.append(format_turn_one_context(task_root, "generator"))
     else:
         sections.append(format_later_turn_context(task_root, "generator"))
+    migration_warning = format_contract_migration_warning(task_root)
+    if migration_warning:
+        sections.append(migration_warning)
     sections.append(f"Turn {turn_name(turn_number)}.")
     if turn_number > 1:
         previous_turn_dir = turn_dir.parent / turn_name(turn_number - 1)
@@ -979,11 +1061,14 @@ def build_generator_turn_prompt(
         "In `generator.md`, include at minimum:\n"
         "- What changed\n"
         "- Why those changes move the code toward satisfying `contract.md`\n"
+        "- Changed invariants / preserved invariants\n"
+        "- Downstream readers / consumers checked\n"
+        "- Failure modes and fallback behavior considered\n"
         "- Verification performed\n"
         "- Remaining contract items not yet satisfied\n"
         "- Known risks or blockers\n\n"
         "The status JSON must be exactly this shape:\n"
-        '{"result":"implemented|no_changes_needed|blocked|needs_human","summary":"short string","changed_files":["relative/path"],"commit_sha":"required when implemented","compare_base_sha":"required when implemented","branch":"required when implemented","human_message":"required when needs_human"}'
+        '{"result":"implemented|no_changes_needed|blocked|needs_human","summary":"short string","changed_files":["relative/path"],"commit_sha":"required when implemented","compare_base_sha":"required when implemented","branch":"required when implemented","human_message":"required when needs_human","human_source":"required when needs_human"}'
     )
     sections.append("After producing the required artifacts for this turn, end your turn. Do not continue with extra speculative work beyond the requested deliverables for this turn.")
     return "\n\n".join(sections).rstrip()
@@ -1003,6 +1088,9 @@ def build_reviewer_turn_prompt(
         sections.append(format_turn_one_context(task_root, "reviewer"))
     else:
         sections.append(format_later_turn_context(task_root, "reviewer"))
+    migration_warning = format_contract_migration_warning(task_root)
+    if migration_warning:
+        sections.append(migration_warning)
     sections.extend(
         [
             f"Turn {turn_name(turn_number)}.",
@@ -1022,6 +1110,8 @@ def build_reviewer_turn_prompt(
                 - any other git commands you need to understand the latest generator change set
                 Treat git history as the primary record of the latest change set, and use repository state plus artifacts as supporting context.
                 If generator reported `no_changes_needed`, inspect the current HEAD and write that HEAD commit as `reviewed_commit_sha`.
+                If the change touches state, metadata, checkpoints, caches, rebuild logic, health checks, or fallback behavior, inspect both the writers and the downstream readers/consumers.
+                Perform at least one independent falsification or negative-path check on the riskiest changed invariant.
                 """
             ).rstrip()
         )
@@ -1033,12 +1123,13 @@ def build_reviewer_turn_prompt(
             "In `reviewer.md`, include at minimum:\n"
             "- Verdict summary\n"
             "- Contract checklist copied from `contract.md`, using `[x]` and `[ ]`\n"
+            "- Critical review dimensions, using `[pass]`, `[fail]`, or `[uncertain]`\n"
             "- Blocking issues\n"
-            "- Verification performed\n"
+            "- Independent verification performed\n"
             "- Residual risks or follow-up notes\n\n"
             "The status JSON must be exactly this shape:\n"
-            '{"verdict":"approved|changes_requested|blocked|needs_human","summary":"short string","blocking_issues":["issue"],"reviewed_commit_sha":"required for approved or changes_requested","human_message":"required when needs_human"}',
-            "Use `approved` only when no blocking issues remain. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers. Use `needs_human` when the plan or instructions themselves require user clarification.",
+            '{"verdict":"approved|changes_requested|blocked|needs_human","summary":"short string","blocking_issues":["issue"],"reviewed_commit_sha":"required for approved or changes_requested","critical_dimensions":{"correctness_vs_intent":"pass|fail|uncertain","regression_risk":"pass|fail|uncertain","failure_mode_and_fallback":"pass|fail|uncertain","state_and_metadata_integrity":"pass|fail|uncertain","test_adequacy":"pass|fail|uncertain","maintainability":"pass|fail|uncertain"},"human_message":"required when needs_human","human_source":"required when needs_human"}',
+            "Use `approved` only when no blocking issues remain and every critical review dimension is `pass`. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers. Use `needs_human` when the plan or instructions themselves require user clarification.",
             "After producing the required artifacts for this turn, end your turn. Do not continue with extra speculative work beyond the requested deliverables for this turn.",
         ]
     )
@@ -1066,6 +1157,7 @@ def pause_for_human(
     turn_dir: Path,
     summary: str,
     human_message: str | None,
+    human_source: str | None,
 ) -> None:
     state["status"] = "paused_needs_human"
     state["stop_reason"] = summary
@@ -1073,6 +1165,8 @@ def pause_for_human(
     print(f"{role} paused the council and requested human intervention.", flush=True)
     print(f"read: {turn_dir / f'{role}.md'}", flush=True)
     print(f"read: {turn_dir / f'{role}.status.json'}", flush=True)
+    if human_source:
+        print(f"human_source: {human_source}", flush=True)
     if human_message:
         print(f"human_message: {human_message}", flush=True)
     print(
@@ -1292,6 +1386,7 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
                 turn_dir=current_turn_dir,
                 summary=generator_status["summary"],
                 human_message=generator_status["human_message"],
+                human_source=generator_status["human_source"],
             )
             return
         if generator_status["result"] == "blocked":
@@ -1361,6 +1456,7 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
                 turn_dir=current_turn_dir,
                 summary=reviewer_status["summary"],
                 human_message=reviewer_status["human_message"],
+                human_source=reviewer_status["human_source"],
             )
             return
         if reviewer_status["verdict"] == "blocked":

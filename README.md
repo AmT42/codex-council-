@@ -77,7 +77,10 @@ Important:
 - the authoritative control signal is only the artifact pair for the role
 - generator is expected to commit on the current branch for implemented turns before writing final artifacts
 - reviewer is expected to use git as the primary source of what changed
-- `contract.md` is the canonical definition of done; approval means the contract checklist is satisfied
+- `contract.md` is the canonical definition of done
+- approval means both:
+  - the contract checklist is satisfied
+  - all critical review dimensions pass
 - generator must write `generator.md` and `generator.status.json`
 - reviewer must write `reviewer.md` and `reviewer.status.json`
 - `raw_final_output.md` is trace-only and is captured only after valid final artifacts exist
@@ -87,13 +90,13 @@ Important:
 Reviewer stop conditions are structured, not guessed from prose:
 
 ```json
-{"verdict":"approved","summary":"No blocking issues remain.","blocking_issues":[],"reviewed_commit_sha":"<sha>"}
+{"verdict":"approved","summary":"No blocking issues remain.","blocking_issues":[],"reviewed_commit_sha":"<sha>","critical_dimensions":{"correctness_vs_intent":"pass","regression_risk":"pass","failure_mode_and_fallback":"pass","state_and_metadata_integrity":"pass","test_adequacy":"pass","maintainability":"pass"}}
 ```
 
 Human-intervention pause example:
 
 ```json
-{"verdict":"needs_human","summary":"The plan is contradictory.","blocking_issues":[],"human_message":"Clarify whether the API change should be breaking or backward compatible."}
+{"verdict":"needs_human","summary":"The plan is contradictory.","blocking_issues":[],"critical_dimensions":{"correctness_vs_intent":"uncertain","regression_risk":"uncertain","failure_mode_and_fallback":"uncertain","state_and_metadata_integrity":"uncertain","test_adequacy":"uncertain","maintainability":"uncertain"},"human_message":"Clarify whether the API change should be breaking or backward compatible.","human_source":"contract.md"}
 ```
 
 Generator implemented example:

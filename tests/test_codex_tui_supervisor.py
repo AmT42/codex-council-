@@ -52,6 +52,14 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 "summary": "No blocking issues remain.",
                 "blocking_issues": [],
                 "reviewed_commit_sha": "abc123",
+                "critical_dimensions": {
+                    "correctness_vs_intent": "pass",
+                    "regression_risk": "pass",
+                    "failure_mode_and_fallback": "pass",
+                    "state_and_metadata_integrity": "pass",
+                    "test_adequacy": "pass",
+                    "maintainability": "pass",
+                },
             }
         )
         self.assertEqual(status["verdict"], "approved")
@@ -63,6 +71,14 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                     "verdict": "approved",
                     "summary": "No blocking issues remain.",
                     "blocking_issues": [],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "pass",
+                        "regression_risk": "pass",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "pass",
+                        "maintainability": "pass",
+                    },
                 }
             )
 
@@ -73,6 +89,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                     "result": "needs_human",
                     "summary": "Task plan is contradictory.",
                     "changed_files": [],
+                    "human_source": "task.md",
                 }
             )
 
@@ -82,10 +99,12 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 "summary": "Task plan is contradictory.",
                 "changed_files": [],
                 "human_message": "Clarify whether API A or API B is the intended target.",
+                "human_source": "task.md",
             }
         )
         self.assertEqual(status["result"], "needs_human")
         self.assertIn("Clarify", status["human_message"])
+        self.assertEqual(status["human_source"], "task.md")
 
     def test_validate_reviewer_status_requires_human_message_for_needs_human(self) -> None:
         with self.assertRaises(ValueError):
@@ -94,6 +113,14 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                     "verdict": "needs_human",
                     "summary": "Plan conflicts with current architecture.",
                     "blocking_issues": [],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "uncertain",
+                        "regression_risk": "uncertain",
+                        "failure_mode_and_fallback": "uncertain",
+                        "state_and_metadata_integrity": "uncertain",
+                        "test_adequacy": "uncertain",
+                        "maintainability": "uncertain",
+                    },
                 }
             )
 
@@ -103,10 +130,39 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 "summary": "Plan conflicts with current architecture.",
                 "blocking_issues": [],
                 "human_message": "Decide whether the task should preserve the current API or introduce a breaking change.",
+                "human_source": "contract.md",
+                "critical_dimensions": {
+                    "correctness_vs_intent": "uncertain",
+                    "regression_risk": "uncertain",
+                    "failure_mode_and_fallback": "uncertain",
+                    "state_and_metadata_integrity": "uncertain",
+                    "test_adequacy": "uncertain",
+                    "maintainability": "uncertain",
+                },
             }
         )
         self.assertEqual(status["verdict"], "needs_human")
         self.assertIn("Decide", status["human_message"])
+        self.assertEqual(status["human_source"], "contract.md")
+
+    def test_validate_reviewer_status_rejects_approved_if_any_dimension_not_pass(self) -> None:
+        with self.assertRaises(ValueError):
+            MODULE.validate_reviewer_status(
+                {
+                    "verdict": "approved",
+                    "summary": "No blocking issues remain.",
+                    "blocking_issues": [],
+                    "reviewed_commit_sha": "abc123",
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "pass",
+                        "regression_risk": "uncertain",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "pass",
+                        "maintainability": "pass",
+                    },
+                }
+            )
 
     def test_extract_last_tmux_slice_uses_last_two_prompts(self) -> None:
         pane = "\n".join(
@@ -261,6 +317,9 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("needs_human", prompt)
             self.assertNotIn("stop and wait for further instructions", prompt.lower())
             self.assertIn("Why those changes move the code toward satisfying `contract.md`", prompt)
+            self.assertIn("Changed invariants / preserved invariants", prompt)
+            self.assertIn("Downstream readers / consumers checked", prompt)
+            self.assertIn("Failure modes and fallback behavior considered", prompt)
             self.assertIn("Verification performed", prompt)
 
     def test_build_generator_turn_prompt_later_turn_references_paths_not_inlined_content(self) -> None:
@@ -313,8 +372,12 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("Use git as the primary source of what changed.", prompt)
             self.assertIn("contract.md", prompt)
             self.assertIn("Contract checklist copied from `contract.md`", prompt)
-            self.assertIn("[x]", prompt)
-            self.assertIn("[ ]", prompt)
+            self.assertIn("Critical review dimensions", prompt)
+            self.assertIn("[pass]", prompt)
+            self.assertIn("[fail]", prompt)
+            self.assertIn("[uncertain]", prompt)
+            self.assertIn("inspect both the writers and the downstream readers/consumers", prompt)
+            self.assertIn("independent falsification or negative-path check", prompt)
 
     def test_wait_for_role_artifacts_returns_valid_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -410,6 +473,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                     turn_dir=turn_dir,
                     summary="Task plan needs clarification.",
                     human_message="Clarify whether the endpoint change is allowed.",
+                    human_source="task.md",
                 )
             self.assertEqual(state["status"], "paused_needs_human")
             self.assertEqual(state["stop_reason"], "Task plan needs clarification.")
