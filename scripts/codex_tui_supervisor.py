@@ -16,6 +16,7 @@ import uuid
 
 
 COUNCIL_DIRNAME = ".codex-council"
+TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "templates"
 GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked", "needs_human"}
 REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
 HUMAN_SOURCES = {
@@ -27,220 +28,11 @@ HUMAN_SOURCES = {
     "repo_state",
 }
 REVIEW_DIMENSION_STATUSES = {"pass", "fail", "uncertain"}
-CRITICAL_REVIEW_DIMENSIONS = (
-    "correctness_vs_intent",
-    "regression_risk",
-    "failure_mode_and_fallback",
-    "state_and_metadata_integrity",
-    "test_adequacy",
-    "maintainability",
-)
 TMUX_PANE_POLL_SECONDS = 0.5
 TMUX_PASTE_SETTLE_SECONDS = 0.1
 TMUX_CAPTURE_HISTORY_LINES = 1000
 ROLE_ARTIFACT_POLL_SECONDS = 1.0
 TASK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-
-DEFAULT_COUNCIL_GITIGNORE = textwrap.dedent(
-    """\
-    # Generated council runtime data
-    */runs/
-    """
-)
-
-DEFAULT_CONFIG_TOML = textwrap.dedent(
-    """\
-    [codex]
-    model = "gpt-5.4"
-    model_reasoning_effort = "xhigh"
-    dangerously_bypass_approvals_and_sandbox = true
-    no_alt_screen = true
-
-    [council]
-    max_turns = 6
-    launch_timeout_seconds = 60
-    turn_timeout_seconds = 1800
-    require_git = true
-    """
-)
-
-DEFAULT_TASK_PLACEHOLDER = textwrap.dedent(
-    """\
-    Describe the requested work here as the canonical plan and brief for the council.
-
-    Include:
-    - goal / intended outcome
-    - acceptance criteria
-    - constraints
-    - non-goals
-    - relevant files, systems, endpoints, or UI flows
-    - plan details, sequencing, or important implementation notes from the user
-    """
-)
-
-DEFAULT_CONTRACT_PLACEHOLDER = textwrap.dedent(
-    """\
-    # Success Contract
-
-    Write the definition of done for this task here as a checklist.
-
-    Guidelines:
-    - Keep this file short and audit-oriented.
-    - Each bullet should describe something that must be true before approval.
-    - The reviewer will copy this checklist into `reviewer.md` and mark items with `[x]` / `[ ]`.
-    - Keep detailed architecture and implementation reasoning in `task.md`, not here.
-
-    Example:
-    - [ ] The main user-facing behavior works as intended.
-    - [ ] Existing core behavior has not regressed.
-    - [ ] Required tests were added or updated.
-    """
-)
-
-DEFAULT_COUNCIL_BRIEF = textwrap.dedent(
-    """\
-    # Council Brief
-
-    This task is handled by a two-agent council:
-    - the generator implements or fixes the requested work
-    - the reviewer checks fidelity to intent, correctness, risk, and test adequacy
-
-    ## Mission
-    - Deliver the user-requested outcome while adhering as closely as possible to the intent described in `task.md`.
-    - Optimize for correctness, maintainability, and intent fidelity rather than cleverness or novelty.
-
-    ## Source of truth
-    - `task.md` is the canonical implementation plan and context for the requested work.
-    - `contract.md` is the canonical definition of done and approval checklist for the task.
-    - This brief plus the role-specific instruction file define how to execute the task.
-    - If you need to know whether the plan or instructions changed between turns, inspect the canonical files directly and use git as needed.
-
-    ## Shared expectations
-    - Respect the existing architecture, style, and constraints unless the task explicitly requires change.
-    - Prefer minimal, coherent changes over broad rewrites.
-    - Do not silently change scope.
-    - Surface contradictions, missing decisions, or dangerous assumptions explicitly.
-    - Prefer clear contracts and verifiable outcomes over vague progress.
-    - Generator implements against both `task.md` and `contract.md`.
-    - Reviewer approves only when both the checklist in `contract.md` is satisfied and all critical review dimensions pass.
-
-    ## Human intervention rule
-    - If `task.md`, `contract.md`, this brief, or the role-specific instructions conflict or are too ambiguous to continue safely, stop and emit `needs_human`.
-    - Use `human_message` to tell the user exactly what must be clarified, corrected, or added before work should continue, and name the faulty source explicitly.
-    """
-)
-
-DEFAULT_GENERATOR_INSTRUCTIONS = textwrap.dedent(
-    """\
-    # Generator Instructions
-
-    ## Mission
-    - Implement the requested change so the result matches the intent in `task.md` and moves the codebase toward satisfying `contract.md`.
-
-    ## Implementation bar
-    - Resolve root cause, not symptoms.
-    - Do not introduce unnecessary complexity, tech debt, speculative abstractions, or avoidable risk.
-    - Keep diffs minimal, coherent, and aligned with the existing codebase.
-    - Preserve architecture and style unless the task explicitly requires otherwise.
-
-    ## Required reading
-    - Read `task.md` first to understand the architecture, plan, and intended implementation.
-    - Read `contract.md` before coding. It is the non-negotiable definition of done.
-    - If these files disagree, do not guess. Emit `needs_human`.
-
-    ## Change strategy
-    - Work in clear, reviewable increments that materially advance the plan in `task.md`.
-    - Prefer straightforward, production-quality solutions over clever shortcuts.
-    - Do not silently skip difficult parts or paper over broken behavior.
-    - If the task requires a tradeoff, choose the option that best preserves correctness, maintainability, and contract satisfaction.
-    - Do not redefine success criteria yourself. `contract.md` owns the success criteria.
-    - If you change a state, metadata, cache, checkpoint, fallback, or health/coverage contract, inspect both the writers and the downstream readers/consumers before ending the turn.
-
-    ## Quality rules
-    - Avoid regressions, broken migrations, unsafe assumptions, and partial implementations.
-    - Update or add tests when the risk profile warrants it.
-    - Keep changes explainable and reviewable.
-    - Before ending the turn, sanity-check that your changes plausibly satisfy the relevant items in `contract.md` and do not obviously violate the task constraints.
-
-    ## Required turn output
-    - In `generator.md`, include:
-      - What changed
-      - Why those changes move the code toward satisfying `contract.md`
-      - Changed invariants / preserved invariants
-      - Downstream readers / consumers checked
-      - Failure modes and fallback behavior considered
-      - Verification performed
-      - Remaining contract items not yet satisfied
-      - Known risks or blockers
-    - Do not claim completion unless the change plausibly satisfies the contract items it is supposed to address.
-
-    ## Human intervention rule
-    - Emit `needs_human` if `task.md` and `contract.md` conflict, if satisfying one contract item would clearly violate another, or if a missing design decision prevents a safe implementation.
-    - Use `human_message` to describe exactly what the user must clarify or change, and name the faulty source explicitly.
-    - Set `human_source` to the file or state boundary that caused the pause.
-    """
-)
-
-DEFAULT_REVIEWER_INSTRUCTIONS = textwrap.dedent(
-    """\
-    # Reviewer Instructions
-
-    ## Review objective
-    - Use `task.md` to understand the plan, architecture, and intended implementation.
-    - Use `contract.md` as the actual definition of done.
-    - Verify the implementation matches the plan in `task.md` and satisfies the checklist in `contract.md`.
-    - Act as a rigorous production code reviewer, not a stylistic nitpicker.
-    - Be skeptical by default; do not give credit for work that only looks plausible.
-    - Treat yourself as an external evaluator, not a collaborator trying to help the generator look good.
-
-    ## Approval bar
-    - Use `approved` only when no blocking issues remain.
-    - Use `changes_requested` for fixable implementation issues that should go back to the generator.
-    - Use `blocked` only for external blockers unrelated to plan quality.
-    - Use `needs_human` when the plan itself is flawed, contradictory, unsafe, or requires a product/architecture decision beyond reviewer judgment.
-    - Approval means both:
-      - every relevant checklist item in `contract.md` is satisfied
-      - every critical review dimension passes
-    - If any critical review dimension fails or is still uncertain, the turn is not approvable.
-
-    ## What to inspect
-    - fidelity to `task.md`
-    - satisfaction of each checklist item in `contract.md`
-    - correctness of behavior versus intent
-    - regressions relative to existing behavior
-    - security, data loss, migration, and operational risk
-    - API, UX, and contract mismatches
-    - missing tests or weak verification for risky areas
-    - concurrency, performance, and edge-case failures where relevant
-    - code quality and maintainability of the implemented approach
-
-    ## Review style
-    - Prefer concrete, actionable blocking issues tied to code paths or behaviors.
-    - Distinguish blocking findings from optional suggestions.
-    - Avoid vague “improve this” feedback.
-    - Use git and the latest commit range aggressively to understand exactly what changed before judging it.
-    - Distrust the generator narrative by default; verify the code, the consumers, and the failure behavior yourself.
-    - If the change touches state, metadata, checkpoints, caches, fallback paths, rebuild logic, or health/coverage semantics, inspect both writers and downstream readers/consumers.
-    - Perform at least one independent falsification attempt on the riskiest changed invariant when the change touches silent degradation, partial failure, metadata drift, or fallback correctness.
-
-    ## Required review structure
-    - In `reviewer.md`, include:
-      - Verdict summary
-      - Contract checklist copied from `contract.md`, using `[x]` for satisfied and `[ ]` for not yet satisfied
-      - Critical review dimensions, using `[pass]`, `[fail]`, or `[uncertain]`
-      - Blocking issues
-      - Independent verification performed
-      - Residual risks or follow-up notes
-    - The checklist should be the clearest answer to whether the loop is done.
-    - Every unchecked contract item blocks approval unless it is clearly out of scope for the current task wording, and if that happens you must explain why.
-    - Every critical review dimension must be explicitly marked; `approved` is invalid if any dimension is `[fail]` or `[uncertain]`.
-
-    ## Human intervention rule
-    - Emit `needs_human` if `contract.md` is ambiguous or incomplete, if `task.md` does not actually support the contract, or if approval would require guessing the intended interpretation of an unchecked contract item.
-    - Use `human_message` to tell the user what must be clarified or corrected, and name the faulty source explicitly.
-    - Set `human_source` to the file or state boundary that caused the pause.
-    """
-)
 
 
 class SupervisorRuntimeError(RuntimeError):
@@ -291,6 +83,55 @@ def write_if_missing(path: Path, text: str) -> bool:
         return False
     write_text(path, text)
     return True
+
+
+def template_path(*parts: str) -> Path:
+    return TEMPLATE_ROOT.joinpath(*parts)
+
+
+def read_template(*parts: str) -> str:
+    path = template_path(*parts)
+    if not path.exists():
+        raise SystemExit(f"missing template file: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def load_critical_review_dimensions() -> list[dict]:
+    path = template_path("data", "critical_review_dimensions.json")
+    if not path.exists():
+        raise SystemExit(f"missing template file: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    dimensions = data.get("dimensions")
+    if not isinstance(dimensions, list):
+        raise SystemExit(f"invalid critical review dimensions file: {path}")
+    normalized: list[dict] = []
+    for item in dimensions:
+        if not isinstance(item, dict):
+            raise SystemExit(f"invalid critical review dimensions file: {path}")
+        key = item.get("key")
+        label = item.get("label")
+        if not isinstance(key, str) or not isinstance(label, str):
+            raise SystemExit(f"invalid critical review dimensions file: {path}")
+        normalized.append({"key": key, "label": label})
+    return normalized
+
+
+def render_template_text(template_text: str, values: dict[str, str], *, template_name: str) -> str:
+    def replacer(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key not in values:
+            raise SystemExit(f"unresolved placeholder `{key}` in template {template_name}")
+        return values[key]
+
+    rendered = re.sub(r"\{\{([A-Za-z0-9_]+)\}\}", replacer, template_text)
+    unresolved = re.findall(r"\{\{([A-Za-z0-9_]+)\}\}", rendered)
+    if unresolved:
+        raise SystemExit(f"unresolved placeholders in template {template_name}: {', '.join(sorted(set(unresolved)))}")
+    return rendered
+
+
+def default_scaffold_text(filename: str) -> str:
+    return read_template("scaffold", filename)
 
 
 def run_subprocess(
@@ -456,8 +297,14 @@ def missing_task_files(task_root: Path) -> list[Path]:
 def scaffold_council_root(repo_root: Path) -> None:
     council_root = council_root_for(repo_root)
     ensure_dir(council_root)
-    write_if_missing(council_gitignore_path_for(repo_root), DEFAULT_COUNCIL_GITIGNORE)
-    write_if_missing(config_path_for(repo_root), DEFAULT_CONFIG_TOML)
+    write_if_missing(
+        council_gitignore_path_for(repo_root),
+        read_template("scaffold", "council_root.gitignore"),
+    )
+    write_if_missing(
+        config_path_for(repo_root),
+        read_template("scaffold", "config.toml"),
+    )
 
 
 def scaffold_task_root(
@@ -466,17 +313,28 @@ def scaffold_task_root(
     initial_task_text: str | None,
 ) -> dict:
     ensure_dir(task_root)
+    task_template = (
+        initial_task_text.strip() if initial_task_text else read_template("scaffold", "task.md")
+    )
     task_created = write_if_missing(
         task_root / "task.md",
-        initial_task_text.strip() if initial_task_text else DEFAULT_TASK_PLACEHOLDER,
+        task_template,
     )
-    contract_created = write_if_missing(task_root / "contract.md", DEFAULT_CONTRACT_PLACEHOLDER)
-    agents_created = write_if_missing(task_root / "AGENTS.md", DEFAULT_COUNCIL_BRIEF)
+    contract_created = write_if_missing(
+        task_root / "contract.md",
+        read_template("scaffold", "contract.md"),
+    )
+    agents_created = write_if_missing(
+        task_root / "AGENTS.md",
+        read_template("scaffold", "AGENTS.md"),
+    )
     generator_created = write_if_missing(
-        task_root / "generator.instructions.md", DEFAULT_GENERATOR_INSTRUCTIONS
+        task_root / "generator.instructions.md",
+        read_template("scaffold", "generator.instructions.md"),
     )
     reviewer_created = write_if_missing(
-        task_root / "reviewer.instructions.md", DEFAULT_REVIEWER_INSTRUCTIONS
+        task_root / "reviewer.instructions.md",
+        read_template("scaffold", "reviewer.instructions.md"),
     )
     return {
         "task_created": task_created,
@@ -502,7 +360,7 @@ def ensure_task_workspace_exists(task_root: Path) -> None:
 def load_council_config(repo_root: Path) -> dict:
     config_path = config_path_for(repo_root)
     if not config_path.exists():
-        write_text(config_path, DEFAULT_CONFIG_TOML)
+        write_text(config_path, default_scaffold_text("config.toml"))
     try:
         data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as exc:
@@ -852,6 +710,10 @@ def normalize_human_source(value, *, role: str):
     return value
 
 
+def critical_review_dimension_keys() -> tuple[str, ...]:
+    return tuple(item["key"] for item in load_critical_review_dimensions())
+
+
 def validate_generator_status(data: dict) -> dict:
     result = data.get("result")
     if not isinstance(result, str) or result not in GENERATOR_RESULTS:
@@ -875,22 +737,13 @@ def validate_generator_status(data: dict) -> dict:
     commit_sha = data.get("commit_sha")
     compare_base_sha = data.get("compare_base_sha")
     branch = data.get("branch")
-    if result == "implemented":
-        for field_name, value in {
-            "commit_sha": commit_sha,
-            "compare_base_sha": compare_base_sha,
-            "branch": branch,
-        }.items():
-            if not isinstance(value, str) or not value.strip():
-                raise ValueError(f"generator {field_name} must be a non-empty string when result is implemented")
-    else:
-        for field_name, value in {
-            "commit_sha": commit_sha,
-            "compare_base_sha": compare_base_sha,
-            "branch": branch,
-        }.items():
-            if value is not None and not isinstance(value, str):
-                raise ValueError(f"generator {field_name} must be a string when present")
+    for field_name, value in {
+        "commit_sha": commit_sha,
+        "compare_base_sha": compare_base_sha,
+        "branch": branch,
+    }.items():
+        if value is not None and not isinstance(value, str):
+            raise ValueError(f"generator {field_name} must be a string when present")
     return {
         "result": result,
         "summary": summary.strip(),
@@ -926,16 +779,13 @@ def validate_reviewer_status(data: dict) -> dict:
     elif human_source is not None:
         human_source = normalize_human_source(human_source, role="reviewer")
     reviewed_commit_sha = data.get("reviewed_commit_sha")
-    if verdict in {"approved", "changes_requested"}:
-        if not isinstance(reviewed_commit_sha, str) or not reviewed_commit_sha.strip():
-            raise ValueError("reviewer reviewed_commit_sha must be a non-empty string when verdict is approved or changes_requested")
-    elif reviewed_commit_sha is not None and not isinstance(reviewed_commit_sha, str):
+    if reviewed_commit_sha is not None and not isinstance(reviewed_commit_sha, str):
         raise ValueError("reviewer reviewed_commit_sha must be a string when present")
     critical_dimensions = data.get("critical_dimensions")
     if not isinstance(critical_dimensions, dict):
         raise ValueError("reviewer critical_dimensions must be a dict")
     normalized_dimensions: dict[str, str] = {}
-    for key in CRITICAL_REVIEW_DIMENSIONS:
+    for key in critical_review_dimension_keys():
         value = critical_dimensions.get(key)
         if not isinstance(value, str) or value not in REVIEW_DIMENSION_STATUSES:
             raise ValueError(
@@ -957,6 +807,13 @@ def validate_reviewer_status(data: dict) -> dict:
         "human_source": human_source,
         "critical_dimensions": normalized_dimensions,
     }
+
+
+def format_review_dimensions_block() -> str:
+    return "\n".join(
+        f"- [pass|fail|uncertain] {item['label']}"
+        for item in load_critical_review_dimensions()
+    )
 
 
 def format_turn_one_context(task_root: Path, role: str) -> str:
@@ -1007,8 +864,6 @@ def format_later_turn_context(task_root: Path, role: str) -> str:
         - {paths["contract"]}
         - {paths["agents"]}
         - {role_path}
-        
-        Use git if you need to understand what changed between turns.
         """
     ).rstrip()
 
@@ -1019,59 +874,32 @@ def build_generator_turn_prompt(
     turn_dir: Path,
     turn_number: int,
     task_name: str,
-    git_state: dict | None,
     *,
     inline_context: bool,
 ) -> str:
-    sections: list[str] = [f"Repository root:\n{repo_root}"]
-    if inline_context:
-        sections.append(format_turn_one_context(task_root, "generator"))
-    else:
-        sections.append(format_later_turn_context(task_root, "generator"))
-    migration_warning = format_contract_migration_warning(task_root)
-    if migration_warning:
-        sections.append(migration_warning)
-    sections.append(f"Turn {turn_name(turn_number)}.")
-    if turn_number > 1:
-        previous_turn_dir = turn_dir.parent / turn_name(turn_number - 1)
-        sections.append(
-            "Before making changes, read the previous reviewer artifacts carefully:\n"
-            f"- {previous_turn_dir / 'reviewer.md'}\n"
-            f"- {previous_turn_dir / 'reviewer.status.json'}"
-        )
-    if git_state and git_state.get("enabled"):
-        sections.append(
-            textwrap.dedent(
-                f"""\
-                This run is operating on git branch `{git_state["current_branch"]}`.
-                If you implement code changes in this turn:
-                - commit them on the current branch with message `council({task_name}): turn {turn_name(turn_number)}`
-                - report `commit_sha`, `compare_base_sha`, and `branch` in `generator.status.json`
-
-                For turn {turn_name(turn_number)}, `compare_base_sha` must be:
-                `{git_state["last_generator_commit_sha"] or git_state["base_commit_sha"]}`
-                """
-            ).rstrip()
-        )
-    sections.append(
-        "Implement the requested change carefully. If the plan is critically flawed, contradictory, or unsafe to continue, emit `needs_human` instead of guessing.\n\n"
-        "When the implementation is complete, write exactly these files:\n"
-        f"- {turn_dir / 'generator.md'}\n"
-        f"- {turn_dir / 'generator.status.json'}\n\n"
-        "In `generator.md`, include at minimum:\n"
-        "- What changed\n"
-        "- Why those changes move the code toward satisfying `contract.md`\n"
-        "- Changed invariants / preserved invariants\n"
-        "- Downstream readers / consumers checked\n"
-        "- Failure modes and fallback behavior considered\n"
-        "- Verification performed\n"
-        "- Remaining contract items not yet satisfied\n"
-        "- Known risks or blockers\n\n"
-        "The status JSON must be exactly this shape:\n"
-        '{"result":"implemented|no_changes_needed|blocked|needs_human","summary":"short string","changed_files":["relative/path"],"commit_sha":"required when implemented","compare_base_sha":"required when implemented","branch":"required when implemented","human_message":"required when needs_human","human_source":"required when needs_human"}'
-    )
-    sections.append("After producing the required artifacts for this turn, end your turn. Do not continue with extra speculative work beyond the requested deliverables for this turn.")
-    return "\n\n".join(sections).rstrip()
+    previous_turn_dir = turn_dir.parent / turn_name(turn_number - 1)
+    values = {
+        "repo_root": str(repo_root),
+        "task_name": task_name,
+        "task_path": str(task_root / "task.md"),
+        "contract_path": str(task_root / "contract.md"),
+        "agents_path": str(task_root / "AGENTS.md"),
+        "role_instructions_path": str(task_root / "generator.instructions.md"),
+        "turn_name": turn_name(turn_number),
+        "turn_one_context_block": format_turn_one_context(task_root, "generator"),
+        "later_turn_context_block": format_later_turn_context(task_root, "generator"),
+        "migration_warning_block": format_contract_migration_warning(task_root),
+        "previous_reviewer_md_path": str(previous_turn_dir / "reviewer.md"),
+        "previous_reviewer_status_path": str(previous_turn_dir / "reviewer.status.json"),
+        "generator_md_path": str(turn_dir / "generator.md"),
+        "generator_status_path": str(turn_dir / "generator.status.json"),
+    }
+    template_name = "generator_turn_1.md" if inline_context else "generator_turn_n.md"
+    return render_template_text(
+        read_template("prompts", template_name),
+        values,
+        template_name=f"prompts/{template_name}",
+    ).rstrip()
 
 
 def build_reviewer_turn_prompt(
@@ -1079,61 +907,32 @@ def build_reviewer_turn_prompt(
     task_root: Path,
     turn_dir: Path,
     turn_number: int,
-    git_state: dict | None,
     *,
     inline_context: bool,
 ) -> str:
-    sections: list[str] = [f"Repository root:\n{repo_root}"]
-    if inline_context:
-        sections.append(format_turn_one_context(task_root, "reviewer"))
-    else:
-        sections.append(format_later_turn_context(task_root, "reviewer"))
-    migration_warning = format_contract_migration_warning(task_root)
-    if migration_warning:
-        sections.append(migration_warning)
-    sections.extend(
-        [
-            f"Turn {turn_name(turn_number)}.",
-            "The generator has completed a change. Review the current repository state and these files carefully:\n"
-            f"- {turn_dir / 'generator.md'}\n"
-            f"- {turn_dir / 'generator.status.json'}",
-        ]
-    )
-    if git_state and git_state.get("enabled"):
-        sections.append(
-            textwrap.dedent(
-                """\
-                Use git as the primary source of what changed.
-                Read `generator.status.json` to get `branch`, `compare_base_sha`, and `commit_sha`, then inspect:
-                - `git show <commit_sha>`
-                - `git diff <compare_base_sha>..<commit_sha>`
-                - any other git commands you need to understand the latest generator change set
-                Treat git history as the primary record of the latest change set, and use repository state plus artifacts as supporting context.
-                If generator reported `no_changes_needed`, inspect the current HEAD and write that HEAD commit as `reviewed_commit_sha`.
-                If the change touches state, metadata, checkpoints, caches, rebuild logic, health checks, or fallback behavior, inspect both the writers and the downstream readers/consumers.
-                Perform at least one independent falsification or negative-path check on the riskiest changed invariant.
-                """
-            ).rstrip()
-        )
-    sections.extend(
-        [
-            "When the review is complete, write exactly these files:\n"
-            f"- {turn_dir / 'reviewer.md'}\n"
-            f"- {turn_dir / 'reviewer.status.json'}\n\n"
-            "In `reviewer.md`, include at minimum:\n"
-            "- Verdict summary\n"
-            "- Contract checklist copied from `contract.md`, using `[x]` and `[ ]`\n"
-            "- Critical review dimensions, using `[pass]`, `[fail]`, or `[uncertain]`\n"
-            "- Blocking issues\n"
-            "- Independent verification performed\n"
-            "- Residual risks or follow-up notes\n\n"
-            "The status JSON must be exactly this shape:\n"
-            '{"verdict":"approved|changes_requested|blocked|needs_human","summary":"short string","blocking_issues":["issue"],"reviewed_commit_sha":"required for approved or changes_requested","critical_dimensions":{"correctness_vs_intent":"pass|fail|uncertain","regression_risk":"pass|fail|uncertain","failure_mode_and_fallback":"pass|fail|uncertain","state_and_metadata_integrity":"pass|fail|uncertain","test_adequacy":"pass|fail|uncertain","maintainability":"pass|fail|uncertain"},"human_message":"required when needs_human","human_source":"required when needs_human"}',
-            "Use `approved` only when no blocking issues remain and every critical review dimension is `pass`. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers. Use `needs_human` when the plan or instructions themselves require user clarification.",
-            "After producing the required artifacts for this turn, end your turn. Do not continue with extra speculative work beyond the requested deliverables for this turn.",
-        ]
-    )
-    return "\n\n".join(sections).rstrip()
+    values = {
+        "repo_root": str(repo_root),
+        "task_name": task_root.name,
+        "task_path": str(task_root / "task.md"),
+        "contract_path": str(task_root / "contract.md"),
+        "agents_path": str(task_root / "AGENTS.md"),
+        "role_instructions_path": str(task_root / "reviewer.instructions.md"),
+        "turn_name": turn_name(turn_number),
+        "turn_one_context_block": format_turn_one_context(task_root, "reviewer"),
+        "later_turn_context_block": format_later_turn_context(task_root, "reviewer"),
+        "migration_warning_block": format_contract_migration_warning(task_root),
+        "generator_md_path": str(turn_dir / "generator.md"),
+        "generator_status_path": str(turn_dir / "generator.status.json"),
+        "reviewer_md_path": str(turn_dir / "reviewer.md"),
+        "reviewer_status_path": str(turn_dir / "reviewer.status.json"),
+        "critical_review_dimensions_block": format_review_dimensions_block(),
+    }
+    template_name = "reviewer_turn_1.md" if inline_context else "reviewer_turn_n.md"
+    return render_template_text(
+        read_template("prompts", template_name),
+        values,
+        template_name=f"prompts/{template_name}",
+    ).rstrip()
 
 
 def write_prompt_artifact(turn_dir: Path, role: str, prompt: str) -> None:
@@ -1170,7 +969,7 @@ def pause_for_human(
     if human_message:
         print(f"human_message: {human_message}", flush=True)
     print(
-        "update task.md / AGENTS.md / role instructions as needed, then start a fresh run.",
+        "update task.md / contract.md / AGENTS.md / role instructions as needed, then start a fresh run.",
         flush=True,
     )
 
@@ -1252,57 +1051,6 @@ def create_tmux_sessions(run_dir: Path, state: dict) -> None:
     save_run_state(run_dir, state)
 
 
-def verify_generator_git_metadata(
-    repo_root: Path, git_state: dict, generator_status: dict, task_name: str, turn_number: int
-) -> str:
-    commit_sha = generator_status["commit_sha"]
-    compare_base_sha = generator_status["compare_base_sha"]
-    branch = generator_status["branch"]
-    expected_branch = git_state["current_branch"]
-    expected_base = git_state["last_generator_commit_sha"] or git_state["base_commit_sha"]
-
-    if branch != expected_branch:
-        raise SupervisorRuntimeError(
-            "generator_git_metadata",
-            f"generator reported branch {branch} but expected {expected_branch}",
-            role="generator",
-        )
-    if compare_base_sha != expected_base:
-        raise SupervisorRuntimeError(
-            "generator_git_metadata",
-            f"generator reported compare_base_sha {compare_base_sha} but expected {expected_base}",
-            role="generator",
-        )
-    head_sha = git_stdout(repo_root, "rev-parse", "HEAD")
-    if head_sha != commit_sha:
-        raise SupervisorRuntimeError(
-            "generator_git_metadata",
-            f"generator reported commit_sha {commit_sha} but repo HEAD is {head_sha}",
-            role="generator",
-        )
-    expected_message = f"council({task_name}): turn {turn_name(turn_number)}"
-    actual_message = git_stdout(repo_root, "log", "-1", "--pretty=%s")
-    if actual_message != expected_message:
-        raise SupervisorRuntimeError(
-            "generator_git_metadata",
-            f"latest commit message is `{actual_message}` but expected `{expected_message}`",
-            role="generator",
-        )
-    return commit_sha
-
-
-def verify_reviewer_commit_reference(
-    expected_reviewed_commit_sha: str | None, reviewer_status: dict
-) -> None:
-    reviewed_commit_sha = reviewer_status["reviewed_commit_sha"]
-    if reviewed_commit_sha != expected_reviewed_commit_sha:
-        raise SupervisorRuntimeError(
-            "reviewer_git_metadata",
-            f"reviewer reported reviewed_commit_sha {reviewed_commit_sha} but expected {expected_reviewed_commit_sha}",
-            role="reviewer",
-        )
-
-
 def wait_for_tmux_sessions_ready(run_dir: Path, state: dict) -> None:
     launch_timeout_seconds = float(state["council_config"]["council"]["launch_timeout_seconds"])
     for role in ("generator", "reviewer"):
@@ -1333,7 +1081,6 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
             current_turn_dir,
             turn_number,
             state["task_name"],
-            git_state,
             inline_context=turn_number == 1,
         )
         write_prompt_artifact(current_turn_dir, "generator", generator_prompt)
@@ -1369,15 +1116,6 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
             "generator",
             state["roles"]["generator"]["tmux_session"],
         )
-        if git_state and git_state.get("enabled") and generator_status["result"] == "implemented":
-            git_state["last_generator_commit_sha"] = verify_generator_git_metadata(
-                repo_root,
-                git_state,
-                generator_status,
-                state["task_name"],
-                turn_number,
-            )
-            save_run_state(run_dir, state)
         if generator_status["result"] == "needs_human":
             pause_for_human(
                 run_dir,
@@ -1400,7 +1138,6 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
             task_root,
             current_turn_dir,
             turn_number,
-            git_state,
             inline_context=turn_number == 1,
         )
         write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
@@ -1436,13 +1173,6 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
             "reviewer",
             state["roles"]["reviewer"]["tmux_session"],
         )
-
-        if git_state and git_state.get("enabled") and reviewer_status["verdict"] in {"approved", "changes_requested"}:
-            verify_reviewer_commit_reference(
-                git_state["last_generator_commit_sha"] or git_state["base_commit_sha"],
-                reviewer_status,
-            )
-
         if reviewer_status["verdict"] == "approved":
             state["status"] = "approved"
             state["stop_reason"] = reviewer_status["summary"]
@@ -1484,7 +1214,7 @@ def start_run(args: argparse.Namespace) -> int:
     ensure_task_workspace_exists(task_root)
     council_config = load_council_config(repo_root)
     materials = load_task_materials(task_root)
-    if not materials["task_text"] or materials["task_text"] == DEFAULT_TASK_PLACEHOLDER.strip():
+    if not materials["task_text"] or materials["task_text"] == default_scaffold_text("task.md").strip():
         raise SystemExit(
             f"{task_root / 'task.md'} is still a placeholder. Fill it in before running start."
         )
@@ -1517,9 +1247,6 @@ def start_run(args: argparse.Namespace) -> int:
         print(f"task_root: {task_root}")
         print(f"run_id: {run_id}")
         print(f"run_dir: {run_dir}")
-        if git_state and git_state.get("enabled"):
-            print(f"git branch: {git_state['current_branch']}")
-            print(f"git base_commit: {git_state['base_commit_sha']}")
         print(f"generator tmux: {generator_session}")
         print(f"reviewer tmux: {reviewer_session}")
         print(f"attach generator: tmux attach -t {generator_session}")

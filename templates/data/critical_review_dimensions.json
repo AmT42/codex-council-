@@ -1,0 +1,10 @@
+{
+  "dimensions": [
+    {"key": "correctness_vs_intent", "label": "correctness vs intent"},
+    {"key": "regression_risk", "label": "regression risk"},
+    {"key": "failure_mode_and_fallback", "label": "failure mode and fallback"},
+    {"key": "state_and_metadata_integrity", "label": "state and metadata integrity"},
+    {"key": "test_adequacy", "label": "test adequacy"},
+    {"key": "maintainability", "label": "maintainability"}
+  ]
+}

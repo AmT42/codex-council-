@@ -1,0 +1,11 @@
+[codex]
+model = "gpt-5.4"
+model_reasoning_effort = "xhigh"
+dangerously_bypass_approvals_and_sandbox = true
+no_alt_screen = true
+
+[council]
+max_turns = 6
+launch_timeout_seconds = 60
+turn_timeout_seconds = 1800
+require_git = true

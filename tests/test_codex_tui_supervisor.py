@@ -27,23 +27,23 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 "result": "implemented",
                 "summary": "Changed the parser and added tests.",
                 "changed_files": ["src/parser.py", "tests/test_parser.py"],
-                "commit_sha": "abc123",
-                "compare_base_sha": "def456",
-                "branch": "main",
             }
         )
         self.assertEqual(status["result"], "implemented")
         self.assertEqual(len(status["changed_files"]), 2)
 
-    def test_validate_generator_status_requires_commit_metadata_for_implemented(self) -> None:
-        with self.assertRaises(ValueError):
-            MODULE.validate_generator_status(
-                {
-                    "result": "implemented",
-                    "summary": "Changed the parser and added tests.",
-                    "changed_files": ["src/parser.py"],
-                }
-            )
+    def test_validate_generator_status_accepts_optional_git_metadata_when_present(self) -> None:
+        status = MODULE.validate_generator_status(
+            {
+                "result": "implemented",
+                "summary": "Changed the parser and added tests.",
+                "changed_files": ["src/parser.py"],
+                "commit_sha": "abc123",
+                "compare_base_sha": "def456",
+                "branch": "main",
+            }
+        )
+        self.assertEqual(status["commit_sha"], "abc123")
 
     def test_validate_reviewer_status_accepts_approved(self) -> None:
         status = MODULE.validate_reviewer_status(
@@ -51,7 +51,6 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 "verdict": "approved",
                 "summary": "No blocking issues remain.",
                 "blocking_issues": [],
-                "reviewed_commit_sha": "abc123",
                 "critical_dimensions": {
                     "correctness_vs_intent": "pass",
                     "regression_risk": "pass",
@@ -64,23 +63,24 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         )
         self.assertEqual(status["verdict"], "approved")
 
-    def test_validate_reviewer_status_requires_reviewed_commit_for_approved(self) -> None:
-        with self.assertRaises(ValueError):
-            MODULE.validate_reviewer_status(
-                {
-                    "verdict": "approved",
-                    "summary": "No blocking issues remain.",
-                    "blocking_issues": [],
-                    "critical_dimensions": {
-                        "correctness_vs_intent": "pass",
-                        "regression_risk": "pass",
-                        "failure_mode_and_fallback": "pass",
-                        "state_and_metadata_integrity": "pass",
-                        "test_adequacy": "pass",
-                        "maintainability": "pass",
-                    },
-                }
-            )
+    def test_validate_reviewer_status_accepts_optional_reviewed_commit_when_present(self) -> None:
+        status = MODULE.validate_reviewer_status(
+            {
+                "verdict": "changes_requested",
+                "summary": "One blocker remains.",
+                "blocking_issues": ["Fix the fallback path."],
+                "reviewed_commit_sha": "abc123",
+                "critical_dimensions": {
+                    "correctness_vs_intent": "fail",
+                    "regression_risk": "uncertain",
+                    "failure_mode_and_fallback": "fail",
+                    "state_and_metadata_integrity": "pass",
+                    "test_adequacy": "pass",
+                    "maintainability": "pass",
+                },
+            }
+        )
+        self.assertEqual(status["reviewed_commit_sha"], "abc123")
 
     def test_validate_generator_status_requires_human_message_for_needs_human(self) -> None:
         with self.assertRaises(ValueError):
@@ -241,6 +241,10 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertTrue((task_root / "AGENTS.md").exists())
             self.assertTrue((task_root / "generator.instructions.md").exists())
             self.assertTrue((task_root / "reviewer.instructions.md").exists())
+            self.assertEqual(
+                (task_root / "AGENTS.md").read_text(encoding="utf-8"),
+                MODULE.read_template("scaffold", "AGENTS.md"),
+            )
 
     def test_scaffold_task_root_marks_placeholder_when_no_task_seed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -276,6 +280,14 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertIn("--no-alt-screen", command)
         self.assertIn('model_reasoning_effort="xhigh"', command)
 
+    def test_render_template_text_fails_on_unresolved_placeholder(self) -> None:
+        with self.assertRaises(SystemExit):
+            MODULE.render_template_text(
+                "Hello {{name}} {{missing}}",
+                {"name": "world"},
+                template_name="test-template",
+            )
+
     def test_prepare_turn_snapshots_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "task" / "runs" / "run-1"
@@ -306,7 +318,6 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 turn_dir,
                 1,
                 "demo-task",
-                {"enabled": False},
                 inline_context=True,
             )
             self.assertIn("Shared rules.", prompt)
@@ -321,6 +332,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("Downstream readers / consumers checked", prompt)
             self.assertIn("Failure modes and fallback behavior considered", prompt)
             self.assertIn("Verification performed", prompt)
+            self.assertIn("Canonical council files for this task", prompt)
 
     def test_build_generator_turn_prompt_later_turn_references_paths_not_inlined_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -341,7 +353,6 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 turn_dir,
                 2,
                 "demo-task",
-                {"enabled": False},
                 inline_context=False,
             )
             self.assertIn(str(task_root / "task.md"), prompt)
@@ -357,27 +368,36 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
             (task_root / "contract.md").write_text("- [ ] Contract item", encoding="utf-8")
             (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
-            (task_root / "reviewer.instructions.md").write_text("Reviewer additions.", encoding="utf-8")
+            (task_root / "reviewer.instructions.md").write_text(
+                MODULE.read_template("scaffold", "reviewer.instructions.md"),
+                encoding="utf-8",
+            )
             prompt = MODULE.build_reviewer_turn_prompt(
                 Path("/repo"),
                 task_root,
                 turn_dir,
                 1,
-                {"enabled": True},
                 inline_context=True,
             )
-            self.assertIn("Reviewer additions.", prompt)
+            self.assertIn("Treat yourself as an external evaluator", prompt)
             self.assertIn("changes_requested", prompt)
             self.assertIn("needs_human", prompt)
-            self.assertIn("Use git as the primary source of what changed.", prompt)
             self.assertIn("contract.md", prompt)
             self.assertIn("Contract checklist copied from `contract.md`", prompt)
             self.assertIn("Critical review dimensions", prompt)
             self.assertIn("[pass]", prompt)
             self.assertIn("[fail]", prompt)
             self.assertIn("[uncertain]", prompt)
-            self.assertIn("inspect both the writers and the downstream readers/consumers", prompt)
-            self.assertIn("independent falsification or negative-path check", prompt)
+            self.assertIn("correctness vs intent", prompt)
+            self.assertIn("failure mode and fallback", prompt)
+            self.assertIn("inspect both writers and downstream readers/consumers", prompt)
+            self.assertIn("independent falsification attempt", prompt)
+            self.assertNotIn("reviewed_commit_sha", prompt)
+
+    def test_load_critical_review_dimensions_from_template_file(self) -> None:
+        dimensions = MODULE.load_critical_review_dimensions()
+        self.assertTrue(any(item["key"] == "correctness_vs_intent" for item in dimensions))
+        self.assertTrue(any(item["label"] == "maintainability" for item in dimensions))
 
     def test_wait_for_role_artifacts_returns_valid_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -389,9 +409,6 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                         "result": "implemented",
                         "summary": "Added feature.",
                         "changed_files": ["scripts/feature.py"],
-                        "commit_sha": "abc123",
-                        "compare_base_sha": "def456",
-                        "branch": "main",
                     }
                 ),
                 encoding="utf-8",

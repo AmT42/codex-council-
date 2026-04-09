@@ -2,6 +2,34 @@
 
 This repo contains local supervisors for a sequential generator/reviewer Codex council.
 
+## Template-Driven Layout
+
+The council scaffold and turn-prompt text is stored in repo templates, not embedded directly in Python:
+
+```text
+templates/
+  scaffold/
+    council_root.gitignore
+    config.toml
+    task.md
+    contract.md
+    AGENTS.md
+    generator.instructions.md
+    reviewer.instructions.md
+  prompts/
+    generator_turn_1.md
+    generator_turn_n.md
+    reviewer_turn_1.md
+    reviewer_turn_n.md
+  data/
+    critical_review_dimensions.json
+```
+
+Meaning:
+- `templates/scaffold/*` are copied during `init`
+- `templates/prompts/*` are rendered into `supervisor_to_generator.md` / `supervisor_to_reviewer.md`
+- `templates/data/critical_review_dimensions.json` is the source of truth for reviewer critical-dimension keys and labels
+
 ## Real TUI Mode
 
 The TUI supervisor now works against a target repository and stores its task workspace inside that repository.
@@ -59,7 +87,7 @@ The supervisor will:
 - refuse to start on a dirty repo or detached HEAD
 - launch two real `codex` TUIs in `tmux` inside that target repo
 - build each turn prompt from `.codex-council/<task_name>/task.md`, `contract.md`, `AGENTS.md`, and the role-specific instruction file
-- inline the canonical task files on turn 1, then only reference their canonical paths on later turns so the agents can inspect the current files directly and use git to understand changes between turns
+- inline the canonical task files on turn 1, then only reference their canonical paths on later turns so the agents can inspect the current files directly
 - advance turns only when the required artifact pair exists and validates
 - pause when generator or reviewer emits `needs_human`
 - stop when reviewer writes `{"verdict":"approved",...}`, `{"verdict":"blocked",...}`, or max turns is reached
@@ -75,8 +103,6 @@ Important:
 
 - watch the sessions, but do not type into them unless you intentionally want to override the council
 - the authoritative control signal is only the artifact pair for the role
-- generator is expected to commit on the current branch for implemented turns before writing final artifacts
-- reviewer is expected to use git as the primary source of what changed
 - `contract.md` is the canonical definition of done
 - approval means both:
   - the contract checklist is satisfied
@@ -90,7 +116,7 @@ Important:
 Reviewer stop conditions are structured, not guessed from prose:
 
 ```json
-{"verdict":"approved","summary":"No blocking issues remain.","blocking_issues":[],"reviewed_commit_sha":"<sha>","critical_dimensions":{"correctness_vs_intent":"pass","regression_risk":"pass","failure_mode_and_fallback":"pass","state_and_metadata_integrity":"pass","test_adequacy":"pass","maintainability":"pass"}}
+{"verdict":"approved","summary":"No blocking issues remain.","blocking_issues":[],"critical_dimensions":{"correctness_vs_intent":"pass","regression_risk":"pass","failure_mode_and_fallback":"pass","state_and_metadata_integrity":"pass","test_adequacy":"pass","maintainability":"pass"}}
 ```
 
 Human-intervention pause example:
@@ -102,7 +128,7 @@ Human-intervention pause example:
 Generator implemented example:
 
 ```json
-{"result":"implemented","summary":"Implemented the requested change.","changed_files":["src/example.py"],"commit_sha":"<sha>","compare_base_sha":"<sha>","branch":"main"}
+{"result":"implemented","summary":"Implemented the requested change.","changed_files":["src/example.py"]}
 ```
 
 Inspect the latest run state:
