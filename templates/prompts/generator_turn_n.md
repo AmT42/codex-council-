@@ -5,6 +5,8 @@ Repository root:
 
 {{continue_context_block}}
 
+{{fork_context_block}}
+
 {{migration_warning_block}}
 
 Turn {{turn_name}}.

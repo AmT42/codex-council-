@@ -7,11 +7,9 @@ Repository root:
 
 {{fork_context_block}}
 
-{{migration_warning_block}}
-
 Turn {{turn_name}}.
 
-Read the current feature spec in `task.md` and the current definition of done in `contract.md`.
+Use the inherited chat context already present in this Codex session, the available canonical council files, and the current repository state to infer the intended work.
 The generator has completed a change. Review the current repository state and these files carefully:
 - {{generator_message_path}}
 - {{generator_status_path}}
@@ -22,7 +20,6 @@ When the review is complete, write exactly these files:
 
 In `reviewer/message.md`, include at minimum:
 - Verdict summary
-- Contract checklist copied from `contract.md`, using `[x]` and `[ ]`
 - Critical review dimensions, using `[pass]`, `[fail]`, or `[uncertain]`, one line for each of:
 {{critical_review_dimensions_block}}
 - Blocking issues
@@ -35,10 +32,10 @@ Normal case:
 {"verdict":"approved|changes_requested|blocked","summary":"short string","blocking_issues":["issue"],"critical_dimensions":{"correctness_vs_intent":"pass|fail|uncertain","regression_risk":"pass|fail|uncertain","failure_mode_and_fallback":"pass|fail|uncertain","state_and_metadata_integrity":"pass|fail|uncertain","test_adequacy":"pass|fail|uncertain","maintainability":"pass|fail|uncertain"}}
 
 Human intervention case:
-{"verdict":"needs_human","summary":"short string","blocking_issues":["issue"],"critical_dimensions":{"correctness_vs_intent":"pass|fail|uncertain","regression_risk":"pass|fail|uncertain","failure_mode_and_fallback":"pass|fail|uncertain","state_and_metadata_integrity":"pass|fail|uncertain","test_adequacy":"pass|fail|uncertain","maintainability":"pass|fail|uncertain"},"human_source":"task.md|contract.md|AGENTS.md|generator.instructions.md|reviewer.instructions.md|repo_state","human_message":"short string"}
+{"verdict":"needs_human","summary":"short string","blocking_issues":["issue"],"critical_dimensions":{"correctness_vs_intent":"pass|fail|uncertain","regression_risk":"pass|fail|uncertain","failure_mode_and_fallback":"pass|fail|uncertain","state_and_metadata_integrity":"pass|fail|uncertain","test_adequacy":"pass|fail|uncertain","maintainability":"pass|fail|uncertain"},"human_source":"AGENTS.md|generator.instructions.md|reviewer.instructions.md|repo_state","human_message":"short string"}
 
-Use `approved` only when no blocking issues remain and every critical review dimension is `pass`. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers. Use `needs_human` when the feature spec or definition of done themselves require human clarification.
-Use `changes_requested` only for concrete, repo-actionable fixes. If the only remaining blocker is that `contract.md` is too broad, non-auditable, contradictory, or mixes engineering with business outcomes that cannot be objectively reviewed, use `needs_human` instead.
+Use `approved` only when no blocking issues remain and every critical review dimension is `pass`. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers. Use `needs_human` when the inherited context or available instructions themselves require human clarification.
+Use `changes_requested` only for concrete, repo-actionable fixes. If the only remaining blocker is that the inherited context or available instructions are too broad, contradictory, or non-auditable, use `needs_human` instead.
 
 After writing the required files, print exactly:
 - `COUNCIL_TERMINAL_SUMMARY_BEGIN`

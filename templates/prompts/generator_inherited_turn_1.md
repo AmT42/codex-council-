@@ -7,12 +7,10 @@ Repository root:
 
 {{fork_context_block}}
 
-{{migration_warning_block}}
-
 Turn {{turn_name}}.
 
-Read the current feature spec in `task.md` and the current definition of done in `contract.md`.
-Implement the requested change carefully. If the feature spec is critically flawed, contradictory, or unsafe to continue, emit `needs_human` instead of guessing.
+Use the inherited chat context already present in this Codex session, the available canonical council files, and the current repository state to infer the requested work.
+Implement the requested change carefully. If the inherited context or available instructions are critically flawed, contradictory, or unsafe to continue, emit `needs_human` instead of guessing.
 
 If you changed repo-tracked files in this turn, create a git commit before writing the generator artifacts for this turn.
 
@@ -23,12 +21,12 @@ When the implementation is complete, write exactly these files:
 In `generator/message.md`, include at minimum:
 - What changed
 - Commit created for this turn, or explicitly say that no repo-tracked files changed
-- Why those changes move the code toward satisfying `contract.md`
+- Why those changes are the right response to the inherited context and current repository state
 - Changed invariants / preserved invariants
 - Downstream readers / consumers checked
 - Failure modes and fallback behavior considered
 - Verification performed
-- Remaining contract items not yet satisfied
+- Remaining open questions or unverified areas
 - Known risks or blockers
 
 Use exactly one of these status JSON shapes:
@@ -37,7 +35,7 @@ Normal case:
 {"result":"implemented|no_changes_needed|blocked","summary":"short string","changed_files":["relative/path"]}
 
 Human intervention case:
-{"result":"needs_human","summary":"short string","changed_files":["relative/path"],"human_source":"task.md|contract.md|AGENTS.md|generator.instructions.md|reviewer.instructions.md|repo_state","human_message":"short string"}
+{"result":"needs_human","summary":"short string","changed_files":["relative/path"],"human_source":"AGENTS.md|generator.instructions.md|reviewer.instructions.md|repo_state","human_message":"short string"}
 
 After writing the required files, print exactly:
 - `COUNCIL_TERMINAL_SUMMARY_BEGIN`

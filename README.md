@@ -14,13 +14,20 @@ templates/
     task.md
     contract.md
     AGENTS.md
+    AGENTS.inherited_context.md
     generator.instructions.md
+    generator.instructions.inherited_context.md
     reviewer.instructions.md
+    reviewer.instructions.inherited_context.md
   prompts/
     generator_turn_1.md
     generator_turn_n.md
+    generator_inherited_turn_1.md
+    generator_inherited_turn_n.md
     reviewer_turn_1.md
     reviewer_turn_n.md
+    reviewer_inherited_turn_1.md
+    reviewer_inherited_turn_n.md
   data/
     critical_review_dimensions.json
 ```
@@ -29,6 +36,13 @@ Meaning:
 - `templates/scaffold/*` are copied during `init`
 - `templates/prompts/*` are rendered into per-turn role prompt artifacts such as `turns/0001/generator/prompt.md`
 - `templates/data/critical_review_dimensions.json` is the source of truth for reviewer critical-dimension keys and labels
+
+The supervisor now supports two workspace shapes:
+- `spec_backed`
+  - `task.md` + `contract.md` + `AGENTS.md` + role instructions
+- `inherited_context`
+  - `AGENTS.md` + role instructions only
+  - intended for fork-based starts that inherit product context from an existing Codex chat session
 
 ## Spec Model
 
@@ -203,12 +217,42 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
   --task "Implement feature X"
 ```
 
+If you want a fork-based inherited-context workspace with no repo-local `task.md` or `contract.md` yet:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
+  --dir /path/to/target-repo \
+  --skip-task-and-contract
+```
+
 Then edit the scaffolded files as needed and start the council:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
   --dir /path/to/target-repo
 ```
+
+Fork-based start examples:
+
+Spec-backed fork start:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
+  --dir /path/to/target-repo \
+  --generator-fork-session-id <generator_parent_session_id> \
+  --reviewer-fork-session-id <reviewer_parent_session_id>
+```
+
+Inherited-context fork start:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
+  --dir /path/to/target-repo \
+  --generator-fork-session-id <generator_parent_session_id> \
+  --reviewer-fork-session-id <reviewer_parent_session_id>
+```
+
+In inherited-context mode, both fork session ids are required. This mode is intended for forked starts, not fresh spec-less runs.
 
 Every execution creates a fresh run under:
 
@@ -232,9 +276,11 @@ Each turn is role-scoped, for example:
 The supervisor will:
 
 - resolve the target directory to its git root by default
-- refuse to start on a dirty repo or detached HEAD
+- refuse to start on a detached HEAD
+- refuse to start on a dirty repo in spec-backed mode
+- allow a dirty repo in inherited-context fork mode
 - launch two real `codex` TUIs in `tmux` inside that target repo
-- build each turn prompt from `.codex-council/<task_name>/task.md`, `contract.md`, `AGENTS.md`, and the role-specific instruction file
+- build each turn prompt from the available canonical task files for that workspace mode
 - inline the canonical task files on turn 1, then only reference their canonical paths on later turns so the agents can inspect the current files directly
 - store per-turn canonical file hashes and metadata in `context_manifest.json`
 - advance turns only when the required role artifact pair exists and validates
@@ -258,6 +304,10 @@ Important:
 - `AGENTS.md` is the canonical council brief
 - `start` refuses to launch if `task.md` is missing required spec sections
 - `start` refuses to launch if `contract.md` is still scaffold text or has no checklist items
+- inherited-context mode intentionally omits repo-local `task.md` and `contract.md`
+- inherited-context mode requires both `--generator-fork-session-id` and `--reviewer-fork-session-id`
+- inherited-context mode allows a dirty worktree so the council can continue from already-modified forked context
+- spec-backed mode keeps the old clean-worktree requirement, even when fork session ids are supplied
 - approval means both:
   - the contract checklist is satisfied
   - all critical review dimensions pass

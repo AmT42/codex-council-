@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import importlib.util
 import io
@@ -22,6 +23,15 @@ SPEC.loader.exec_module(MODULE)
 
 
 class CodexTuiSupervisorTests(unittest.TestCase):
+    def init_git_repo(self, repo_root: Path) -> None:
+        repo_root.mkdir()
+        subprocess.run(["git", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo_root, check=True, capture_output=True, text=True)
+        (repo_root / "file.txt").write_text("x", encoding="utf-8")
+        subprocess.run(["git", "add", "file.txt"], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
+
     def test_validate_generator_status_accepts_valid_payload(self) -> None:
         status = MODULE.validate_generator_status(
             {
@@ -317,6 +327,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             )
             self.assertTrue(result["task_created"])
             self.assertFalse(result["task_needs_edit"])
+            self.assertEqual(result["workspace_mode"], MODULE.WORKSPACE_MODE_SPEC_BACKED)
             self.assertTrue((repo_root / ".codex-council" / "config.toml").exists())
             self.assertTrue((repo_root / ".codex-council" / ".gitignore").exists())
             self.assertTrue((task_root / "task.md").exists())
@@ -346,14 +357,66 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertTrue(result["task_created"])
             self.assertTrue(result["task_needs_edit"])
 
-    def test_missing_task_files_reports_expected_paths(self) -> None:
+    def test_scaffold_task_root_can_skip_task_and_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
-            task_root.mkdir(parents=True)
-            missing = MODULE.missing_task_files(task_root)
-            self.assertEqual(len(missing), 5)
-            self.assertTrue(any(path.name == "task.md" for path in missing))
-            self.assertTrue(any(path.name == "contract.md" for path in missing))
+            result = MODULE.scaffold_task_root(
+                task_root,
+                initial_task_text=None,
+                skip_task_and_contract=True,
+            )
+            self.assertEqual(result["workspace_mode"], MODULE.WORKSPACE_MODE_INHERITED_CONTEXT)
+            self.assertFalse((task_root / "task.md").exists())
+            self.assertFalse((task_root / "contract.md").exists())
+            self.assertTrue((task_root / "AGENTS.md").exists())
+            self.assertTrue((task_root / "generator.instructions.md").exists())
+            self.assertTrue((task_root / "reviewer.instructions.md").exists())
+            self.assertIn(
+                "inherited chat context",
+                (task_root / "AGENTS.md").read_text(encoding="utf-8"),
+            )
+
+    def test_inspect_task_workspace_detects_modes_and_rejects_partial_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            spec_task_root = Path(tmp_dir) / ".codex-council" / "spec-task"
+            spec_task_root.mkdir(parents=True)
+            (spec_task_root / "task.md").write_text("task", encoding="utf-8")
+            (spec_task_root / "contract.md").write_text("contract", encoding="utf-8")
+            self.assertEqual(
+                MODULE.inspect_task_workspace(spec_task_root)["workspace_mode"],
+                MODULE.WORKSPACE_MODE_SPEC_BACKED,
+            )
+
+            inherited_task_root = Path(tmp_dir) / ".codex-council" / "inherited-task"
+            inherited_task_root.mkdir(parents=True)
+            self.assertEqual(
+                MODULE.inspect_task_workspace(inherited_task_root)["workspace_mode"],
+                MODULE.WORKSPACE_MODE_INHERITED_CONTEXT,
+            )
+
+            partial_task_root = Path(tmp_dir) / ".codex-council" / "partial-task"
+            partial_task_root.mkdir(parents=True)
+            (partial_task_root / "task.md").write_text("task", encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                MODULE.inspect_task_workspace(partial_task_root)
+
+    def test_init_task_can_skip_task_and_contract_from_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=tmp_dir,
+                allow_non_git=True,
+                task=None,
+                task_file=None,
+                skip_task_and_contract=True,
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = MODULE.init_task(args)
+            self.assertEqual(result, 0)
+            rendered = output.getvalue()
+            self.assertIn("task/contract: skipped for inherited-context mode", rendered)
+            self.assertIn("both fork session ids", rendered)
 
     def test_build_codex_command_includes_configured_flags(self) -> None:
         repo_root = Path("/repo")
@@ -372,6 +435,25 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertIn('--dangerously-bypass-approvals-and-sandbox', command)
         self.assertIn("--no-alt-screen", command)
         self.assertIn('model_reasoning_effort="xhigh"', command)
+
+    def test_build_codex_fork_command_includes_session_id_and_configured_flags(self) -> None:
+        repo_root = Path("/repo")
+        command = MODULE.build_codex_fork_command(
+            repo_root,
+            {
+                "model": "gpt-5.4",
+                "model_reasoning_effort": "xhigh",
+                "dangerously_bypass_approvals_and_sandbox": True,
+                "no_alt_screen": True,
+            },
+            "parent-session-id",
+        )
+        self.assertEqual(command[:4], ["codex", "fork", "-C", str(repo_root)])
+        self.assertEqual(command[-1], "parent-session-id")
+        self.assertIn("--model", command)
+        self.assertIn("gpt-5.4", command)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertIn("--no-alt-screen", command)
 
     def test_render_template_text_fails_on_unresolved_placeholder(self) -> None:
         with self.assertRaises(SystemExit):
@@ -407,6 +489,22 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 manifest_one["files"]["task"]["canonical_path"],
                 str(task_root / "task.md"),
             )
+            self.assertEqual(manifest_one["workspace_mode"], MODULE.WORKSPACE_MODE_SPEC_BACKED)
+
+    def test_prepare_turn_records_inherited_context_manifest_without_spec_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = repo_root / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
+            (task_root / "generator.instructions.md").write_text("Generator rules.", encoding="utf-8")
+            (task_root / "reviewer.instructions.md").write_text("Reviewer rules.", encoding="utf-8")
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            manifest = MODULE.load_json(turn_one / "context_manifest.json")
+            self.assertEqual(manifest["workspace_mode"], MODULE.WORKSPACE_MODE_INHERITED_CONTEXT)
+            self.assertNotIn("task", manifest["files"])
+            self.assertNotIn("contract", manifest["files"])
 
     def test_lint_task_workspace_readiness_rejects_placeholder_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -521,6 +619,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 turn_dir,
                 1,
                 "demo-task",
+                workspace_mode=MODULE.WORKSPACE_MODE_SPEC_BACKED,
                 inline_context=True,
             )
             self.assertIn("Shared rules.", prompt)
@@ -567,6 +666,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 turn_dir,
                 2,
                 "demo-task",
+                workspace_mode=MODULE.WORKSPACE_MODE_SPEC_BACKED,
                 inline_context=False,
             )
             self.assertIn(str(task_root / "task.md"), prompt)
@@ -612,6 +712,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 turn_dir,
                 2,
                 "demo-task",
+                workspace_mode=MODULE.WORKSPACE_MODE_SPEC_BACKED,
                 inline_context=False,
             )
             self.assertIn("The previous reviewer verdict was `changes_requested`.", prompt)
@@ -656,6 +757,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 turn_dir,
                 2,
                 "demo-task",
+                workspace_mode=MODULE.WORKSPACE_MODE_SPEC_BACKED,
                 inline_context=False,
                 continue_context_block="This run is continuing after `paused_needs_human`.",
             )
@@ -678,6 +780,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 task_root,
                 turn_dir,
                 1,
+                workspace_mode=MODULE.WORKSPACE_MODE_SPEC_BACKED,
                 inline_context=True,
             )
             self.assertIn("Treat yourself as an external evaluator", prompt)
@@ -702,10 +805,97 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn('{"verdict":"approved|changes_requested|blocked"', prompt)
             self.assertIn("Current definition of done", prompt)
 
+    def test_build_spec_backed_prompt_can_include_fork_context_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            task_root.mkdir(parents=True)
+            (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "contract.md").write_text("- [ ] Contract item", encoding="utf-8")
+            (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
+            (task_root / "generator.instructions.md").write_text("Generator additions.", encoding="utf-8")
+            prompt = MODULE.build_generator_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                "demo-task",
+                workspace_mode=MODULE.WORKSPACE_MODE_SPEC_BACKED,
+                inline_context=True,
+                fork_context_block=MODULE.format_fork_context_block(
+                    {"bootstrap_mode": "fork"}
+                ),
+            )
+            self.assertIn("Fork context:", prompt)
+            self.assertIn("prior Codex chat context", prompt)
+            self.assertIn("task.md", prompt)
+            self.assertIn("contract.md", prompt)
+
+    def test_build_inherited_context_prompts_avoid_task_and_contract_references(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            task_root.mkdir(parents=True)
+            (task_root / "AGENTS.md").write_text("Inherited council brief.", encoding="utf-8")
+            (task_root / "generator.instructions.md").write_text("Generator inherited instructions.", encoding="utf-8")
+            (task_root / "reviewer.instructions.md").write_text("Reviewer inherited instructions.", encoding="utf-8")
+            generator_prompt = MODULE.build_generator_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                "demo-task",
+                workspace_mode=MODULE.WORKSPACE_MODE_INHERITED_CONTEXT,
+                inline_context=True,
+                fork_context_block=MODULE.format_fork_context_block(
+                    {"bootstrap_mode": "fork"}
+                ),
+            )
+            reviewer_prompt = MODULE.build_reviewer_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                workspace_mode=MODULE.WORKSPACE_MODE_INHERITED_CONTEXT,
+                inline_context=True,
+                fork_context_block=MODULE.format_fork_context_block(
+                    {"bootstrap_mode": "fork"}
+                ),
+            )
+            self.assertIn("Inherited council brief.", generator_prompt)
+            self.assertIn("Generator inherited instructions.", generator_prompt)
+            self.assertNotIn("task.md", generator_prompt)
+            self.assertNotIn("contract.md", generator_prompt)
+            self.assertIn("Fork context:", generator_prompt)
+            self.assertIn("Use the inherited chat context already present in this Codex session", reviewer_prompt)
+            self.assertNotIn("task.md", reviewer_prompt)
+            self.assertNotIn("contract.md", reviewer_prompt)
+            self.assertIn("Critical review dimensions", reviewer_prompt)
+
     def test_load_critical_review_dimensions_from_template_file(self) -> None:
         dimensions = MODULE.load_critical_review_dimensions()
         self.assertTrue(any(item["key"] == "correctness_vs_intent" for item in dimensions))
         self.assertTrue(any(item["label"] == "maintainability" for item in dimensions))
+
+    def test_build_continue_context_inherited_mode_avoids_task_and_contract_references(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "runs" / "run-1"
+            previous_turn_dir = run_dir / "turns" / "0001"
+            (previous_turn_dir / "generator").mkdir(parents=True)
+            MODULE.write_text(previous_turn_dir / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                previous_turn_dir / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            context = MODULE.build_continue_context(
+                state={"status": "paused_needs_human"},
+                previous_turn_dir=previous_turn_dir,
+                role="generator",
+                workspace_mode=MODULE.WORKSPACE_MODE_INHERITED_CONTEXT,
+            )
+            self.assertNotIn("task.md", context)
+            self.assertNotIn("contract.md", context)
+            self.assertIn("available canonical council files", context)
 
     def test_wait_for_role_artifacts_returns_valid_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -974,6 +1164,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             task_root=task_root,
             task_name="demo-task",
             run_id="20260408-abc123",
+            workspace_mode=MODULE.WORKSPACE_MODE_SPEC_BACKED,
             council_config={
                 "codex": {
                     "model": "gpt-5.4",
@@ -996,6 +1187,41 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertEqual(state["task_root"], str(task_root))
         self.assertEqual(state["task_name"], "demo-task")
         self.assertEqual(state["roles"]["generator"]["tmux_session"], "gen")
+        self.assertEqual(state["workspace_mode"], MODULE.WORKSPACE_MODE_SPEC_BACKED)
+        self.assertEqual(state["roles"]["generator"]["bootstrap_mode"], "fresh")
+
+    def test_build_role_session_command_prefers_fork_then_resume(self) -> None:
+        council_config = {
+            "codex": {
+                "model": "gpt-5.4",
+                "model_reasoning_effort": "xhigh",
+                "dangerously_bypass_approvals_and_sandbox": True,
+                "no_alt_screen": True,
+            }
+        }
+        repo_root = Path("/repo")
+        fork_command = MODULE.build_role_session_command(
+            repo_root,
+            council_config,
+            {
+                "bootstrap_mode": "fork",
+                "fork_parent_session_id": "parent-id",
+                "codex_session_id": None,
+            },
+        )
+        resumed_command = MODULE.build_role_session_command(
+            repo_root,
+            council_config,
+            {
+                "bootstrap_mode": "fork",
+                "fork_parent_session_id": "parent-id",
+                "codex_session_id": "child-id",
+            },
+        )
+        self.assertEqual(fork_command[0:2], ["codex", "fork"])
+        self.assertEqual(fork_command[-1], "parent-id")
+        self.assertEqual(resumed_command[0:2], ["codex", "resume"])
+        self.assertEqual(resumed_command[-1], "child-id")
 
     def test_assign_recent_codex_session_ids_filters_to_run_creation_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1006,6 +1232,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 task_root=Path("/repo/.codex-council/demo-task"),
                 task_name="demo-task",
                 run_id="run-1",
+                workspace_mode=MODULE.WORKSPACE_MODE_SPEC_BACKED,
                 council_config={
                     "codex": {
                         "model": "gpt-5.4",
@@ -1038,6 +1265,99 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 MODULE.assign_recent_codex_session_ids(run_dir, state)
             self.assertEqual(state["roles"]["generator"]["codex_session_id"], "new-gen")
             self.assertEqual(state["roles"]["reviewer"]["codex_session_id"], "new-rev")
+
+    def test_start_run_requires_both_fork_session_ids_in_inherited_context_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            MODULE.scaffold_council_root(repo_root)
+            task_root = MODULE.task_root_for(repo_root, "demo-task")
+            MODULE.scaffold_task_root(
+                task_root,
+                initial_task_text=None,
+                skip_task_and_contract=True,
+            )
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                generator_session=None,
+                reviewer_session=None,
+                generator_fork_session_id="parent-gen",
+                reviewer_fork_session_id=None,
+            )
+            with self.assertRaises(SystemExit) as cm:
+                MODULE.start_run(args)
+            self.assertIn("--generator-fork-session-id", str(cm.exception))
+
+    def test_start_run_inherited_context_allows_dirty_repo_with_valid_fork_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            (repo_root / "file.txt").write_text("dirty change", encoding="utf-8")
+            MODULE.scaffold_council_root(repo_root)
+            task_root = MODULE.task_root_for(repo_root, "demo-task")
+            MODULE.scaffold_task_root(
+                task_root,
+                initial_task_text=None,
+                skip_task_and_contract=True,
+            )
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                generator_session="gen",
+                reviewer_session="rev",
+                generator_fork_session_id="parent-gen",
+                reviewer_fork_session_id="parent-rev",
+            )
+            with mock.patch.object(
+                MODULE,
+                "find_codex_session_entry",
+                side_effect=lambda session_id: {"id": session_id, "updated_at": "2026-04-10T12:00:00Z", "thread_name": session_id},
+            ), mock.patch.object(MODULE, "read_codex_session_index", return_value=[]), mock.patch.object(
+                MODULE, "create_tmux_sessions", return_value=None
+            ), mock.patch.object(
+                MODULE, "wait_for_tmux_sessions_ready", return_value=None
+            ), mock.patch.object(MODULE, "supervisor_loop", return_value=None), contextlib.redirect_stdout(
+                io.StringIO()
+            ):
+                result = MODULE.start_run(args)
+            self.assertEqual(result, 0)
+            state = MODULE.load_json(task_root / "runs" / "run-1" / "state.json")
+            self.assertEqual(state["workspace_mode"], MODULE.WORKSPACE_MODE_INHERITED_CONTEXT)
+            self.assertEqual(state["roles"]["generator"]["bootstrap_mode"], "fork")
+            self.assertEqual(state["roles"]["generator"]["fork_parent_session_id"], "parent-gen")
+
+    def test_start_run_spec_backed_still_rejects_dirty_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            MODULE.scaffold_council_root(repo_root)
+            task_root = MODULE.task_root_for(repo_root, "demo-task")
+            MODULE.scaffold_task_root(
+                task_root,
+                initial_task_text="Implement a concrete feature.",
+            )
+            (task_root / "contract.md").write_text(
+                "# Definition of Done\n\n- [ ] Concrete acceptance criterion",
+                encoding="utf-8",
+            )
+            (repo_root / "file.txt").write_text("dirty change", encoding="utf-8")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                generator_session=None,
+                reviewer_session=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+            )
+            with self.assertRaises(SystemExit):
+                MODULE.start_run(args)
 
     def test_determine_continue_target_routes_from_generator_pending_same_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1185,6 +1505,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 task_root=task_root,
                 task_name="demo-task",
                 run_id="run-1",
+                workspace_mode=MODULE.WORKSPACE_MODE_SPEC_BACKED,
                 council_config={
                     "codex": {
                         "model": "gpt-5.4",
@@ -1289,6 +1610,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             state = {
                 "status": "waiting_generator",
                 "stop_reason": None,
+                "workspace_mode": MODULE.WORKSPACE_MODE_SPEC_BACKED,
             }
             MODULE.save_json(run_dir / "state.json", state)
             turn_dir = run_dir / "turns" / "0001"
@@ -1305,6 +1627,33 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 )
             self.assertEqual(state["status"], "paused_needs_human")
             self.assertEqual(state["stop_reason"], "Task plan needs clarification.")
+
+    def test_pause_for_human_inherited_mode_avoids_task_and_contract_filenames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            state = {
+                "status": "waiting_generator",
+                "stop_reason": None,
+                "workspace_mode": MODULE.WORKSPACE_MODE_INHERITED_CONTEXT,
+            }
+            MODULE.save_json(run_dir / "state.json", state)
+            turn_dir = run_dir / "turns" / "0001"
+            turn_dir.mkdir(parents=True)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                MODULE.pause_for_human(
+                    run_dir,
+                    state,
+                    role="generator",
+                    turn_dir=turn_dir,
+                    summary="Need clarification.",
+                    human_message="Clarify the inherited intent.",
+                    human_source="repo_state",
+                )
+            rendered = output.getvalue()
+            self.assertNotIn("task.md", rendered)
+            self.assertNotIn("contract.md", rendered)
+            self.assertIn("feature spec and definition-of-done", rendered)
 
 
 if __name__ == "__main__":
