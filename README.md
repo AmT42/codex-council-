@@ -125,7 +125,7 @@ Important:
   - all critical review dimensions pass
 - generator must write `generator/message.md` and `generator/status.json`
 - reviewer must write `reviewer/message.md` and `reviewer/status.json`
-- `raw_final_output.md` is trace-only and is captured only after valid final artifacts exist
+- `raw_final_output.md` is trace-only and now captures only an explicit terminal summary block, not the full pasted prompt or tool trace
 - `.codex-council/<task_name>/AGENTS.md` is injected into prompts as a council brief; it does not automatically scope repo-root edits through Codex AGENTS semantics
 - either role may emit `needs_human` when `task.md` or the task instructions are flawed enough that continuing would be unsafe or misleading
 - a reviewer should use `needs_human`, not `changes_requested`, when the remaining blocker is that the contract itself is too broad or non-auditable
@@ -169,6 +169,24 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task \
   --dir /path/to/target-repo \
   --run-id 20260408-123456-abcdef
 ```
+
+Continue a stopped or paused run in place:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task \
+  --dir /path/to/target-repo
+```
+
+`continue` reuses the existing run directory instead of creating a new run. It is artifact-driven:
+- missing or invalid generator artifacts: continue generator on the same turn
+- valid generator artifacts but missing or invalid reviewer artifacts: continue reviewer on the same turn
+- reviewer `changes_requested`: continue generator on turn `N+1`
+- generator or reviewer `needs_human`: continue the same role on turn `N+1`
+- reviewer `approved`: cannot continue
+
+When the original tmux session still exists, `continue` keeps using that same live role session so direct human chat in the terminal is preserved. If the tmux session is gone, the harness prefers resuming the same Codex conversation when it has a tracked session id; otherwise it starts a fresh role session with a continuation prompt.
+
+This is the intended path after you edit `task.md`, `contract.md`, `AGENTS.md`, or role instructions, or after you discuss changes directly in the live Codex session and want the council to proceed.
 
 Generated runtime state and traces live under the task run tree and are ignored by `.codex-council/.gitignore`.
 

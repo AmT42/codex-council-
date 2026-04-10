@@ -3,6 +3,8 @@ Repository root:
 
 {{turn_one_context_block}}
 
+{{continue_context_block}}
+
 {{migration_warning_block}}
 
 Turn {{turn_name}}.
@@ -33,5 +35,10 @@ Normal case:
 
 Human intervention case:
 {"result":"needs_human","summary":"short string","changed_files":["relative/path"],"human_source":"task.md|contract.md|AGENTS.md|generator.instructions.md|reviewer.instructions.md|repo_state","human_message":"short string"}
+
+After writing the required files, print exactly:
+- `COUNCIL_TERMINAL_SUMMARY_BEGIN`
+- one short terminal-only summary of what happened in this turn
+- `COUNCIL_TERMINAL_SUMMARY_END`
 
 After producing the required artifacts for this turn, end your turn. Do not continue with extra speculative work beyond the requested deliverables for this turn.

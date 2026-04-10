@@ -3,6 +3,8 @@ Repository root:
 
 {{later_turn_context_block}}
 
+{{continue_context_block}}
+
 {{migration_warning_block}}
 
 Turn {{turn_name}}.
@@ -34,5 +36,10 @@ Human intervention case:
 
 Use `approved` only when no blocking issues remain and every critical review dimension is `pass`. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers. Use `needs_human` when the plan or instructions themselves require user clarification.
 Use `changes_requested` only for concrete, repo-actionable fixes. If the only remaining blocker is that `contract.md` is too broad, non-auditable, contradictory, or mixes engineering with business outcomes that cannot be objectively reviewed, use `needs_human` instead.
+
+After writing the required files, print exactly:
+- `COUNCIL_TERMINAL_SUMMARY_BEGIN`
+- one short terminal-only summary of what happened in this turn
+- `COUNCIL_TERMINAL_SUMMARY_END`
 
 After producing the required artifacts for this turn, end your turn. Do not continue with extra speculative work beyond the requested deliverables for this turn.

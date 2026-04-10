@@ -14,6 +14,7 @@ import textwrap
 import time
 import tomllib
 import uuid
+from typing import Literal
 
 
 COUNCIL_DIRNAME = ".codex-council"
@@ -42,6 +43,8 @@ CONTRACT_PLACEHOLDER_MARKERS = (
 ARTIFACT_REPAIR_ATTEMPTS = 1
 SESSION_RECOVERY_ATTEMPTS = 1
 RAW_OUTPUT_CAPTURE_TIMEOUT_SECONDS = 30.0
+TERMINAL_SUMMARY_BEGIN = "COUNCIL_TERMINAL_SUMMARY_BEGIN"
+TERMINAL_SUMMARY_END = "COUNCIL_TERMINAL_SUMMARY_END"
 
 
 class SupervisorRuntimeError(RuntimeError):
@@ -148,6 +151,39 @@ def render_template_text(template_text: str, values: dict[str, str], *, template
 
 def default_scaffold_text(filename: str) -> str:
     return read_template("scaffold", filename)
+
+
+def read_codex_session_index() -> list[dict]:
+    path = codex_session_index_path()
+    if not path.exists():
+        return []
+    entries: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        session_id = item.get("id")
+        updated_at = item.get("updated_at")
+        thread_name = item.get("thread_name")
+        if isinstance(session_id, str) and isinstance(updated_at, str):
+            entries.append(
+                {
+                    "id": session_id,
+                    "updated_at": updated_at,
+                    "thread_name": thread_name if isinstance(thread_name, str) else None,
+                }
+            )
+    return entries
+
+
+def find_codex_session_entry(session_id: str) -> dict | None:
+    for entry in read_codex_session_index():
+        if entry["id"] == session_id:
+            return entry
+    return None
 
 
 def run_subprocess(
@@ -296,8 +332,22 @@ def latest_run_dir(task_root: Path) -> Path:
     return candidates[-1]
 
 
+def latest_turn_dir(run_dir: Path) -> Path:
+    turns_root = run_dir / "turns"
+    if not turns_root.exists():
+        raise SystemExit(f"missing turns directory: {turns_root}")
+    candidates = sorted(path for path in turns_root.iterdir() if path.is_dir())
+    if not candidates:
+        raise SystemExit(f"no turns found for run: {run_dir}")
+    return candidates[-1]
+
+
 def events_path_for(run_dir: Path) -> Path:
     return run_dir / "events.jsonl"
+
+
+def codex_session_index_path() -> Path:
+    return Path.home() / ".codex" / "session_index.jsonl"
 
 
 def turn_dir_for(run_dir: Path, turn_number: int) -> Path:
@@ -330,6 +380,10 @@ def role_status_path(turn_dir: Path, role: str) -> Path:
 
 def role_raw_output_path(turn_dir: Path, role: str) -> Path:
     return role_dir_for(turn_dir, role) / "raw_final_output.md"
+
+
+def role_capture_status_path(turn_dir: Path, role: str) -> Path:
+    return role_dir_for(turn_dir, role) / "capture_status.json"
 
 
 def role_validation_error_json_path(turn_dir: Path, role: str) -> Path:
@@ -539,6 +593,24 @@ def build_codex_command(repo_root: Path, codex_cfg: dict) -> list[str]:
     return cmd
 
 
+def build_codex_resume_command(
+    repo_root: Path,
+    codex_cfg: dict,
+    session_id: str,
+) -> list[str]:
+    cmd = ["codex", "resume", "-C", str(repo_root)]
+    if codex_cfg["model"]:
+        cmd.extend(["--model", codex_cfg["model"]])
+    if codex_cfg["model_reasoning_effort"]:
+        cmd.extend(["-c", f'model_reasoning_effort="{codex_cfg["model_reasoning_effort"]}"'])
+    if codex_cfg["dangerously_bypass_approvals_and_sandbox"]:
+        cmd.append("--dangerously-bypass-approvals-and-sandbox")
+    if codex_cfg["no_alt_screen"]:
+        cmd.append("--no-alt-screen")
+    cmd.append(session_id)
+    return cmd
+
+
 def tmux_session_exists(name: str) -> bool:
     proc = subprocess.run(
         ["tmux", "has-session", "-t", name],
@@ -634,24 +706,21 @@ def capture_last_tmux_slice(name: str) -> str:
     return extract_last_tmux_slice(tmux_capture_joined_pane(name))
 
 
-def raw_output_is_contaminated(text: str) -> bool:
-    if not text.strip():
-        return True
-    lower = text.lower()
-    prompt_markers = (
-        "repository root:",
-        "when the implementation is complete, write exactly these files:",
-        "when the review is complete, write exactly these files:",
-        "use exactly one of these status json shapes:",
-    )
-    trace_markers = (
-        "• ran ",
-        "• edited ",
-        "• explored",
-        "working (",
-        "codex ran out of room in the model's context window",
-    )
-    return any(marker in lower for marker in prompt_markers + trace_markers)
+def extract_terminal_summary_block(pane_text: str) -> str | None:
+    lines = pane_text.splitlines()
+    begin_indexes = [
+        idx for idx, line in enumerate(lines) if line.strip() == TERMINAL_SUMMARY_BEGIN
+    ]
+    for begin_idx in reversed(begin_indexes):
+        for end_idx in range(begin_idx + 1, len(lines)):
+            if lines[end_idx].strip() == TERMINAL_SUMMARY_END:
+                snippet = [line.rstrip() for line in lines[begin_idx + 1 : end_idx]]
+                while snippet and not snippet[0].strip():
+                    snippet.pop(0)
+                while snippet and not snippet[-1].strip():
+                    snippet.pop()
+                return "\n".join(snippet).rstrip() if snippet else None
+    return None
 
 
 def pane_shows_prompt(pane_text: str) -> bool:
@@ -676,12 +745,18 @@ def restart_role_session(
     repo_root: Path,
     council_config: dict,
     role: str,
+    codex_session_id: str | None = None,
 ) -> None:
     tmux_kill_session(tmux_name)
+    command = (
+        build_codex_resume_command(repo_root, council_config["codex"], codex_session_id)
+        if codex_session_id
+        else build_codex_command(repo_root, council_config["codex"])
+    )
     tmux_new_session(
         tmux_name,
         repo_root,
-        build_codex_command(repo_root, council_config["codex"]),
+        command,
         role=role,
     )
 
@@ -840,6 +915,28 @@ def save_turn_metadata(
     if details:
         payload["details"] = details
     save_json(turn_metadata_path(turn_dir), payload)
+
+
+def load_turn_metadata(turn_dir: Path) -> dict:
+    path = turn_metadata_path(turn_dir)
+    if not path.exists():
+        raise SystemExit(f"missing turn metadata: {path}")
+    return load_json(path)
+
+
+def annotate_turn_continuation(
+    turn_dir: Path,
+    *,
+    continuation_source: str,
+    selected_role: str,
+    selected_turn: int,
+) -> None:
+    metadata = load_turn_metadata(turn_dir) if turn_metadata_path(turn_dir).exists() else {}
+    metadata["continuation_source"] = continuation_source
+    metadata["selected_role"] = selected_role
+    metadata["selected_turn"] = turn_name(selected_turn)
+    metadata["continued_at"] = now_ts()
+    save_json(turn_metadata_path(turn_dir), metadata)
 
 
 def prepare_turn(run_dir: Path, turn_number: int, task_root: Path) -> Path:
@@ -1236,6 +1333,39 @@ def format_later_turn_context(task_root: Path, role: str) -> str:
     ).rstrip()
 
 
+def build_continue_context(
+    *,
+    state: dict,
+    previous_turn_dir: Path | None,
+    role: str,
+) -> str:
+    if previous_turn_dir is None:
+        return ""
+    previous_message = role_message_path(previous_turn_dir, role)
+    previous_status = role_status_path(previous_turn_dir, role)
+    if not previous_message.exists() or not previous_status.exists():
+        alt_role = "generator" if role == "reviewer" else "reviewer"
+        alt_message = role_message_path(previous_turn_dir, alt_role)
+        alt_status = role_status_path(previous_turn_dir, alt_role)
+        if alt_message.exists() and alt_status.exists():
+            previous_message = alt_message
+            previous_status = alt_status
+    lines = [
+        f"This run is continuing after `{state['status']}`.",
+        "The human may have edited canonical task files and may also have discussed updates directly in this same session.",
+        "Before proceeding, reread the canonical task files and account for any direct human guidance already present in this chat session.",
+    ]
+    if previous_message.exists() and previous_status.exists():
+        lines.extend(
+            [
+                "Reference the most recent completed turn artifacts if needed:",
+                f"- {previous_message}",
+                f"- {previous_status}",
+            ]
+        )
+    return "\n".join(lines).rstrip()
+
+
 def build_generator_turn_prompt(
     repo_root: Path,
     task_root: Path,
@@ -1244,6 +1374,7 @@ def build_generator_turn_prompt(
     task_name: str,
     *,
     inline_context: bool,
+    continue_context_block: str = "",
 ) -> str:
     previous_turn_dir = turn_dir.parent / turn_name(turn_number - 1)
     previous_reviewer_status_path = role_status_path(previous_turn_dir, "reviewer")
@@ -1284,6 +1415,7 @@ def build_generator_turn_prompt(
         "turn_name": turn_name(turn_number),
         "turn_one_context_block": format_turn_one_context(task_root, "generator"),
         "later_turn_context_block": format_later_turn_context(task_root, "generator"),
+        "continue_context_block": continue_context_block,
         "migration_warning_block": format_contract_migration_warning(task_root),
         "previous_reviewer_message_path": str(role_message_path(previous_turn_dir, "reviewer")),
         "previous_reviewer_status_path": str(previous_reviewer_status_path),
@@ -1306,6 +1438,7 @@ def build_reviewer_turn_prompt(
     turn_number: int,
     *,
     inline_context: bool,
+    continue_context_block: str = "",
 ) -> str:
     values = {
         "repo_root": str(repo_root),
@@ -1317,6 +1450,7 @@ def build_reviewer_turn_prompt(
         "turn_name": turn_name(turn_number),
         "turn_one_context_block": format_turn_one_context(task_root, "reviewer"),
         "later_turn_context_block": format_later_turn_context(task_root, "reviewer"),
+        "continue_context_block": continue_context_block,
         "migration_warning_block": format_contract_migration_warning(task_root),
         "generator_message_path": str(role_message_path(turn_dir, "generator")),
         "generator_status_path": str(role_status_path(turn_dir, "generator")),
@@ -1342,7 +1476,6 @@ def write_final_message_artifact(turn_dir: Path, role: str, message: str) -> Non
 
 def write_raw_final_output_artifact(turn_dir: Path, role: str, tmux_name: str) -> None:
     # Trace/debug only. This file must never be used as a control signal.
-    message_text = role_message_path(turn_dir, role).read_text(encoding="utf-8")
     captured_text = ""
     try:
         wait_for_tmux_prompt(
@@ -1354,8 +1487,22 @@ def write_raw_final_output_artifact(turn_dir: Path, role: str, tmux_name: str) -
         captured_text = capture_last_tmux_slice(tmux_name)
     except SupervisorRuntimeError:
         captured_text = ""
-    final_text = captured_text if not raw_output_is_contaminated(captured_text) else message_text
-    write_text(role_raw_output_path(turn_dir, role), final_text)
+    summary_text = extract_terminal_summary_block(captured_text)
+    if summary_text:
+        write_text(role_raw_output_path(turn_dir, role), summary_text)
+        save_json(
+            role_capture_status_path(turn_dir, role),
+            {"status": "captured", "source": "terminal_summary_markers"},
+        )
+        return
+    write_text(
+        role_raw_output_path(turn_dir, role),
+        "[terminal summary unavailable]\nSee capture_status.json for capture state.",
+    )
+    save_json(
+        role_capture_status_path(turn_dir, role),
+        {"status": "unavailable", "reason": "missing_terminal_summary_markers"},
+    )
 
 
 def write_validation_error_artifacts(
@@ -1451,7 +1598,7 @@ def pause_for_human(
     if human_message:
         print(f"human_message: {human_message}", flush=True)
     print(
-        "update task.md / contract.md / AGENTS.md / role instructions as needed, then start a fresh run.",
+        "update task.md / contract.md / AGENTS.md / role instructions as needed, then use `continue` to resume this run.",
         flush=True,
     )
 
@@ -1478,10 +1625,14 @@ def create_run_state(
         "repo_root": str(repo_root),
         "roles": {
             "generator": {
+                "codex_session_id": None,
+                "codex_thread_name": None,
                 "last_wait_phase": None,
                 "tmux_session": generator_session,
             },
             "reviewer": {
+                "codex_session_id": None,
+                "codex_thread_name": None,
                 "last_wait_phase": None,
                 "tmux_session": reviewer_session,
             },
@@ -1492,11 +1643,47 @@ def create_run_state(
         "stop_reason": None,
         "task_name": task_name,
         "task_root": str(task_root),
+        "session_index_snapshot_ids": [],
     }
 
 
 def save_run_state(run_dir: Path, state: dict) -> None:
     save_json(run_dir / "state.json", state)
+
+
+def assign_recent_codex_session_ids(run_dir: Path, state: dict) -> None:
+    known_ids = set(state.get("session_index_snapshot_ids", []))
+    created_at = state.get("created_at")
+    assigned_ids = {
+        role_state.get("codex_session_id")
+        for role_state in state["roles"].values()
+        if role_state.get("codex_session_id")
+    }
+    entries = sorted(read_codex_session_index(), key=lambda item: item["updated_at"])
+    available = [
+        entry
+        for entry in entries
+        if entry["id"] not in known_ids
+        and entry["id"] not in assigned_ids
+        and (not isinstance(created_at, str) or entry["updated_at"] >= created_at)
+    ]
+    changed = False
+    for role in ("generator", "reviewer"):
+        role_state = state["roles"][role]
+        if role_state.get("codex_session_id") or not available:
+            continue
+        entry = available.pop(0)
+        role_state["codex_session_id"] = entry["id"]
+        role_state["codex_thread_name"] = entry.get("thread_name")
+        append_run_event(
+            run_dir,
+            f"{role}_session_identified",
+            role=role,
+            details={"codex_session_id": entry["id"]},
+        )
+        changed = True
+    if changed:
+        save_run_state(run_dir, state)
 
 
 def write_failure_diagnostics(run_dir: Path, state: dict, error: SupervisorRuntimeError) -> Path:
@@ -1534,6 +1721,44 @@ def create_tmux_sessions(run_dir: Path, state: dict) -> None:
     save_run_state(run_dir, state)
 
 
+def ensure_role_session_ready(run_dir: Path, state: dict, role: str) -> None:
+    repo_root = Path(state["repo_root"])
+    tmux_name = state["roles"][role]["tmux_session"]
+    if not tmux_session_exists(tmux_name):
+        role_state = state["roles"][role]
+        codex_session_id = role_state.get("codex_session_id")
+        session_entry = (
+            find_codex_session_entry(codex_session_id)
+            if isinstance(codex_session_id, str)
+            else None
+        )
+        if session_entry and isinstance(state.get("created_at"), str) and session_entry["updated_at"] < state["created_at"]:
+            codex_session_id = None
+            role_state["codex_session_id"] = None
+            role_state["codex_thread_name"] = None
+            save_run_state(run_dir, state)
+        restart_role_session(
+            tmux_name,
+            repo_root=repo_root,
+            council_config=state["council_config"],
+            role=role,
+            codex_session_id=codex_session_id,
+        )
+        event_name = (
+            f"{role}_session_resumed"
+            if codex_session_id
+            else f"{role}_session_restarted"
+        )
+        append_run_event(run_dir, event_name, role=role)
+    wait_for_tmux_prompt(
+        tmux_name,
+        float(state["council_config"]["council"]["launch_timeout_seconds"]),
+        phase=f"{role}_session_ready",
+        role=role,
+    )
+    assign_recent_codex_session_ids(run_dir, state)
+
+
 def wait_for_tmux_sessions_ready(run_dir: Path, state: dict) -> None:
     launch_timeout_seconds = float(state["council_config"]["council"]["launch_timeout_seconds"])
     for role in ("generator", "reviewer"):
@@ -1546,151 +1771,231 @@ def wait_for_tmux_sessions_ready(run_dir: Path, state: dict) -> None:
             role=role,
         )
         append_run_event(run_dir, f"{role}_session_ready", role=role)
+    assign_recent_codex_session_ids(run_dir, state)
 
 
-def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
+def run_generator_phase(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_number: int,
+    current_turn_dir: Path,
+    *,
+    inline_context: bool,
+    continue_context_block: str = "",
+) -> dict:
     repo_root = Path(state["repo_root"])
     turn_timeout_seconds = float(state["council_config"]["council"]["turn_timeout_seconds"])
+    generator_prompt = build_generator_turn_prompt(
+        repo_root,
+        task_root,
+        current_turn_dir,
+        turn_number,
+        state["task_name"],
+        inline_context=inline_context,
+        continue_context_block=continue_context_block,
+    )
+    write_prompt_artifact(current_turn_dir, "generator", generator_prompt)
+    state["status"] = "waiting_generator"
+    state["roles"]["generator"]["last_wait_phase"] = "generator_prompt_ready"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "generator_prompt_sent", role="generator")
+    append_run_event(
+        run_dir,
+        "generator_prompt_sent",
+        turn_number=turn_number,
+        role="generator",
+    )
+    ensure_role_session_ready(run_dir, state, "generator")
+    wait_for_tmux_prompt(
+        state["roles"]["generator"]["tmux_session"],
+        turn_timeout_seconds,
+        phase="generator_prompt_ready",
+        role="generator",
+    )
+    tmux_send_prompt(
+        state["roles"]["generator"]["tmux_session"],
+        generator_prompt,
+        phase="generator_turn",
+        role="generator",
+    )
+    generator_artifact_path, _, generator_status = wait_for_role_artifacts(
+        current_turn_dir,
+        "generator",
+        validator=validate_generator_status,
+        timeout_seconds=turn_timeout_seconds,
+        phase="generator_artifacts",
+        tmux_name=state["roles"]["generator"]["tmux_session"],
+        turn_number=turn_number,
+        repo_root=repo_root,
+        council_config=state["council_config"],
+    )
+    write_final_message_artifact(
+        current_turn_dir,
+        "generator",
+        generator_artifact_path.read_text(encoding="utf-8"),
+    )
+    write_raw_final_output_artifact(
+        current_turn_dir,
+        "generator",
+        state["roles"]["generator"]["tmux_session"],
+    )
+    return generator_status
 
-    for turn_number in range(1, int(state["council_config"]["council"]["max_turns"]) + 1):
+
+def run_reviewer_phase(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_number: int,
+    current_turn_dir: Path,
+    *,
+    inline_context: bool,
+    continue_context_block: str = "",
+) -> dict:
+    repo_root = Path(state["repo_root"])
+    turn_timeout_seconds = float(state["council_config"]["council"]["turn_timeout_seconds"])
+    reviewer_prompt = build_reviewer_turn_prompt(
+        repo_root,
+        task_root,
+        current_turn_dir,
+        turn_number,
+        inline_context=inline_context,
+        continue_context_block=continue_context_block,
+    )
+    write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
+    state["status"] = "waiting_reviewer"
+    state["roles"]["reviewer"]["last_wait_phase"] = "reviewer_prompt_ready"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "reviewer_prompt_sent", role="reviewer")
+    append_run_event(
+        run_dir,
+        "reviewer_prompt_sent",
+        turn_number=turn_number,
+        role="reviewer",
+    )
+    ensure_role_session_ready(run_dir, state, "reviewer")
+    wait_for_tmux_prompt(
+        state["roles"]["reviewer"]["tmux_session"],
+        turn_timeout_seconds,
+        phase="reviewer_prompt_ready",
+        role="reviewer",
+    )
+    tmux_send_prompt(
+        state["roles"]["reviewer"]["tmux_session"],
+        reviewer_prompt,
+        phase="reviewer_turn",
+        role="reviewer",
+    )
+    reviewer_artifact_path, _, reviewer_status = wait_for_role_artifacts(
+        current_turn_dir,
+        "reviewer",
+        validator=validate_reviewer_status,
+        timeout_seconds=turn_timeout_seconds,
+        phase="reviewer_artifacts",
+        tmux_name=state["roles"]["reviewer"]["tmux_session"],
+        turn_number=turn_number,
+        repo_root=repo_root,
+        council_config=state["council_config"],
+    )
+    write_final_message_artifact(
+        current_turn_dir,
+        "reviewer",
+        reviewer_artifact_path.read_text(encoding="utf-8"),
+    )
+    write_raw_final_output_artifact(
+        current_turn_dir,
+        "reviewer",
+        state["roles"]["reviewer"]["tmux_session"],
+    )
+    return reviewer_status
+
+
+def supervisor_loop_from(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    *,
+    start_turn: int,
+    start_role: str,
+    reuse_existing_turn_for_first: bool = False,
+    first_continue_context_block: str = "",
+) -> None:
+    next_role = start_role
+    max_turn_budget = int(state["council_config"]["council"]["max_turns"])
+    last_turn = start_turn + max_turn_budget - 1
+
+    for turn_number in range(start_turn, last_turn + 1):
         state["current_turn"] = turn_number
-        current_turn_dir = prepare_turn(run_dir, turn_number, task_root)
+        if turn_number == start_turn and reuse_existing_turn_for_first:
+            current_turn_dir = turn_dir_for(run_dir, turn_number)
+            ensure_dir(role_dir_for(current_turn_dir, "generator"))
+            ensure_dir(role_dir_for(current_turn_dir, "reviewer"))
+        else:
+            current_turn_dir = prepare_turn(run_dir, turn_number, task_root)
         save_run_state(run_dir, state)
 
-        generator_prompt = build_generator_turn_prompt(
-            repo_root,
-            task_root,
-            current_turn_dir,
-            turn_number,
-            state["task_name"],
-            inline_context=turn_number == 1,
-        )
-        write_prompt_artifact(current_turn_dir, "generator", generator_prompt)
-        state["status"] = "waiting_generator"
-        state["roles"]["generator"]["last_wait_phase"] = "generator_prompt_ready"
-        save_run_state(run_dir, state)
-        save_turn_metadata(current_turn_dir, turn_number, "generator_prompt_sent", role="generator")
-        append_run_event(
-            run_dir,
-            "generator_prompt_sent",
-            turn_number=turn_number,
-            role="generator",
-        )
-        wait_for_tmux_prompt(
-            state["roles"]["generator"]["tmux_session"],
-            turn_timeout_seconds,
-            phase="generator_prompt_ready",
-            role="generator",
-        )
-        tmux_send_prompt(
-            state["roles"]["generator"]["tmux_session"],
-            generator_prompt,
-            phase="generator_turn",
-            role="generator",
-        )
-        generator_artifact_path, _, generator_status = wait_for_role_artifacts(
-            current_turn_dir,
-            "generator",
-            validator=validate_generator_status,
-            timeout_seconds=turn_timeout_seconds,
-            phase="generator_artifacts",
-            tmux_name=state["roles"]["generator"]["tmux_session"],
-            turn_number=turn_number,
-            repo_root=repo_root,
-            council_config=state["council_config"],
-        )
-        write_final_message_artifact(
-            current_turn_dir,
-            "generator",
-            generator_artifact_path.read_text(encoding="utf-8"),
-        )
-        write_raw_final_output_artifact(
-            current_turn_dir,
-            "generator",
-            state["roles"]["generator"]["tmux_session"],
-        )
-        if generator_status["result"] == "needs_human":
-            pause_for_human(
+        continue_context_block = first_continue_context_block if turn_number == start_turn else ""
+
+        if next_role == "generator":
+            generator_status = run_generator_phase(
                 run_dir,
                 state,
-                role="generator",
-                turn_dir=current_turn_dir,
-                summary=generator_status["summary"],
-                human_message=generator_status["human_message"],
-                human_source=generator_status["human_source"],
-            )
-            return
-        if generator_status["result"] == "blocked":
-            state["status"] = "blocked"
-            state["stop_reason"] = generator_status["summary"]
-            save_run_state(run_dir, state)
-            save_turn_metadata(
-                current_turn_dir,
+                task_root,
                 turn_number,
-                "blocked",
-                role="generator",
-                details={"summary": generator_status["summary"]},
+                current_turn_dir,
+                inline_context=turn_number == 1,
+                continue_context_block=continue_context_block,
             )
-            append_run_event(
+            if generator_status["result"] == "needs_human":
+                pause_for_human(
+                    run_dir,
+                    state,
+                    role="generator",
+                    turn_dir=current_turn_dir,
+                    summary=generator_status["summary"],
+                    human_message=generator_status["human_message"],
+                    human_source=generator_status["human_source"],
+                )
+                return
+            if generator_status["result"] == "blocked":
+                state["status"] = "blocked"
+                state["stop_reason"] = generator_status["summary"]
+                save_run_state(run_dir, state)
+                save_turn_metadata(
+                    current_turn_dir,
+                    turn_number,
+                    "blocked",
+                    role="generator",
+                    details={"summary": generator_status["summary"]},
+                )
+                append_run_event(
+                    run_dir,
+                    "blocked",
+                    turn_number=turn_number,
+                    role="generator",
+                    details={"summary": generator_status["summary"]},
+                )
+                return
+            reviewer_status = run_reviewer_phase(
                 run_dir,
-                "blocked",
-                turn_number=turn_number,
-                role="generator",
-                details={"summary": generator_status["summary"]},
+                state,
+                task_root,
+                turn_number,
+                current_turn_dir,
+                inline_context=turn_number == 1,
             )
-            return
+        else:
+            reviewer_status = run_reviewer_phase(
+                run_dir,
+                state,
+                task_root,
+                turn_number,
+                current_turn_dir,
+                inline_context=turn_number == 1,
+                continue_context_block=continue_context_block,
+            )
 
-        reviewer_prompt = build_reviewer_turn_prompt(
-            repo_root,
-            task_root,
-            current_turn_dir,
-            turn_number,
-            inline_context=turn_number == 1,
-        )
-        write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
-        state["status"] = "waiting_reviewer"
-        state["roles"]["reviewer"]["last_wait_phase"] = "reviewer_prompt_ready"
-        save_run_state(run_dir, state)
-        save_turn_metadata(current_turn_dir, turn_number, "reviewer_prompt_sent", role="reviewer")
-        append_run_event(
-            run_dir,
-            "reviewer_prompt_sent",
-            turn_number=turn_number,
-            role="reviewer",
-        )
-        wait_for_tmux_prompt(
-            state["roles"]["reviewer"]["tmux_session"],
-            turn_timeout_seconds,
-            phase="reviewer_prompt_ready",
-            role="reviewer",
-        )
-        tmux_send_prompt(
-            state["roles"]["reviewer"]["tmux_session"],
-            reviewer_prompt,
-            phase="reviewer_turn",
-            role="reviewer",
-        )
-        reviewer_artifact_path, _, reviewer_status = wait_for_role_artifacts(
-            current_turn_dir,
-            "reviewer",
-            validator=validate_reviewer_status,
-            timeout_seconds=turn_timeout_seconds,
-            phase="reviewer_artifacts",
-            tmux_name=state["roles"]["reviewer"]["tmux_session"],
-            turn_number=turn_number,
-            repo_root=repo_root,
-            council_config=state["council_config"],
-        )
-        write_final_message_artifact(
-            current_turn_dir,
-            "reviewer",
-            reviewer_artifact_path.read_text(encoding="utf-8"),
-        )
-        write_raw_final_output_artifact(
-            current_turn_dir,
-            "reviewer",
-            state["roles"]["reviewer"]["tmux_session"],
-        )
         if reviewer_status["verdict"] == "approved":
             state["status"] = "approved"
             state["stop_reason"] = reviewer_status["summary"]
@@ -1755,25 +2060,23 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
                 role="reviewer",
                 details={"summary": reviewer_status["summary"]},
             )
-            if turn_number < int(state["council_config"]["council"]["max_turns"]):
-                next_turn_dir = prepare_turn(run_dir, turn_number + 1, task_root)
-                next_prompt = build_generator_turn_prompt(
-                    repo_root,
-                    task_root,
-                    next_turn_dir,
-                    turn_number + 1,
-                    state["task_name"],
-                    inline_context=False,
-                )
-                write_prompt_artifact(next_turn_dir, "generator", next_prompt)
-                state["status"] = "waiting_generator"
-                save_run_state(run_dir, state)
+            next_role = "generator"
             continue
 
     state["status"] = "max_turns_reached"
-    state["stop_reason"] = f"reached max turns ({state['council_config']['council']['max_turns']})"
+    state["stop_reason"] = f"reached max turns ({max_turn_budget})"
     save_run_state(run_dir, state)
     append_run_event(run_dir, "max_turns_reached", turn_number=state["current_turn"])
+
+
+def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
+    supervisor_loop_from(
+        run_dir,
+        state,
+        task_root,
+        start_turn=1,
+        start_role="generator",
+    )
 
 
 def start_run(args: argparse.Namespace) -> int:
@@ -1813,6 +2116,7 @@ def start_run(args: argparse.Namespace) -> int:
 
     generator_session = args.generator_session or build_tmux_session_name(task_name, "generator", run_id)
     reviewer_session = args.reviewer_session or build_tmux_session_name(task_name, "reviewer", run_id)
+    session_index_snapshot_ids = [entry["id"] for entry in read_codex_session_index()]
 
     state = create_run_state(
         repo_root=repo_root,
@@ -1824,6 +2128,7 @@ def start_run(args: argparse.Namespace) -> int:
         generator_session=generator_session,
         reviewer_session=reviewer_session,
     )
+    state["session_index_snapshot_ids"] = session_index_snapshot_ids
     save_run_state(run_dir, state)
     append_run_event(run_dir, "run_created", details={"task_name": task_name})
 
@@ -1934,6 +2239,175 @@ def show_status(args: argparse.Namespace) -> int:
     return 0
 
 
+ArtifactContinuationState = Literal[
+    "generator_pending",
+    "generator_invalid",
+    "generator_needs_human",
+    "generator_blocked",
+    "generator_complete_waiting_reviewer",
+    "reviewer_pending",
+    "reviewer_invalid",
+    "reviewer_changes_requested",
+    "reviewer_needs_human",
+    "reviewer_blocked",
+    "reviewer_approved",
+]
+
+
+def inspect_role_artifacts(turn_dir: Path, role: str, validator) -> dict:
+    message_path, status_path = role_artifact_paths(turn_dir, role)
+    if not message_path.exists() or not status_path.exists():
+        return {
+            "role": role,
+            "message_exists": message_path.exists(),
+            "status_exists": status_path.exists(),
+            "state": "pending",
+            "message_path": message_path,
+            "status_path": status_path,
+        }
+    try:
+        validated = load_status_file(status_path, validator)
+    except Exception as exc:
+        return {
+            "role": role,
+            "message_exists": True,
+            "status_exists": True,
+            "state": "invalid",
+            "error": str(exc),
+            "message_path": message_path,
+            "status_path": status_path,
+        }
+    return {
+        "role": role,
+        "message_exists": True,
+        "status_exists": True,
+        "state": "valid",
+        "validated_status": validated,
+        "message_path": message_path,
+        "status_path": status_path,
+    }
+
+
+def classify_continuation_state(run_dir: Path) -> tuple[Path, ArtifactContinuationState, dict]:
+    latest_turn = latest_turn_dir(run_dir)
+    generator = inspect_role_artifacts(latest_turn, "generator", validate_generator_status)
+    if generator["state"] == "pending":
+        return latest_turn, "generator_pending", generator
+    if generator["state"] == "invalid":
+        return latest_turn, "generator_invalid", generator
+
+    generator_result = generator["validated_status"]["result"]
+    if generator_result == "needs_human":
+        return latest_turn, "generator_needs_human", generator
+    if generator_result == "blocked":
+        return latest_turn, "generator_blocked", generator
+
+    reviewer = inspect_role_artifacts(latest_turn, "reviewer", validate_reviewer_status)
+    if reviewer["state"] == "pending":
+        return latest_turn, "reviewer_pending", reviewer
+    if reviewer["state"] == "invalid":
+        return latest_turn, "reviewer_invalid", reviewer
+
+    reviewer_verdict = reviewer["validated_status"]["verdict"]
+    if reviewer_verdict == "approved":
+        return latest_turn, "reviewer_approved", reviewer
+    if reviewer_verdict == "changes_requested":
+        return latest_turn, "reviewer_changes_requested", reviewer
+    if reviewer_verdict == "needs_human":
+        return latest_turn, "reviewer_needs_human", reviewer
+    return latest_turn, "reviewer_blocked", reviewer
+
+
+def determine_continue_target(run_dir: Path, state: dict) -> tuple[Path, int, str, bool, str]:
+    turns_root = run_dir / "turns"
+    if not turns_root.exists() or not any(turns_root.iterdir()):
+        fallback_role = "generator" if state.get("status") != "waiting_reviewer" else "reviewer"
+        return run_dir / "turns" / turn_name(state.get("current_turn", 1)), int(state.get("current_turn", 1)), fallback_role, True, "no_turns_present"
+
+    latest_turn, continuation_state, details = classify_continuation_state(run_dir)
+
+    if continuation_state == "generator_pending":
+        return latest_turn, int(latest_turn.name), "generator", False, continuation_state
+    if continuation_state == "generator_invalid":
+        return latest_turn, int(latest_turn.name), "generator", False, continuation_state
+    if continuation_state == "reviewer_pending":
+        return latest_turn, int(latest_turn.name), "reviewer", False, continuation_state
+    if continuation_state == "reviewer_invalid":
+        return latest_turn, int(latest_turn.name), "reviewer", False, continuation_state
+    if continuation_state == "reviewer_approved":
+        raise SystemExit("cannot continue an approved run")
+    if continuation_state == "reviewer_changes_requested":
+        return latest_turn, int(latest_turn.name) + 1, "generator", True, continuation_state
+    if continuation_state == "reviewer_needs_human":
+        return latest_turn, int(latest_turn.name) + 1, "reviewer", True, continuation_state
+    if continuation_state == "reviewer_blocked":
+        return latest_turn, int(latest_turn.name) + 1, "reviewer", True, continuation_state
+    if continuation_state == "generator_needs_human":
+        return latest_turn, int(latest_turn.name) + 1, "generator", True, continuation_state
+    if continuation_state == "generator_blocked":
+        return latest_turn, int(latest_turn.name) + 1, "generator", True, continuation_state
+    raise SystemExit(f"unsupported continuation state: {details}")
+
+
+def continue_run(args: argparse.Namespace) -> int:
+    task_name = validate_task_name(args.task_name)
+    target_input = Path(args.dir or Path.cwd()).resolve()
+    repo_root, _ = resolve_target_root(target_input, allow_non_git=args.allow_non_git)
+    task_root = task_root_for(repo_root, task_name)
+    if not task_root.exists():
+        raise SystemExit(f"missing task workspace: {task_root}")
+
+    run_id = args.run_id
+    run_dir = latest_run_dir(task_root) if run_id in (None, "latest") else task_root / "runs" / run_id
+    if not run_dir.exists():
+        raise SystemExit(f"missing run directory: {run_dir}")
+
+    state = load_json(run_dir / "state.json")
+    latest_turn, turn_number, role, create_new_turn, prior_status = determine_continue_target(run_dir, state)
+    previous_turn_dir = latest_turn if create_new_turn else (turn_dir_for(run_dir, turn_number - 1) if turn_number > 1 else None)
+    continue_context = build_continue_context(
+        state=state,
+        previous_turn_dir=previous_turn_dir,
+        role=role,
+    )
+
+    state["current_turn"] = turn_number
+    state["stop_reason"] = None
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "run_continued",
+        turn_number=turn_number,
+        role=role,
+        details={"prior_status": prior_status},
+    )
+    target_turn_dir = prepare_turn(run_dir, turn_number, task_root) if create_new_turn else turn_dir_for(run_dir, turn_number)
+    annotate_turn_continuation(
+        target_turn_dir,
+        continuation_source=prior_status,
+        selected_role=role,
+        selected_turn=turn_number,
+    )
+    supervisor_loop_from(
+        run_dir,
+        state,
+        task_root,
+        start_turn=turn_number,
+        start_role=role,
+        reuse_existing_turn_for_first=not create_new_turn,
+        first_continue_context_block=continue_context,
+    )
+
+    final_state = load_json(run_dir / "state.json")
+    print(f"run_dir: {run_dir}")
+    print(f"continued role: {role}")
+    print(f"current_turn: {final_state['current_turn']}")
+    print(f"final status: {final_state['status']}")
+    if final_state.get("stop_reason"):
+        print(f"stop reason: {final_state['stop_reason']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run two real Codex TUIs against a target repo using a repo-local .codex-council workspace."
@@ -1956,6 +2430,13 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--generator-session")
     start.add_argument("--reviewer-session")
     start.set_defaults(func=start_run)
+
+    cont = sub.add_parser("continue", help="continue a stopped or paused council run")
+    cont.add_argument("task_name")
+    cont.add_argument("--dir", help="target repository or working directory")
+    cont.add_argument("--allow-non-git", action="store_true")
+    cont.add_argument("--run-id", default="latest")
+    cont.set_defaults(func=continue_run)
 
     status = sub.add_parser("status", help="show the latest or chosen run state for a task")
     status.add_argument("task_name")

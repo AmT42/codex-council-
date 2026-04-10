@@ -245,14 +245,24 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         result = MODULE.extract_last_tmux_slice(pane)
         self.assertEqual(result, "old output\n")
 
-    def test_raw_output_is_contaminated_detects_prompt_or_trace_text(self) -> None:
-        self.assertTrue(
-            MODULE.raw_output_is_contaminated(
-                "Repository root:\n/repo\n\nWhen the review is complete, write exactly these files:"
-            )
+    def test_extract_terminal_summary_block_returns_last_complete_summary(self) -> None:
+        pane = "\n".join(
+            [
+                "noise",
+                "COUNCIL_TERMINAL_SUMMARY_BEGIN",
+                "old summary",
+                "COUNCIL_TERMINAL_SUMMARY_END",
+                "more noise",
+                "COUNCIL_TERMINAL_SUMMARY_BEGIN",
+                "latest summary",
+                "line 2",
+                "COUNCIL_TERMINAL_SUMMARY_END",
+            ]
         )
-        self.assertTrue(MODULE.raw_output_is_contaminated("• Ran cat file.txt"))
-        self.assertFalse(MODULE.raw_output_is_contaminated("Final reviewer summary.\n- one point"))
+        self.assertEqual(
+            MODULE.extract_terminal_summary_block(pane),
+            "latest summary\nline 2",
+        )
 
     def test_git_root_for_returns_repo_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -438,6 +448,8 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("create a git commit before writing the generator artifacts", prompt)
             self.assertIn("Why those changes move the code toward satisfying `contract.md`", prompt)
             self.assertIn("Commit created for this turn, or explicitly say that no repo-tracked files changed", prompt)
+            self.assertIn("COUNCIL_TERMINAL_SUMMARY_BEGIN", prompt)
+            self.assertIn("COUNCIL_TERMINAL_SUMMARY_END", prompt)
             self.assertIn("Changed invariants / preserved invariants", prompt)
             self.assertIn("Downstream readers / consumers checked", prompt)
             self.assertIn("Failure modes and fallback behavior considered", prompt)
@@ -517,6 +529,48 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("Do not use `blocked` merely because the overall contract is still large or not yet complete.", prompt)
             self.assertIn("Add automated tests for the fallback path.", prompt)
             self.assertIn("create a git commit before writing the generator artifacts", prompt)
+            self.assertIn("COUNCIL_TERMINAL_SUMMARY_BEGIN", prompt)
+
+    def test_build_generator_turn_prompt_can_include_continue_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0002"
+            previous_turn_dir = turn_dir.parent / "0001"
+            task_root.mkdir(parents=True)
+            (previous_turn_dir / "reviewer").mkdir(parents=True)
+            (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "contract.md").write_text("- [ ] Contract item", encoding="utf-8")
+            (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
+            (task_root / "generator.instructions.md").write_text("Generator additions.", encoding="utf-8")
+            MODULE.write_text(previous_turn_dir / "reviewer" / "message.md", "Review text")
+            MODULE.save_json(
+                previous_turn_dir / "reviewer" / "status.json",
+                {
+                    "verdict": "needs_human",
+                    "summary": "Clarify the contract.",
+                    "blocking_issues": ["Contract is too broad."],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "uncertain",
+                        "regression_risk": "uncertain",
+                        "failure_mode_and_fallback": "uncertain",
+                        "state_and_metadata_integrity": "uncertain",
+                        "test_adequacy": "uncertain",
+                        "maintainability": "uncertain",
+                    },
+                    "human_message": "Clarify the contract.",
+                    "human_source": "contract.md",
+                },
+            )
+            prompt = MODULE.build_generator_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                2,
+                "demo-task",
+                inline_context=False,
+                continue_context_block="This run is continuing after `paused_needs_human`.",
+            )
+            self.assertIn("This run is continuing after `paused_needs_human`.", prompt)
 
     def test_build_reviewer_turn_prompt_mentions_changes_requested_and_needs_human(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -544,6 +598,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("Contract checklist copied from `contract.md`", prompt)
             self.assertIn("If the only remaining blocker is that `contract.md` is too broad", prompt)
             self.assertIn("Critical review dimensions", prompt)
+            self.assertIn("COUNCIL_TERMINAL_SUMMARY_BEGIN", prompt)
             self.assertIn("[pass]", prompt)
             self.assertIn("[fail]", prompt)
             self.assertIn("[uncertain]", prompt)
@@ -675,7 +730,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertEqual(status["verdict"], "changes_requested")
             self.assertTrue((turn_dir / "reviewer" / "validation_error.json").exists())
 
-    def test_write_raw_final_output_artifact_falls_back_to_message_when_capture_is_contaminated(self) -> None:
+    def test_write_raw_final_output_artifact_writes_capture_note_when_summary_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             turn_dir = Path(tmp_dir) / "turns" / "0001"
             (turn_dir / "reviewer").mkdir(parents=True)
@@ -693,9 +748,46 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             ):
                 MODULE.write_raw_final_output_artifact(turn_dir, "reviewer", "reviewer-session")
 
+            self.assertIn(
+                "terminal summary unavailable",
+                (turn_dir / "reviewer" / "raw_final_output.md").read_text(encoding="utf-8").lower(),
+            )
+            self.assertEqual(
+                MODULE.load_json(turn_dir / "reviewer" / "capture_status.json")["status"],
+                "unavailable",
+            )
+
+    def test_write_raw_final_output_artifact_uses_terminal_summary_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            (turn_dir / "reviewer").mkdir(parents=True)
+            MODULE.write_text(turn_dir / "reviewer" / "message.md", "Final reviewer summary.\n- point")
+
+            def fake_wait(*args, **kwargs):
+                return None
+
+            def fake_capture(*args, **kwargs):
+                return "\n".join(
+                    [
+                        "noise",
+                        "COUNCIL_TERMINAL_SUMMARY_BEGIN",
+                        "Short terminal summary",
+                        "COUNCIL_TERMINAL_SUMMARY_END",
+                    ]
+                )
+
+            with mock.patch.object(MODULE, "wait_for_tmux_prompt", fake_wait), mock.patch.object(
+                MODULE, "capture_last_tmux_slice", fake_capture
+            ):
+                MODULE.write_raw_final_output_artifact(turn_dir, "reviewer", "reviewer-session")
+
             self.assertEqual(
                 (turn_dir / "reviewer" / "raw_final_output.md").read_text(encoding="utf-8").strip(),
-                expected,
+                "Short terminal summary",
+            )
+            self.assertEqual(
+                MODULE.load_json(turn_dir / "reviewer" / "capture_status.json")["status"],
+                "captured",
             )
 
     def test_wait_for_role_artifacts_stops_after_failed_repair(self) -> None:
@@ -813,6 +905,177 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertEqual(state["task_root"], str(task_root))
         self.assertEqual(state["task_name"], "demo-task")
         self.assertEqual(state["roles"]["generator"]["tmux_session"], "gen")
+
+    def test_assign_recent_codex_session_ids_filters_to_run_creation_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "runs" / "run-1"
+            run_dir.mkdir(parents=True)
+            state = MODULE.create_run_state(
+                repo_root=Path("/repo"),
+                task_root=Path("/repo/.codex-council/demo-task"),
+                task_name="demo-task",
+                run_id="run-1",
+                council_config={
+                    "codex": {
+                        "model": "gpt-5.4",
+                        "model_reasoning_effort": "xhigh",
+                        "dangerously_bypass_approvals_and_sandbox": True,
+                        "no_alt_screen": True,
+                    },
+                    "council": {
+                        "max_turns": 6,
+                        "launch_timeout_seconds": 60,
+                        "turn_timeout_seconds": 1800,
+                        "require_git": True,
+                    },
+                },
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+            )
+            state["created_at"] = "2026-04-10T12:00:00Z"
+            state["session_index_snapshot_ids"] = []
+            with mock.patch.object(
+                MODULE,
+                "read_codex_session_index",
+                return_value=[
+                    {"id": "old", "updated_at": "2026-04-10T11:59:00Z", "thread_name": "old"},
+                    {"id": "new-gen", "updated_at": "2026-04-10T12:00:01Z", "thread_name": "gen"},
+                    {"id": "new-rev", "updated_at": "2026-04-10T12:00:02Z", "thread_name": "rev"},
+                ],
+            ):
+                MODULE.assign_recent_codex_session_ids(run_dir, state)
+            self.assertEqual(state["roles"]["generator"]["codex_session_id"], "new-gen")
+            self.assertEqual(state["roles"]["reviewer"]["codex_session_id"], "new-rev")
+
+    def test_determine_continue_target_routes_from_generator_pending_same_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "runs" / "run-1"
+            turn_dir = run_dir / "turns" / "0005" / "generator"
+            turn_dir.mkdir(parents=True)
+            MODULE.save_json(
+                run_dir / "turns" / "0005" / "turn.json",
+                {
+                    "turn": "0005",
+                    "phase": "generator_prompt_sent",
+                    "role": "generator",
+                },
+            )
+            state = {"status": "waiting_generator", "current_turn": 5}
+            latest_turn, turn_number, role, create_new_turn, prior_status = MODULE.determine_continue_target(run_dir, state)
+            self.assertEqual(latest_turn.name, "0005")
+            self.assertEqual(turn_number, 5)
+            self.assertEqual(role, "generator")
+            self.assertFalse(create_new_turn)
+            self.assertEqual(prior_status, "generator_pending")
+
+    def test_determine_continue_target_routes_from_reviewer_changes_requested_to_next_generator_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "runs" / "run-1"
+            turn_dir = run_dir / "turns" / "0005"
+            (turn_dir / "generator").mkdir(parents=True)
+            (turn_dir / "reviewer").mkdir(parents=True)
+            MODULE.write_text(turn_dir / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_dir / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.write_text(turn_dir / "reviewer" / "message.md", "reviewer message")
+            MODULE.save_json(
+                turn_dir / "reviewer" / "status.json",
+                {
+                    "verdict": "changes_requested",
+                    "summary": "fix it",
+                    "blocking_issues": ["one fix"],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "fail",
+                        "regression_risk": "pass",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "fail",
+                        "maintainability": "pass",
+                    },
+                },
+            )
+            MODULE.save_json(turn_dir / "turn.json", {"turn": "0005", "phase": "changes_requested", "role": "reviewer"})
+            state = {"status": "paused_needs_human", "current_turn": 5}
+            latest_turn, turn_number, role, create_new_turn, prior_status = MODULE.determine_continue_target(run_dir, state)
+            self.assertEqual(latest_turn.name, "0005")
+            self.assertEqual(turn_number, 6)
+            self.assertEqual(role, "generator")
+            self.assertTrue(create_new_turn)
+            self.assertEqual(prior_status, "reviewer_changes_requested")
+
+    def test_determine_continue_target_routes_reviewer_needs_human_to_same_role_next_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "runs" / "run-1"
+            turn_dir = run_dir / "turns" / "0005"
+            (turn_dir / "generator").mkdir(parents=True)
+            (turn_dir / "reviewer").mkdir(parents=True)
+            MODULE.write_text(turn_dir / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_dir / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.write_text(turn_dir / "reviewer" / "message.md", "reviewer message")
+            MODULE.save_json(
+                turn_dir / "reviewer" / "status.json",
+                {
+                    "verdict": "needs_human",
+                    "summary": "clarify contract",
+                    "blocking_issues": ["broad contract"],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "pass",
+                        "regression_risk": "pass",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "pass",
+                        "maintainability": "pass",
+                    },
+                    "human_message": "clarify",
+                    "human_source": "contract.md",
+                },
+            )
+            MODULE.save_json(turn_dir / "turn.json", {"turn": "0005", "phase": "paused_needs_human", "role": "reviewer"})
+            state = {"status": "paused_needs_human", "current_turn": 5}
+            latest_turn, turn_number, role, create_new_turn, prior_status = MODULE.determine_continue_target(run_dir, state)
+            self.assertEqual(latest_turn.name, "0005")
+            self.assertEqual(turn_number, 6)
+            self.assertEqual(role, "reviewer")
+            self.assertTrue(create_new_turn)
+            self.assertEqual(prior_status, "reviewer_needs_human")
+
+    def test_determine_continue_target_rejects_reviewer_approved(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "runs" / "run-1"
+            turn_dir = run_dir / "turns" / "0005"
+            (turn_dir / "generator").mkdir(parents=True)
+            (turn_dir / "reviewer").mkdir(parents=True)
+            MODULE.write_text(turn_dir / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_dir / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.write_text(turn_dir / "reviewer" / "message.md", "reviewer message")
+            MODULE.save_json(
+                turn_dir / "reviewer" / "status.json",
+                {
+                    "verdict": "approved",
+                    "summary": "approved",
+                    "blocking_issues": [],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "pass",
+                        "regression_risk": "pass",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "pass",
+                        "maintainability": "pass",
+                    },
+                },
+            )
+            MODULE.save_json(turn_dir / "turn.json", {"turn": "0005", "phase": "approved", "role": "reviewer"})
+            with self.assertRaises(SystemExit):
+                MODULE.determine_continue_target(run_dir, {"status": "approved", "current_turn": 5})
 
     def test_supervisor_loop_advances_after_changes_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
