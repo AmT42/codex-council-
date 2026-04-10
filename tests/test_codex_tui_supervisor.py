@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "codex_tui_supervisor.py"
@@ -44,6 +45,16 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             }
         )
         self.assertEqual(status["commit_sha"], "abc123")
+
+    def test_validate_generator_status_rejects_council_runtime_changed_files(self) -> None:
+        with self.assertRaises(ValueError):
+            MODULE.validate_generator_status(
+                {
+                    "result": "implemented",
+                    "summary": "Changed the parser and added tests.",
+                    "changed_files": [".codex-council/task/runs/run-1/turns/0001/generator/message.md"],
+                }
+            )
 
     def test_validate_reviewer_status_accepts_approved(self) -> None:
         status = MODULE.validate_reviewer_status(
@@ -82,6 +93,27 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         )
         self.assertEqual(status["reviewed_commit_sha"], "abc123")
 
+    def test_validate_reviewer_status_normalizes_empty_human_fields_for_changes_requested(self) -> None:
+        status = MODULE.validate_reviewer_status(
+            {
+                "verdict": "changes_requested",
+                "summary": "One blocker remains.",
+                "blocking_issues": ["Fix the fallback path."],
+                "human_message": "",
+                "human_source": "",
+                "critical_dimensions": {
+                    "correctness_vs_intent": "fail",
+                    "regression_risk": "pass",
+                    "failure_mode_and_fallback": "pass",
+                    "state_and_metadata_integrity": "uncertain",
+                    "test_adequacy": "fail",
+                    "maintainability": "pass",
+                },
+            }
+        )
+        self.assertIsNone(status["human_message"])
+        self.assertIsNone(status["human_source"])
+
     def test_validate_generator_status_requires_human_message_for_needs_human(self) -> None:
         with self.assertRaises(ValueError):
             MODULE.validate_generator_status(
@@ -104,6 +136,18 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         )
         self.assertEqual(status["result"], "needs_human")
         self.assertIn("Clarify", status["human_message"])
+        self.assertEqual(status["human_source"], "task.md")
+
+    def test_validate_generator_status_accepts_human_source_as_canonical_path(self) -> None:
+        status = MODULE.validate_generator_status(
+            {
+                "result": "needs_human",
+                "summary": "Task plan is contradictory.",
+                "changed_files": [],
+                "human_message": "Clarify whether API A or API B is the intended target.",
+                "human_source": "/tmp/demo/.codex-council/task/task.md",
+            }
+        )
         self.assertEqual(status["human_source"], "task.md")
 
     def test_validate_reviewer_status_requires_human_message_for_needs_human(self) -> None:
@@ -145,6 +189,26 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertIn("Decide", status["human_message"])
         self.assertEqual(status["human_source"], "contract.md")
 
+    def test_validate_reviewer_status_accepts_human_source_as_canonical_path(self) -> None:
+        status = MODULE.validate_reviewer_status(
+            {
+                "verdict": "needs_human",
+                "summary": "Plan conflicts with current architecture.",
+                "blocking_issues": [],
+                "human_message": "Replace the placeholder contract with concrete acceptance criteria.",
+                "human_source": "/tmp/demo/.codex-council/task/contract.md",
+                "critical_dimensions": {
+                    "correctness_vs_intent": "uncertain",
+                    "regression_risk": "uncertain",
+                    "failure_mode_and_fallback": "uncertain",
+                    "state_and_metadata_integrity": "uncertain",
+                    "test_adequacy": "uncertain",
+                    "maintainability": "uncertain",
+                },
+            }
+        )
+        self.assertEqual(status["human_source"], "contract.md")
+
     def test_validate_reviewer_status_rejects_approved_if_any_dimension_not_pass(self) -> None:
         with self.assertRaises(ValueError):
             MODULE.validate_reviewer_status(
@@ -180,6 +244,15 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         )
         result = MODULE.extract_last_tmux_slice(pane)
         self.assertEqual(result, "old output\n")
+
+    def test_raw_output_is_contaminated_detects_prompt_or_trace_text(self) -> None:
+        self.assertTrue(
+            MODULE.raw_output_is_contaminated(
+                "Repository root:\n/repo\n\nWhen the review is complete, write exactly these files:"
+            )
+        )
+        self.assertTrue(MODULE.raw_output_is_contaminated("• Ran cat file.txt"))
+        self.assertFalse(MODULE.raw_output_is_contaminated("Final reviewer summary.\n- one point"))
 
     def test_git_root_for_returns_repo_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -288,20 +361,55 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 template_name="test-template",
             )
 
-    def test_prepare_turn_snapshots_inputs(self) -> None:
+    def test_prepare_turn_creates_role_scoped_layout_and_context_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            run_dir = Path(tmp_dir) / "task" / "runs" / "run-1"
-            materials = {
-                "task_text": "Do the task.",
-                "contract_text": "- [ ] Done",
-                "agents_text": "Shared rules.",
-                "generator_text": "Generator rules.",
-                "reviewer_text": "Reviewer rules.",
-            }
-            turn_dir = MODULE.prepare_turn(run_dir, 1, materials)
-            self.assertEqual((turn_dir / "inputs" / "task.md").read_text(encoding="utf-8").strip(), "Do the task.")
-            self.assertEqual((turn_dir / "inputs" / "contract.md").read_text(encoding="utf-8").strip(), "- [ ] Done")
-            self.assertEqual((turn_dir / "inputs" / "AGENTS.md").read_text(encoding="utf-8").strip(), "Shared rules.")
+            repo_root = Path(tmp_dir)
+            task_root = repo_root / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / "task.md").write_text("Do the task.", encoding="utf-8")
+            (task_root / "contract.md").write_text("- [ ] Done", encoding="utf-8")
+            (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
+            (task_root / "generator.instructions.md").write_text("Generator rules.", encoding="utf-8")
+            (task_root / "reviewer.instructions.md").write_text("Reviewer rules.", encoding="utf-8")
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            turn_two = MODULE.prepare_turn(run_dir, 2, task_root)
+            manifest_one = MODULE.load_json(turn_one / "context_manifest.json")
+            manifest_two = MODULE.load_json(turn_two / "context_manifest.json")
+            self.assertTrue((turn_one / "generator").is_dir())
+            self.assertTrue((turn_one / "reviewer").is_dir())
+            self.assertFalse((turn_one / "inputs").exists())
+            self.assertEqual(
+                manifest_one["files"]["task"]["sha256"],
+                manifest_two["files"]["task"]["sha256"],
+            )
+            self.assertEqual(
+                manifest_one["files"]["task"]["canonical_path"],
+                str(task_root / "task.md"),
+            )
+
+    def test_lint_task_workspace_readiness_rejects_placeholder_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "contract.md").write_text(
+                MODULE.read_template("scaffold", "contract.md"),
+                encoding="utf-8",
+            )
+            errors, warnings = MODULE.lint_task_workspace_readiness(task_root)
+            self.assertTrue(errors)
+            self.assertFalse(warnings)
+
+    def test_lint_task_workspace_readiness_accepts_concrete_contract_and_warns_on_embedded_success_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / "task.md").write_text("Success contract:\n- secondary context only", encoding="utf-8")
+            (task_root / "contract.md").write_text("- [ ] Concrete acceptance criterion", encoding="utf-8")
+            errors, warnings = MODULE.lint_task_workspace_readiness(task_root)
+            self.assertEqual(errors, [])
+            self.assertEqual(len(warnings), 1)
 
     def test_build_generator_turn_prompt_includes_task_files_and_not_supervisor_language(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -327,12 +435,17 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertNotIn("supervisor controls turn order", prompt.lower())
             self.assertIn("needs_human", prompt)
             self.assertNotIn("stop and wait for further instructions", prompt.lower())
+            self.assertIn("create a git commit before writing the generator artifacts", prompt)
             self.assertIn("Why those changes move the code toward satisfying `contract.md`", prompt)
+            self.assertIn("Commit created for this turn, or explicitly say that no repo-tracked files changed", prompt)
             self.assertIn("Changed invariants / preserved invariants", prompt)
             self.assertIn("Downstream readers / consumers checked", prompt)
             self.assertIn("Failure modes and fallback behavior considered", prompt)
             self.assertIn("Verification performed", prompt)
             self.assertIn("Canonical council files for this task", prompt)
+            self.assertIn(str(turn_dir / "generator" / "message.md"), prompt)
+            self.assertIn(str(turn_dir / "generator" / "status.json"), prompt)
+            self.assertIn('{"result":"implemented|no_changes_needed|blocked"', prompt)
 
     def test_build_generator_turn_prompt_later_turn_references_paths_not_inlined_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -345,8 +458,9 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             (task_root / "contract.md").write_text("- [ ] Contract item", encoding="utf-8")
             (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
             (task_root / "generator.instructions.md").write_text("Generator additions.", encoding="utf-8")
-            (previous_turn_dir / "reviewer.md").write_text("Review text", encoding="utf-8")
-            (previous_turn_dir / "reviewer.status.json").write_text("{}", encoding="utf-8")
+            (previous_turn_dir / "reviewer").mkdir(parents=True)
+            (previous_turn_dir / "reviewer" / "message.md").write_text("Review text", encoding="utf-8")
+            (previous_turn_dir / "reviewer" / "status.json").write_text("{}", encoding="utf-8")
             prompt = MODULE.build_generator_turn_prompt(
                 Path("/repo"),
                 task_root,
@@ -357,8 +471,52 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             )
             self.assertIn(str(task_root / "task.md"), prompt)
             self.assertIn(str(task_root / "contract.md"), prompt)
+            self.assertIn(str(previous_turn_dir / "reviewer" / "message.md"), prompt)
             self.assertNotIn("Shared rules.", prompt)
             self.assertNotIn("Generator additions.", prompt)
+            self.assertNotIn("The previous reviewer verdict was `changes_requested`.", prompt)
+            self.assertIn("create a git commit before writing the generator artifacts", prompt)
+
+    def test_build_generator_turn_prompt_highlights_actionable_follow_up_after_changes_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0002"
+            previous_turn_dir = turn_dir.parent / "0001"
+            task_root.mkdir(parents=True)
+            (previous_turn_dir / "reviewer").mkdir(parents=True)
+            (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "contract.md").write_text("- [ ] Contract item", encoding="utf-8")
+            (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
+            (task_root / "generator.instructions.md").write_text("Generator additions.", encoding="utf-8")
+            MODULE.write_text(previous_turn_dir / "reviewer" / "message.md", "Review text")
+            MODULE.save_json(
+                previous_turn_dir / "reviewer" / "status.json",
+                {
+                    "verdict": "changes_requested",
+                    "summary": "Needs another pass.",
+                    "blocking_issues": ["Add automated tests for the fallback path."],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "fail",
+                        "regression_risk": "pass",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "fail",
+                        "maintainability": "pass",
+                    },
+                },
+            )
+            prompt = MODULE.build_generator_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                2,
+                "demo-task",
+                inline_context=False,
+            )
+            self.assertIn("The previous reviewer verdict was `changes_requested`.", prompt)
+            self.assertIn("Do not use `blocked` merely because the overall contract is still large or not yet complete.", prompt)
+            self.assertIn("Add automated tests for the fallback path.", prompt)
+            self.assertIn("create a git commit before writing the generator artifacts", prompt)
 
     def test_build_reviewer_turn_prompt_mentions_changes_requested_and_needs_human(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -384,6 +542,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("needs_human", prompt)
             self.assertIn("contract.md", prompt)
             self.assertIn("Contract checklist copied from `contract.md`", prompt)
+            self.assertIn("If the only remaining blocker is that `contract.md` is too broad", prompt)
             self.assertIn("Critical review dimensions", prompt)
             self.assertIn("[pass]", prompt)
             self.assertIn("[fail]", prompt)
@@ -393,6 +552,9 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("inspect both writers and downstream readers/consumers", prompt)
             self.assertIn("independent falsification attempt", prompt)
             self.assertNotIn("reviewed_commit_sha", prompt)
+            self.assertIn(str(turn_dir / "reviewer" / "message.md"), prompt)
+            self.assertIn(str(turn_dir / "reviewer" / "status.json"), prompt)
+            self.assertIn('{"verdict":"approved|changes_requested|blocked"', prompt)
 
     def test_load_critical_review_dimensions_from_template_file(self) -> None:
         dimensions = MODULE.load_critical_review_dimensions()
@@ -402,8 +564,9 @@ class CodexTuiSupervisorTests(unittest.TestCase):
     def test_wait_for_role_artifacts_returns_valid_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             turn_dir = Path(tmp_dir)
-            (turn_dir / "generator.md").write_text("Implemented.", encoding="utf-8")
-            (turn_dir / "generator.status.json").write_text(
+            (turn_dir / "generator").mkdir(parents=True)
+            (turn_dir / "generator" / "message.md").write_text("Implemented.", encoding="utf-8")
+            (turn_dir / "generator" / "status.json").write_text(
                 json.dumps(
                     {
                         "result": "implemented",
@@ -419,10 +582,196 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 validator=MODULE.validate_generator_status,
                 timeout_seconds=1,
                 phase="generator_artifacts",
+                tmux_name="generator-session",
+                turn_number=1,
+                repo_root=Path("/repo"),
+                council_config={
+                    "codex": {
+                        "model": "gpt-5.4",
+                        "model_reasoning_effort": "xhigh",
+                        "dangerously_bypass_approvals_and_sandbox": True,
+                        "no_alt_screen": True,
+                    }
+                },
             )
-            self.assertEqual(artifact_path.name, "generator.md")
-            self.assertEqual(status_path.name, "generator.status.json")
+            self.assertEqual(artifact_path.name, "message.md")
+            self.assertEqual(status_path.name, "status.json")
             self.assertEqual(status["result"], "implemented")
+
+    def test_wait_for_role_artifacts_repairs_invalid_status_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            (turn_dir / "reviewer").mkdir(parents=True)
+            message_path = turn_dir / "reviewer" / "message.md"
+            status_path = turn_dir / "reviewer" / "status.json"
+            message_path.write_text("Initial review", encoding="utf-8")
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "verdict": "changes_requested",
+                        "summary": "Needs one more fix.",
+                        "blocking_issues": ["Fix the fallback path."],
+                        "critical_dimensions": {
+                            "correctness_vs_intent": "fail",
+                            "regression_risk": "pass",
+                            "failure_mode_and_fallback": "pass",
+                            "state_and_metadata_integrity": "uncertain",
+                            "test_adequacy": "fail",
+                            "maintainability": "pass",
+                        },
+                        "human_message": "   should not be here   ",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_wait_for_tmux_prompt(*args, **kwargs):
+                return None
+
+            def fake_tmux_send_prompt(*args, **kwargs):
+                status_path.write_text(
+                    json.dumps(
+                        {
+                            "verdict": "changes_requested",
+                            "summary": "Needs one more fix.",
+                            "blocking_issues": ["Fix the fallback path."],
+                            "critical_dimensions": {
+                                "correctness_vs_intent": "fail",
+                                "regression_risk": "pass",
+                                "failure_mode_and_fallback": "pass",
+                                "state_and_metadata_integrity": "uncertain",
+                                "test_adequacy": "fail",
+                                "maintainability": "pass",
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            with mock.patch.object(MODULE, "wait_for_tmux_prompt", fake_wait_for_tmux_prompt), mock.patch.object(
+                MODULE, "tmux_send_prompt", fake_tmux_send_prompt
+            ):
+                artifact_path, status_path_value, status = MODULE.wait_for_role_artifacts(
+                    turn_dir,
+                    "reviewer",
+                    validator=MODULE.validate_reviewer_status,
+                    timeout_seconds=1,
+                    phase="reviewer_artifacts",
+                    tmux_name="reviewer-session",
+                    turn_number=1,
+                    repo_root=Path("/repo"),
+                    council_config={
+                        "codex": {
+                            "model": "gpt-5.4",
+                            "model_reasoning_effort": "xhigh",
+                            "dangerously_bypass_approvals_and_sandbox": True,
+                            "no_alt_screen": True,
+                        }
+                    },
+                )
+
+            self.assertEqual(artifact_path, message_path)
+            self.assertEqual(status_path_value, status_path)
+            self.assertEqual(status["verdict"], "changes_requested")
+            self.assertTrue((turn_dir / "reviewer" / "validation_error.json").exists())
+
+    def test_write_raw_final_output_artifact_falls_back_to_message_when_capture_is_contaminated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            (turn_dir / "reviewer").mkdir(parents=True)
+            expected = "Final reviewer summary.\n- point"
+            MODULE.write_text(turn_dir / "reviewer" / "message.md", expected)
+
+            def fake_wait(*args, **kwargs):
+                return None
+
+            def fake_capture(*args, **kwargs):
+                return "Repository root:\n/repo\n• Ran cat file.txt\n"
+
+            with mock.patch.object(MODULE, "wait_for_tmux_prompt", fake_wait), mock.patch.object(
+                MODULE, "capture_last_tmux_slice", fake_capture
+            ):
+                MODULE.write_raw_final_output_artifact(turn_dir, "reviewer", "reviewer-session")
+
+            self.assertEqual(
+                (turn_dir / "reviewer" / "raw_final_output.md").read_text(encoding="utf-8").strip(),
+                expected,
+            )
+
+    def test_wait_for_role_artifacts_stops_after_failed_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            (turn_dir / "reviewer").mkdir(parents=True)
+            message_path = turn_dir / "reviewer" / "message.md"
+            status_path = turn_dir / "reviewer" / "status.json"
+            message_path.write_text("Initial review", encoding="utf-8")
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "verdict": "changes_requested",
+                        "summary": "Needs one more fix.",
+                        "blocking_issues": ["Fix the fallback path."],
+                        "critical_dimensions": {
+                            "correctness_vs_intent": "fail",
+                            "regression_risk": "pass",
+                            "failure_mode_and_fallback": "pass",
+                            "state_and_metadata_integrity": "uncertain",
+                            "test_adequacy": "fail",
+                            "maintainability": "pass",
+                        },
+                        "human_message": "bad extra field",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_wait_for_tmux_prompt(*args, **kwargs):
+                return None
+
+            def fake_tmux_send_prompt(*args, **kwargs):
+                status_path.write_text(
+                    json.dumps(
+                        {
+                            "verdict": "changes_requested",
+                            "summary": "Still invalid.",
+                            "blocking_issues": ["Fix the fallback path."],
+                            "critical_dimensions": {
+                                "correctness_vs_intent": "fail",
+                                "regression_risk": "pass",
+                                "failure_mode_and_fallback": "pass",
+                                "state_and_metadata_integrity": "uncertain",
+                                "test_adequacy": "fail",
+                                "maintainability": "pass",
+                            },
+                            "human_source": "task.md",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            with mock.patch.object(MODULE, "wait_for_tmux_prompt", fake_wait_for_tmux_prompt), mock.patch.object(
+                MODULE, "tmux_send_prompt", fake_tmux_send_prompt
+            ):
+                with self.assertRaises(MODULE.SupervisorRuntimeError) as cm:
+                    MODULE.wait_for_role_artifacts(
+                        turn_dir,
+                        "reviewer",
+                        validator=MODULE.validate_reviewer_status,
+                        timeout_seconds=1,
+                        phase="reviewer_artifacts",
+                        tmux_name="reviewer-session",
+                        turn_number=1,
+                        repo_root=Path("/repo"),
+                        council_config={
+                            "codex": {
+                                "model": "gpt-5.4",
+                                "model_reasoning_effort": "xhigh",
+                                "dangerously_bypass_approvals_and_sandbox": True,
+                                "no_alt_screen": True,
+                            }
+                        },
+                    )
+            self.assertEqual(cm.exception.phase, "blocked_invalid_artifacts")
 
     def test_latest_run_dir_picks_lexically_latest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -464,6 +813,114 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertEqual(state["task_root"], str(task_root))
         self.assertEqual(state["task_name"], "demo-task")
         self.assertEqual(state["roles"]["generator"]["tmux_session"], "gen")
+
+    def test_supervisor_loop_advances_after_changes_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            task_root = repo_root / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "contract.md").write_text("- [ ] Contract item", encoding="utf-8")
+            (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
+            (task_root / "generator.instructions.md").write_text("Generator rules.", encoding="utf-8")
+            (task_root / "reviewer.instructions.md").write_text("Reviewer rules.", encoding="utf-8")
+            run_dir = task_root / "runs" / "run-1"
+            (run_dir / "turns").mkdir(parents=True)
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                council_config={
+                    "codex": {
+                        "model": "gpt-5.4",
+                        "model_reasoning_effort": "xhigh",
+                        "dangerously_bypass_approvals_and_sandbox": True,
+                        "no_alt_screen": True,
+                    },
+                    "council": {
+                        "max_turns": 2,
+                        "launch_timeout_seconds": 60,
+                        "turn_timeout_seconds": 1800,
+                        "require_git": True,
+                    },
+                },
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+            )
+            MODULE.save_run_state(run_dir, state)
+
+            def fake_wait_for_tmux_prompt(*args, **kwargs):
+                return None
+
+            def fake_tmux_send_prompt(*args, **kwargs):
+                return None
+
+            def fake_write_raw_output(*args, **kwargs):
+                return None
+
+            def fake_wait_for_role_artifacts(current_turn_dir, role, **kwargs):
+                message_path, status_path = MODULE.role_artifact_paths(current_turn_dir, role)
+                if current_turn_dir.name == "0001" and role == "generator":
+                    status = {
+                        "result": "implemented",
+                        "summary": "Implemented first pass.",
+                        "changed_files": ["src/app.py"],
+                    }
+                elif current_turn_dir.name == "0001" and role == "reviewer":
+                    status = {
+                        "verdict": "changes_requested",
+                        "summary": "Needs one more fix.",
+                        "blocking_issues": ["Fix the fallback path."],
+                        "critical_dimensions": {
+                            "correctness_vs_intent": "fail",
+                            "regression_risk": "pass",
+                            "failure_mode_and_fallback": "pass",
+                            "state_and_metadata_integrity": "pass",
+                            "test_adequacy": "fail",
+                            "maintainability": "pass",
+                        },
+                    }
+                elif current_turn_dir.name == "0002" and role == "generator":
+                    status = {
+                        "result": "no_changes_needed",
+                        "summary": "No extra changes needed.",
+                        "changed_files": [],
+                    }
+                else:
+                    status = {
+                        "verdict": "approved",
+                        "summary": "No blocking issues remain.",
+                        "blocking_issues": [],
+                        "critical_dimensions": {
+                            "correctness_vs_intent": "pass",
+                            "regression_risk": "pass",
+                            "failure_mode_and_fallback": "pass",
+                            "state_and_metadata_integrity": "pass",
+                            "test_adequacy": "pass",
+                            "maintainability": "pass",
+                        },
+                    }
+                MODULE.write_text(message_path, f"{role} message for {current_turn_dir.name}")
+                MODULE.save_json(status_path, status)
+                return message_path, status_path, status
+
+            with mock.patch.object(MODULE, "wait_for_tmux_prompt", fake_wait_for_tmux_prompt), mock.patch.object(
+                MODULE, "tmux_send_prompt", fake_tmux_send_prompt
+            ), mock.patch.object(
+                MODULE, "write_raw_final_output_artifact", fake_write_raw_output
+            ), mock.patch.object(
+                MODULE, "wait_for_role_artifacts", fake_wait_for_role_artifacts
+            ):
+                MODULE.supervisor_loop(run_dir, state, task_root)
+
+            self.assertEqual(state["status"], "approved")
+            self.assertTrue((run_dir / "turns" / "0002" / "generator" / "prompt.md").exists())
+            self.assertEqual(
+                MODULE.load_json(run_dir / "turns" / "0001" / "turn.json")["phase"],
+                "changes_requested",
+            )
 
     def test_ensure_task_workspace_exists_raises_for_missing_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -17,6 +17,8 @@
   - every relevant checklist item in `contract.md` is satisfied
   - every critical review dimension passes
 - If any critical review dimension fails or is still uncertain, the turn is not approvable.
+- Use `changes_requested` only when the remaining blockers are concrete, actionable implementation items the generator can address in the repo.
+- If the remaining blocker is that `contract.md` is too broad, non-auditable, contradictory, or mixes engineering with product/marketing outcomes that cannot be objectively reviewed, use `needs_human` instead of `changes_requested`.
 
 ## What to inspect
 - fidelity to `task.md`
@@ -36,9 +38,10 @@
 - Distrust the generator narrative by default; verify the code, the consumers, and the failure behavior yourself.
 - If the change touches state, metadata, checkpoints, caches, fallback paths, rebuild logic, or health/coverage semantics, inspect both writers and downstream readers/consumers.
 - Perform at least one independent falsification attempt on the riskiest changed invariant when the change touches silent degradation, partial failure, metadata drift, or fallback correctness.
+- Do not keep a fix loop alive with vague blockers like “still not production-ready” unless you can point to specific missing work that is actionable in this repository right now.
 
 ## Required review structure
-- In `reviewer.md`, include:
+- In your reviewer turn message artifact, include:
   - Verdict summary
   - Contract checklist copied from `contract.md`, using `[x]` for satisfied and `[ ]` for not yet satisfied
   - Critical review dimensions, using `[pass]`, `[fail]`, or `[uncertain]`

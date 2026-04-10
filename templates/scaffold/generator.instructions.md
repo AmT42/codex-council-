@@ -20,7 +20,10 @@
 - Do not silently skip difficult parts or paper over broken behavior.
 - If the task requires a tradeoff, choose the option that best preserves correctness, maintainability, and contract satisfaction.
 - Do not redefine success criteria yourself. `contract.md` owns the success criteria.
+- If you changed repo-tracked files in this turn, create a git commit for those changes before writing the turn artifacts.
 - If you change a state, metadata, cache, checkpoint, fallback, or health/coverage contract, inspect both the writers and the downstream readers/consumers before ending the turn.
+- When responding to a reviewer `changes_requested` turn, either make a concrete implementation improvement against the listed blockers or emit `needs_human` if the remaining blocker is really a task/contract ambiguity.
+- Do not emit `blocked` merely because the overall contract is broad, ambitious, or still unfinished. Reserve `blocked` for real external implementation blockers.
 
 ## Quality rules
 - Avoid regressions, broken migrations, unsafe assumptions, and partial implementations.
@@ -29,8 +32,9 @@
 - Before ending the turn, sanity-check that your changes plausibly satisfy the relevant items in `contract.md` and do not obviously violate the task constraints.
 
 ## Required turn output
-- In `generator.md`, include:
+- In your generator turn message artifact, include:
   - What changed
+  - Commit created for this turn, or explicitly say that no repo-tracked files changed
   - Why those changes move the code toward satisfying `contract.md`
   - Changed invariants / preserved invariants
   - Downstream readers / consumers checked
