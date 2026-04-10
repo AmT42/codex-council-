@@ -30,6 +30,141 @@ Meaning:
 - `templates/prompts/*` are rendered into per-turn role prompt artifacts such as `turns/0001/generator/prompt.md`
 - `templates/data/critical_review_dimensions.json` is the source of truth for reviewer critical-dimension keys and labels
 
+## Spec Model
+
+This repo uses three canonical task files with different jobs:
+
+- `task.md`
+  - The canonical **Feature Spec**
+  - Describes the requested behavior, constraints, boundaries, and validation expectations
+- `contract.md`
+  - The canonical **Definition of Done**
+  - Checklist only; each item must be objectively checkable
+- `AGENTS.md`
+  - The canonical **Council Brief**
+  - Stable generator/reviewer behavior only, not feature requirements
+
+This separation matters:
+- the feature spec says what should be built
+- the definition of done says when approval is justified
+- the council brief says how the agents should behave
+
+### Glossary
+
+- `spec`
+  - A clear written description of the feature, behavior, constraints, and expected validation
+- `definition of done`
+  - The auditable checklist that must be true before approval
+- `council brief`
+  - Stable operating rules for generator and reviewer
+- `blocking issue`
+  - A concrete problem that prevents approval
+- `needs_human`
+  - A stop state used when the feature spec or definition of done is too ambiguous, contradictory, or non-auditable to continue safely
+
+### Writing Guide
+
+You do not need advanced technical vocabulary to write a good task.
+
+Good `task.md` writing:
+- describe behavior concretely
+- describe constraints and non-goals
+- describe what should happen for users or operators
+- describe what parts of the system are in scope
+
+Bad `task.md` writing:
+- slogans without behavior
+- vague adjectives without concrete follow-up
+- mixing implementation, business aspiration, and approval criteria into one sentence
+
+Good `contract.md` writing:
+- checklist items that can be verified by reading code, running tests, or observing behavior
+
+Bad `contract.md` writing:
+- `production-ready`
+- `enterprise-grade`
+- `viral`
+- `best-in-class`
+
+Those phrases are acceptable only after they are decomposed into measurable engineering conditions.
+
+### Example Workspace
+
+Simple user request:
+- “Make a replay-verified score submission flow for the Snake game.”
+
+Good `task.md`:
+
+```md
+# Feature Spec
+
+## Goal
+Add replay-verified score submission for the Snake game backend.
+
+## User Outcome
+Players can submit scores, but the server stores them only after replay verification.
+
+## In Scope
+- Backend score submission
+- Session validation
+- Frontend score-submit payload changes
+- Tests for replay verification
+
+## Out of Scope
+- Mobile app packaging
+- Marketing or growth features
+
+## Constraints
+- Keep SQLite
+- Keep the current frontend/backend split
+
+## Existing Context
+- The repo already has an Express backend and browser-based Snake frontend.
+
+## Desired Behavior
+- `/api/scores` rejects invalid replay payloads.
+- Verified runs are stored in the leaderboard.
+
+## Technical Boundaries
+- Do not replace the current persistence layer.
+
+## Validation Expectations
+- Add tests for valid and invalid replay submissions.
+
+## Open Questions
+- None
+```
+
+Good `contract.md`:
+
+```md
+# Definition of Done
+
+- [ ] `/api/scores` rejects invalid replay payloads with structured 4xx JSON.
+- [ ] Verified replay submissions are persisted to the leaderboard.
+- [ ] Required tests for replay verification are present and passing.
+```
+
+Good `AGENTS.md`:
+- generator must implement against the feature spec and definition of done
+- reviewer must approve only when the definition of done is satisfied
+- ambiguity must become `needs_human`
+
+### Future Planner / Preparator
+
+The future planner/preparator loop should take a weak user request like:
+- “make viral snake 3d game ios”
+
+and convert it into:
+- a concrete `task.md` feature spec
+- a measurable `contract.md` definition of done
+- optional role-instruction additions only when needed
+
+It should not:
+- dump product requirements into `AGENTS.md`
+- use `contract.md` for vague business aspirations
+- leave `task.md` as a one-line wish
+
 ## Real TUI Mode
 
 The TUI supervisor now works against a target repository and stores its task workspace inside that repository.
@@ -118,7 +253,10 @@ Important:
 
 - watch the sessions, but do not type into them unless you intentionally want to override the council
 - the authoritative control signal is only the artifact pair for the role
+- `task.md` is the canonical feature spec
 - `contract.md` is the canonical definition of done
+- `AGENTS.md` is the canonical council brief
+- `start` refuses to launch if `task.md` is missing required spec sections
 - `start` refuses to launch if `contract.md` is still scaffold text or has no checklist items
 - approval means both:
   - the contract checklist is satisfied

@@ -38,8 +38,22 @@ TASK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 CHECKLIST_ITEM_RE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+\S")
 CONTRACT_PLACEHOLDER_MARKERS = (
     "Write the definition of done for this task here as a checklist.",
-    "Example:",
+    "Bad examples:",
 )
+TASK_REQUIRED_HEADINGS = (
+    "# Feature Spec",
+    "## Goal",
+    "## User Outcome",
+    "## In Scope",
+    "## Out of Scope",
+    "## Constraints",
+    "## Existing Context",
+    "## Desired Behavior",
+    "## Technical Boundaries",
+    "## Validation Expectations",
+    "## Open Questions",
+)
+TASK_VAGUE_WORDS = ("production-ready", "production ready", "scalable", "viral", "enterprise", "best-in-class")
 ARTIFACT_REPAIR_ATTEMPTS = 1
 SESSION_RECOVERY_ATTEMPTS = 1
 RAW_OUTPUT_CAPTURE_TIMEOUT_SECONDS = 30.0
@@ -151,6 +165,57 @@ def render_template_text(template_text: str, values: dict[str, str], *, template
 
 def default_scaffold_text(filename: str) -> str:
     return read_template("scaffold", filename)
+
+
+def build_task_spec_from_seed(initial_task_text: str) -> str:
+    stripped = initial_task_text.strip()
+    if stripped.startswith("# Feature Spec"):
+        return stripped
+    return textwrap.dedent(
+        f"""\
+        # Feature Spec
+
+        ## Goal
+
+        {stripped}
+
+        ## User Outcome
+
+        Describe what a user, operator, or stakeholder should be able to do or observe when the work is complete.
+
+        ## In Scope
+
+        - Fill this in
+
+        ## Out of Scope
+
+        - Fill this in
+
+        ## Constraints
+
+        - Fill this in
+
+        ## Existing Context
+
+        Fill this in.
+
+        ## Desired Behavior
+
+        Fill this in.
+
+        ## Technical Boundaries
+
+        Fill this in.
+
+        ## Validation Expectations
+
+        Fill this in.
+
+        ## Open Questions
+
+        - None yet
+        """
+    ).rstrip()
 
 
 def read_codex_session_index() -> list[dict]:
@@ -428,7 +493,9 @@ def scaffold_task_root(
 ) -> dict:
     ensure_dir(task_root)
     task_template = (
-        initial_task_text.strip() if initial_task_text else read_template("scaffold", "task.md")
+        build_task_spec_from_seed(initial_task_text)
+        if initial_task_text
+        else read_template("scaffold", "task.md")
     )
     task_created = write_if_missing(
         task_root / "task.md",
@@ -484,8 +551,19 @@ def lint_task_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]
     contract_text = (task_root / "contract.md").read_text(encoding="utf-8")
     errors: list[str] = []
     warnings: list[str] = []
+    for heading in TASK_REQUIRED_HEADINGS:
+        if heading not in task_text:
+            errors.append(f"task.md is missing required heading: {heading}")
+    lowered_task = task_text.lower()
+    for vague_word in TASK_VAGUE_WORDS:
+        if vague_word in lowered_task:
+            warnings.append(
+                f"task.md uses vague wording `{vague_word}`; decompose it into concrete feature-spec behavior or constraints"
+            )
     if any(marker in contract_text for marker in CONTRACT_PLACEHOLDER_MARKERS):
         errors.append("contract.md still contains scaffold placeholder text")
+    if "# Definition of Done" not in contract_text:
+        errors.append("contract.md must begin with `# Definition of Done`")
     if not contract_checklist_items(contract_text):
         errors.append("contract.md must contain at least one checklist item")
     if "Success contract:" in task_text:
@@ -1297,10 +1375,10 @@ def format_turn_one_context(task_root: Path, role: str) -> str:
         f"Role instructions from {role_path}:",
         role_path.read_text(encoding="utf-8").strip(),
         "",
-        f"Current plan from {paths['task']}:",
+        f"Current feature spec from {paths['task']}:",
         paths["task"].read_text(encoding="utf-8").strip(),
         "",
-        f"Definition of done from {paths['contract']}:",
+        f"Current definition of done from {paths['contract']}:",
         paths["contract"].read_text(encoding="utf-8").strip(),
     ]
     return "\n".join(sections).rstrip()
@@ -1313,6 +1391,7 @@ def format_contract_migration_warning(task_root: Path) -> str:
     return textwrap.dedent(
         """\
         Migration note:
+        - `task.md` is the canonical feature spec.
         - `contract.md` is the canonical definition of done.
         - Any embedded “Success contract” prose inside `task.md` is secondary context only and must not override `contract.md`.
         """
@@ -1324,7 +1403,7 @@ def format_later_turn_context(task_root: Path, role: str) -> str:
     role_path = paths[role]
     return textwrap.dedent(
         f"""\
-        If you need current guidance or want to see whether the task changed since your last turn, inspect these canonical files directly:
+        If you need current guidance or want to see whether the feature spec changed since your last turn, inspect these canonical files directly:
         - {paths["task"]}
         - {paths["contract"]}
         - {paths["agents"]}
@@ -1353,7 +1432,7 @@ def build_continue_context(
     lines = [
         f"This run is continuing after `{state['status']}`.",
         "The human may have edited canonical task files and may also have discussed updates directly in this same session.",
-        "Before proceeding, reread the canonical task files and account for any direct human guidance already present in this chat session.",
+        "Before proceeding, reread the canonical feature spec, definition of done, and council files, and account for any direct human guidance already present in this chat session.",
     ]
     if previous_message.exists() and previous_status.exists():
         lines.extend(

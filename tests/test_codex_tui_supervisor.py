@@ -324,6 +324,16 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertTrue((task_root / "AGENTS.md").exists())
             self.assertTrue((task_root / "generator.instructions.md").exists())
             self.assertTrue((task_root / "reviewer.instructions.md").exists())
+            self.assertTrue(
+                (task_root / "task.md").read_text(encoding="utf-8").startswith("# Feature Spec")
+            )
+            self.assertTrue(
+                (task_root / "contract.md").read_text(encoding="utf-8").startswith("# Definition of Done")
+            )
+            self.assertIn(
+                "It is not the place for feature requirements",
+                (task_root / "AGENTS.md").read_text(encoding="utf-8"),
+            )
             self.assertEqual(
                 (task_root / "AGENTS.md").read_text(encoding="utf-8"),
                 MODULE.read_template("scaffold", "AGENTS.md"),
@@ -402,24 +412,99 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
-            (task_root / "task.md").write_text("Implement feature.", encoding="utf-8")
+            (task_root / "task.md").write_text(MODULE.read_template("scaffold", "task.md"), encoding="utf-8")
             (task_root / "contract.md").write_text(
                 MODULE.read_template("scaffold", "contract.md"),
                 encoding="utf-8",
             )
             errors, warnings = MODULE.lint_task_workspace_readiness(task_root)
             self.assertTrue(errors)
-            self.assertFalse(warnings)
+            self.assertTrue(any("contract.md still contains scaffold placeholder text" in item for item in errors))
 
     def test_lint_task_workspace_readiness_accepts_concrete_contract_and_warns_on_embedded_success_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
-            (task_root / "task.md").write_text("Success contract:\n- secondary context only", encoding="utf-8")
-            (task_root / "contract.md").write_text("- [ ] Concrete acceptance criterion", encoding="utf-8")
+            (task_root / "task.md").write_text(
+                "\n".join(
+                    [
+                        "# Feature Spec",
+                        "## Goal",
+                        "Ship feature.",
+                        "## User Outcome",
+                        "Users can do the thing.",
+                        "## In Scope",
+                        "- API change",
+                        "## Out of Scope",
+                        "- Infra changes",
+                        "## Constraints",
+                        "- Keep SQLite",
+                        "## Existing Context",
+                        "There is already an Express backend.",
+                        "## Desired Behavior",
+                        "Requests succeed with structured responses.",
+                        "## Technical Boundaries",
+                        "Do not replace persistence.",
+                        "## Validation Expectations",
+                        "Add tests.",
+                        "## Open Questions",
+                        "- None",
+                        "Success contract:",
+                        "- secondary context only",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (task_root / "contract.md").write_text("# Definition of Done\n\n- [ ] Concrete acceptance criterion", encoding="utf-8")
             errors, warnings = MODULE.lint_task_workspace_readiness(task_root)
             self.assertEqual(errors, [])
             self.assertEqual(len(warnings), 1)
+
+    def test_lint_task_workspace_readiness_rejects_missing_task_spec_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / "task.md").write_text("# Feature Spec\n\n## Goal\nOnly one section", encoding="utf-8")
+            (task_root / "contract.md").write_text("# Definition of Done\n\n- [ ] One check", encoding="utf-8")
+            errors, _ = MODULE.lint_task_workspace_readiness(task_root)
+            self.assertTrue(any("task.md is missing required heading" in item for item in errors))
+
+    def test_lint_task_workspace_readiness_warns_on_vague_task_words(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / "task.md").write_text(
+                "\n".join(
+                    [
+                        "# Feature Spec",
+                        "## Goal",
+                        "Build a production-ready viral feature.",
+                        "## User Outcome",
+                        "Users see better behavior.",
+                        "## In Scope",
+                        "- API change",
+                        "## Out of Scope",
+                        "- Infra changes",
+                        "## Constraints",
+                        "- Keep SQLite",
+                        "## Existing Context",
+                        "There is already an Express backend.",
+                        "## Desired Behavior",
+                        "Requests succeed with structured responses.",
+                        "## Technical Boundaries",
+                        "Do not replace persistence.",
+                        "## Validation Expectations",
+                        "Add tests.",
+                        "## Open Questions",
+                        "- None",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (task_root / "contract.md").write_text("# Definition of Done\n\n- [ ] One check", encoding="utf-8")
+            errors, warnings = MODULE.lint_task_workspace_readiness(task_root)
+            self.assertEqual(errors, [])
+            self.assertTrue(any("production-ready" in item or "viral" in item for item in warnings))
 
     def test_build_generator_turn_prompt_includes_task_files_and_not_supervisor_language(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -442,6 +527,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("Generator additions.", prompt)
             self.assertIn("Implement feature.", prompt)
             self.assertIn("Contract item", prompt)
+            self.assertIn("Read the current feature spec in `task.md`", prompt)
             self.assertNotIn("supervisor controls turn order", prompt.lower())
             self.assertIn("needs_human", prompt)
             self.assertNotIn("stop and wait for further instructions", prompt.lower())
@@ -458,6 +544,8 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn(str(turn_dir / "generator" / "message.md"), prompt)
             self.assertIn(str(turn_dir / "generator" / "status.json"), prompt)
             self.assertIn('{"result":"implemented|no_changes_needed|blocked"', prompt)
+            self.assertIn("Current feature spec", prompt)
+            self.assertIn("Current definition of done", prompt)
 
     def test_build_generator_turn_prompt_later_turn_references_paths_not_inlined_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -488,6 +576,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertNotIn("Generator additions.", prompt)
             self.assertNotIn("The previous reviewer verdict was `changes_requested`.", prompt)
             self.assertIn("create a git commit before writing the generator artifacts", prompt)
+            self.assertIn("Read the current feature spec in `task.md`", prompt)
 
     def test_build_generator_turn_prompt_highlights_actionable_follow_up_after_changes_requested(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -595,6 +684,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("changes_requested", prompt)
             self.assertIn("needs_human", prompt)
             self.assertIn("contract.md", prompt)
+            self.assertIn("Read the current feature spec in `task.md`", prompt)
             self.assertIn("Contract checklist copied from `contract.md`", prompt)
             self.assertIn("If the only remaining blocker is that `contract.md` is too broad", prompt)
             self.assertIn("Critical review dimensions", prompt)
@@ -610,6 +700,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn(str(turn_dir / "reviewer" / "message.md"), prompt)
             self.assertIn(str(turn_dir / "reviewer" / "status.json"), prompt)
             self.assertIn('{"verdict":"approved|changes_requested|blocked"', prompt)
+            self.assertIn("Current definition of done", prompt)
 
     def test_load_critical_review_dimensions_from_template_file(self) -> None:
         dimensions = MODULE.load_critical_review_dimensions()

@@ -1,9 +1,9 @@
 # Reviewer Instructions
 
 ## Review objective
-- Use `task.md` to understand the plan, architecture, and intended implementation.
+- Use `task.md` to understand the feature spec, architecture, and intended implementation.
 - Use `contract.md` as the actual definition of done.
-- Verify the implementation matches the plan in `task.md` and satisfies the checklist in `contract.md`.
+- Verify the implementation matches the feature spec in `task.md` and satisfies the checklist in `contract.md`.
 - Act as a rigorous production code reviewer, not a stylistic nitpicker.
 - Be skeptical by default; do not give credit for work that only looks plausible.
 - Treat yourself as an external evaluator, not a collaborator trying to help the generator look good.
@@ -21,7 +21,7 @@
 - If the remaining blocker is that `contract.md` is too broad, non-auditable, contradictory, or mixes engineering with product/marketing outcomes that cannot be objectively reviewed, use `needs_human` instead of `changes_requested`.
 
 ## What to inspect
-- fidelity to `task.md`
+- fidelity to the feature spec in `task.md`
 - satisfaction of each checklist item in `contract.md`
 - correctness of behavior versus intent
 - regressions relative to existing behavior
@@ -53,6 +53,6 @@
 - Every critical review dimension must be explicitly marked; `approved` is invalid if any dimension is `[fail]` or `[uncertain]`.
 
 ## Human intervention rule
-- Emit `needs_human` if `contract.md` is ambiguous or incomplete, if `task.md` does not actually support the contract, or if approval would require guessing the intended interpretation of an unchecked contract item.
+- Emit `needs_human` if `contract.md` is ambiguous or incomplete, if the feature spec in `task.md` does not actually support the contract, or if approval would require guessing the intended interpretation of an unchecked contract item.
 - Use `human_message` to tell the user what must be clarified or corrected, and name the faulty source explicitly.
 - Set `human_source` to the file or state boundary that caused the pause.

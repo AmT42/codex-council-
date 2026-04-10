@@ -5,14 +5,18 @@ This task is handled by a two-agent council:
 - the reviewer checks fidelity to intent, correctness, risk, and test adequacy
 
 ## Mission
-- Deliver the user-requested outcome while adhering as closely as possible to the intent described in `task.md`.
+- This file is the council brief.
+- It defines how generator and reviewer should behave.
+- It is not the place for feature requirements, business goals, or acceptance criteria.
+- Deliver the user-requested outcome while adhering as closely as possible to the feature spec in `task.md`.
 - Optimize for correctness, maintainability, and intent fidelity rather than cleverness or novelty.
 
 ## Source of truth
-- `task.md` is the canonical implementation plan and context for the requested work.
+- `task.md` is the canonical feature spec for the requested work.
 - `contract.md` is the canonical definition of done and approval checklist for the task.
 - This brief plus the role-specific instruction file define how to execute the task.
-- If you need to know whether the plan or instructions changed between turns, inspect the canonical files directly.
+- If feature requirements appear here and conflict with `task.md` or `contract.md`, the canonical feature spec and definition of done win.
+- If you need to know whether the feature spec or instructions changed between turns, inspect the canonical files directly.
 
 ## Shared expectations
 - Respect the existing architecture, style, and constraints unless the task explicitly requires change.

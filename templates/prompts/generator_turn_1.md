@@ -9,7 +9,8 @@ Repository root:
 
 Turn {{turn_name}}.
 
-Implement the requested change carefully. If the plan is critically flawed, contradictory, or unsafe to continue, emit `needs_human` instead of guessing.
+Read the current feature spec in `task.md` and the current definition of done in `contract.md`.
+Implement the requested change carefully. If the feature spec is critically flawed, contradictory, or unsafe to continue, emit `needs_human` instead of guessing.
 
 If you changed repo-tracked files in this turn, create a git commit before writing the generator artifacts for this turn.
 

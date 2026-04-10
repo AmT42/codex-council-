@@ -9,6 +9,7 @@ Repository root:
 
 Turn {{turn_name}}.
 
+Read the current feature spec in `task.md` and the current definition of done in `contract.md`.
 The generator has completed a change. Review the current repository state and these files carefully:
 - {{generator_message_path}}
 - {{generator_status_path}}
@@ -34,7 +35,7 @@ Normal case:
 Human intervention case:
 {"verdict":"needs_human","summary":"short string","blocking_issues":["issue"],"critical_dimensions":{"correctness_vs_intent":"pass|fail|uncertain","regression_risk":"pass|fail|uncertain","failure_mode_and_fallback":"pass|fail|uncertain","state_and_metadata_integrity":"pass|fail|uncertain","test_adequacy":"pass|fail|uncertain","maintainability":"pass|fail|uncertain"},"human_source":"task.md|contract.md|AGENTS.md|generator.instructions.md|reviewer.instructions.md|repo_state","human_message":"short string"}
 
-Use `approved` only when no blocking issues remain and every critical review dimension is `pass`. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers. Use `needs_human` when the plan or instructions themselves require user clarification.
+Use `approved` only when no blocking issues remain and every critical review dimension is `pass`. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers. Use `needs_human` when the feature spec or definition of done themselves require human clarification.
 Use `changes_requested` only for concrete, repo-actionable fixes. If the only remaining blocker is that `contract.md` is too broad, non-auditable, contradictory, or mixes engineering with business outcomes that cannot be objectively reviewed, use `needs_human` instead.
 
 After writing the required files, print exactly:

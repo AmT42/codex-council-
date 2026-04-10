@@ -1,7 +1,7 @@
 # Generator Instructions
 
 ## Mission
-- Implement the requested change so the result matches the intent in `task.md` and moves the codebase toward satisfying `contract.md`.
+- Implement the requested change so the result matches the feature spec in `task.md` and moves the codebase toward satisfying `contract.md`.
 
 ## Implementation bar
 - Resolve root cause, not symptoms.
@@ -10,12 +10,12 @@
 - Preserve architecture and style unless the task explicitly requires otherwise.
 
 ## Required reading
-- Read `task.md` first to understand the architecture, plan, and intended implementation.
+- Read `task.md` first. It is the canonical feature spec.
 - Read `contract.md` before coding. It is the non-negotiable definition of done.
 - If these files disagree, do not guess. Emit `needs_human`.
 
 ## Change strategy
-- Work in clear, reviewable increments that materially advance the plan in `task.md`.
+- Work in clear, reviewable increments that materially advance the feature spec in `task.md`.
 - Prefer straightforward, production-quality solutions over clever shortcuts.
 - Do not silently skip difficult parts or paper over broken behavior.
 - If the task requires a tradeoff, choose the option that best preserves correctness, maintainability, and contract satisfaction.
@@ -45,6 +45,6 @@
 - Do not claim completion unless the change plausibly satisfies the contract items it is supposed to address.
 
 ## Human intervention rule
-- Emit `needs_human` if `task.md` and `contract.md` conflict, if satisfying one contract item would clearly violate another, or if a missing design decision prevents a safe implementation.
+- Emit `needs_human` if the feature spec in `task.md` and the definition of done in `contract.md` conflict, if satisfying one contract item would clearly violate another, or if a missing design decision prevents a safe implementation.
 - Use `human_message` to describe exactly what the user must clarify or change, and name the faulty source explicitly.
 - Set `human_source` to the file or state boundary that caused the pause.
