@@ -15,19 +15,27 @@ templates/
     contract.md
     AGENTS.md
     AGENTS.inherited_context.md
+    AGENTS.simple.md
     generator.instructions.md
     generator.instructions.inherited_context.md
+    generator.instructions.simple.md
     reviewer.instructions.md
     reviewer.instructions.inherited_context.md
+    reviewer.instructions.simple.md
+    initial_review.md
   prompts/
     generator_turn_1.md
     generator_turn_n.md
     generator_inherited_turn_1.md
     generator_inherited_turn_n.md
+    generator_simple_turn_1.md
+    generator_simple_turn_n.md
     reviewer_turn_1.md
     reviewer_turn_n.md
     reviewer_inherited_turn_1.md
     reviewer_inherited_turn_n.md
+    reviewer_simple_turn_1.md
+    reviewer_simple_turn_n.md
   data/
     critical_review_dimensions.json
 ```
@@ -37,12 +45,16 @@ Meaning:
 - `templates/prompts/*` are rendered into per-turn role prompt artifacts such as `turns/0001/generator/prompt.md`
 - `templates/data/critical_review_dimensions.json` is the source of truth for reviewer critical-dimension keys and labels
 
-The supervisor now supports two workspace shapes:
+The supervisor now supports three workspace shapes:
 - `spec_backed`
   - `task.md` + `contract.md` + `AGENTS.md` + role instructions
 - `inherited_context`
   - `AGENTS.md` + role instructions only
   - intended for fork-based starts that inherit product context from an existing Codex chat session
+- `simple`
+  - `initial_review.md` + `AGENTS.md` + role instructions
+  - intended for “take this review and fix it safely” workflows, with either fresh or forked session bootstrap
+  - generator must validate each review point before acting; reviewer must adjudicate disagreements instead of blindly looping
 
 ## Spec Model
 
@@ -225,6 +237,16 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
   --skip-task-and-contract
 ```
 
+If you want a simple review-fix workspace driven by a repo-local `initial_review.md`:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
+  --dir /path/to/target-repo \
+  --simple
+```
+
+Simple mode is the right abstraction here. It should stay a dedicated mode, not become a multi-flag combination like `--with-review --skip-task-and-contract`.
+
 Then edit the scaffolded files as needed and start the council:
 
 ```bash
@@ -254,6 +276,22 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
 
 In inherited-context mode, both fork session ids are required. This mode is intended for forked starts, not fresh spec-less runs.
 
+Simple-mode fresh start:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
+  --dir /path/to/target-repo
+```
+
+Simple-mode fork start:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
+  --dir /path/to/target-repo \
+  --generator-fork-session-id <generator_parent_session_id> \
+  --reviewer-fork-session-id <reviewer_parent_session_id>
+```
+
 Every execution creates a fresh run under:
 
 ```text
@@ -278,6 +316,7 @@ The supervisor will:
 - resolve the target directory to its git root by default
 - refuse to start on a detached HEAD
 - refuse to start on a dirty repo in spec-backed mode
+- refuse to start on a dirty repo in simple mode
 - allow a dirty repo in inherited-context fork mode
 - launch two real `codex` TUIs in `tmux` inside that target repo
 - build each turn prompt from the available canonical task files for that workspace mode
@@ -301,13 +340,19 @@ Important:
 - the authoritative control signal is only the artifact pair for the role
 - `task.md` is the canonical feature spec
 - `contract.md` is the canonical definition of done
+- `initial_review.md` is the canonical first generator brief in simple mode
+- in simple mode, `initial_review.md` is a starting review brief, not unquestionable truth
+- in simple mode, generator must classify review points as `agree` / `disagree` / `uncertain` before coding
+- in simple mode, reviewer must adjudicate generator disagreements with evidence and must not restate the same blocker without stronger evidence
 - `AGENTS.md` is the canonical council brief
 - `start` refuses to launch if `task.md` is missing required spec sections
 - `start` refuses to launch if `contract.md` is still scaffold text or has no checklist items
+- `start` refuses to launch if `initial_review.md` is still scaffold text or has no concrete bullet items in simple mode
 - inherited-context mode intentionally omits repo-local `task.md` and `contract.md`
 - inherited-context mode requires both `--generator-fork-session-id` and `--reviewer-fork-session-id`
 - inherited-context mode allows a dirty worktree so the council can continue from already-modified forked context
 - spec-backed mode keeps the old clean-worktree requirement, even when fork session ids are supplied
+- simple mode can start either fresh or from fork; it keeps the normal clean-worktree requirement
 - approval means both:
   - the contract checklist is satisfied
   - all critical review dimensions pass

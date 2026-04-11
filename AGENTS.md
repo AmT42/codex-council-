@@ -28,10 +28,16 @@ The council workspace inside a target repo is:
 - `.codex-council/<task_name>/reviewer.instructions.md`
   - reviewer-specific additions
 
+Simple mode may use this alternate canonical file instead of `task.md` and `contract.md`:
+
+- `.codex-council/<task_name>/initial_review.md`
+  - canonical **Initial Review** for a review-fix loop
+
 Do not blur these roles.
 
 - `task.md` is where feature requirements belong.
 - `contract.md` is checklist-only and must stay auditable.
+- `initial_review.md` is for a concrete starting review brief when using simple mode.
 - `AGENTS.md` is for stable council behavior, not product requirements.
 
 ## Runtime Model
@@ -81,9 +87,11 @@ Important runtime files:
 
 ## Current Design Expectations
 
-- `task.md` is titled `# Feature Spec`.
-- `contract.md` is titled `# Definition of Done`.
+- `task.md` is titled `# Feature Spec` in spec-backed mode.
+- `contract.md` is titled `# Definition of Done` in spec-backed mode.
+- `initial_review.md` is titled `# Initial Review` in simple mode.
 - `start` lint-checks both spec structure and DoD quality before launching.
+- `start` lint-checks simple-mode `initial_review.md` quality before launching.
 - `continue` is artifact-driven and session-aware.
 - If a live tmux role session exists, prefer reusing it.
 - If the tmux session is gone, prefer resuming the same Codex conversation when a tracked session id is available.

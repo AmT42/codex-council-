@@ -36,6 +36,7 @@ Human intervention case:
 
 Use `approved` only when no blocking issues remain and every critical review dimension is `pass`. Use `changes_requested` when more generator work is required. Use `blocked` only for external blockers. Use `needs_human` when the inherited context or available instructions themselves require human clarification.
 Use `changes_requested` only for concrete, repo-actionable fixes. If the only remaining blocker is that the inherited context or available instructions are too broad, contradictory, or non-auditable, use `needs_human` instead.
+If the generator disputes a blocker with concrete code evidence, adjudicate that disagreement explicitly. Do not repeat the same blocker without stronger evidence; if you cannot add stronger evidence, use `needs_human` instead of looping.
 
 After writing the required files, print exactly:
 - `COUNCIL_TERMINAL_SUMMARY_BEGIN`

@@ -21,9 +21,11 @@ COUNCIL_DIRNAME = ".codex-council"
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "templates"
 WORKSPACE_MODE_SPEC_BACKED = "spec_backed"
 WORKSPACE_MODE_INHERITED_CONTEXT = "inherited_context"
+WORKSPACE_MODE_SIMPLE = "simple"
 WORKSPACE_MODES = {
     WORKSPACE_MODE_SPEC_BACKED,
     WORKSPACE_MODE_INHERITED_CONTEXT,
+    WORKSPACE_MODE_SIMPLE,
 }
 ROLE_NAMES = ("generator", "reviewer")
 SPEC_BACKED_REQUIRED_FILENAMES = (
@@ -38,11 +40,18 @@ INHERITED_CONTEXT_REQUIRED_FILENAMES = (
     "generator.instructions.md",
     "reviewer.instructions.md",
 )
+SIMPLE_REQUIRED_FILENAMES = (
+    "initial_review.md",
+    "AGENTS.md",
+    "generator.instructions.md",
+    "reviewer.instructions.md",
+)
 GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked", "needs_human"}
 REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
 HUMAN_SOURCES = {
     "task.md",
     "contract.md",
+    "initial_review.md",
     "AGENTS.md",
     "generator.instructions.md",
     "reviewer.instructions.md",
@@ -55,9 +64,14 @@ TMUX_CAPTURE_HISTORY_LINES = 1000
 ROLE_ARTIFACT_POLL_SECONDS = 1.0
 TASK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 CHECKLIST_ITEM_RE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+\S")
+SIMPLE_REVIEW_ITEM_RE = re.compile(r"^\s*[-*]\s+\S")
 CONTRACT_PLACEHOLDER_MARKERS = (
     "Write the definition of done for this task here as a checklist.",
     "Bad examples:",
+)
+INITIAL_REVIEW_PLACEHOLDER_MARKERS = (
+    "Describe the concrete bug, cleanup, or review finding to fix.",
+    "Optional extra context",
 )
 TASK_REQUIRED_HEADINGS = (
     "# Feature Spec",
@@ -508,23 +522,29 @@ def role_validation_error_md_path(turn_dir: Path, role: str) -> Path:
 def inspect_task_workspace(task_root: Path) -> dict:
     task_path = task_root / "task.md"
     contract_path = task_root / "contract.md"
+    initial_review_path = task_root / "initial_review.md"
     task_exists = task_path.exists()
     contract_exists = contract_path.exists()
+    initial_review_exists = initial_review_path.exists()
     if task_exists != contract_exists:
         raise SystemExit(
             f"invalid task workspace for {task_root.name}.\n"
             "task.md and contract.md must either both exist or both be absent."
         )
-    workspace_mode = (
-        WORKSPACE_MODE_SPEC_BACKED
-        if task_exists
-        else WORKSPACE_MODE_INHERITED_CONTEXT
-    )
-    filenames = (
-        SPEC_BACKED_REQUIRED_FILENAMES
-        if workspace_mode == WORKSPACE_MODE_SPEC_BACKED
-        else INHERITED_CONTEXT_REQUIRED_FILENAMES
-    )
+    if task_exists and initial_review_exists:
+        raise SystemExit(
+            f"invalid task workspace for {task_root.name}.\n"
+            "initial_review.md cannot be combined with task.md / contract.md."
+        )
+    if task_exists:
+        workspace_mode = WORKSPACE_MODE_SPEC_BACKED
+        filenames = SPEC_BACKED_REQUIRED_FILENAMES
+    elif initial_review_exists:
+        workspace_mode = WORKSPACE_MODE_SIMPLE
+        filenames = SIMPLE_REQUIRED_FILENAMES
+    else:
+        workspace_mode = WORKSPACE_MODE_INHERITED_CONTEXT
+        filenames = INHERITED_CONTEXT_REQUIRED_FILENAMES
     required_files = [task_root / name for name in filenames]
     return {
         "workspace_mode": workspace_mode,
@@ -559,31 +579,47 @@ def scaffold_task_root(
     *,
     initial_task_text: str | None,
     skip_task_and_contract: bool = False,
+    simple_mode: bool = False,
 ) -> dict:
     ensure_dir(task_root)
-    if skip_task_and_contract and initial_task_text:
-        raise SystemExit("cannot seed task text when --skip-task-and-contract is set")
+    if sum(1 for flag in (skip_task_and_contract, simple_mode) if flag) > 1:
+        raise SystemExit("choose only one alternate init mode")
+    if (skip_task_and_contract or simple_mode) and initial_task_text:
+        raise SystemExit("cannot seed task text when using an alternate init mode")
     task_created = False
     contract_created = False
+    initial_review_created = False
     if not skip_task_and_contract:
-        task_template = (
-            build_task_spec_from_seed(initial_task_text)
-            if initial_task_text
-            else read_template("scaffold", "task.md")
-        )
-        task_created = write_if_missing(
-            task_root / "task.md",
-            task_template,
-        )
-        contract_created = write_if_missing(
-            task_root / "contract.md",
-            read_template("scaffold", "contract.md"),
-        )
+        if simple_mode:
+            initial_review_created = write_if_missing(
+                task_root / "initial_review.md",
+                read_template("scaffold", "initial_review.md"),
+            )
+        else:
+            task_template = (
+                build_task_spec_from_seed(initial_task_text)
+                if initial_task_text
+                else read_template("scaffold", "task.md")
+            )
+            task_created = write_if_missing(
+                task_root / "task.md",
+                task_template,
+            )
+            contract_created = write_if_missing(
+                task_root / "contract.md",
+                read_template("scaffold", "contract.md"),
+            )
     agents_created = write_if_missing(
         task_root / "AGENTS.md",
         read_template(
             "scaffold",
-            "AGENTS.inherited_context.md" if skip_task_and_contract else "AGENTS.md",
+            (
+                "AGENTS.inherited_context.md"
+                if skip_task_and_contract
+                else "AGENTS.simple.md"
+                if simple_mode
+                else "AGENTS.md"
+            ),
         ),
     )
     generator_created = write_if_missing(
@@ -593,6 +629,8 @@ def scaffold_task_root(
             (
                 "generator.instructions.inherited_context.md"
                 if skip_task_and_contract
+                else "generator.instructions.simple.md"
+                if simple_mode
                 else "generator.instructions.md"
             ),
         ),
@@ -604,6 +642,8 @@ def scaffold_task_root(
             (
                 "reviewer.instructions.inherited_context.md"
                 if skip_task_and_contract
+                else "reviewer.instructions.simple.md"
+                if simple_mode
                 else "reviewer.instructions.md"
             ),
         ),
@@ -612,12 +652,15 @@ def scaffold_task_root(
         "task_created": task_created,
         "task_needs_edit": task_created and not initial_task_text and not skip_task_and_contract,
         "contract_created": contract_created,
+        "initial_review_created": initial_review_created,
         "agents_created": agents_created,
         "generator_created": generator_created,
         "reviewer_created": reviewer_created,
         "workspace_mode": (
             WORKSPACE_MODE_INHERITED_CONTEXT
             if skip_task_and_contract
+            else WORKSPACE_MODE_SIMPLE
+            if simple_mode
             else WORKSPACE_MODE_SPEC_BACKED
         ),
     }
@@ -641,6 +684,14 @@ def contract_checklist_items(contract_text: str) -> list[str]:
         line.strip()
         for line in contract_text.splitlines()
         if CHECKLIST_ITEM_RE.match(line)
+    ]
+
+
+def initial_review_items(review_text: str) -> list[str]:
+    return [
+        line.strip()
+        for line in review_text.splitlines()
+        if SIMPLE_REVIEW_ITEM_RE.match(line)
     ]
 
 
@@ -668,6 +719,19 @@ def lint_task_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]
         warnings.append(
             "task.md still contains embedded `Success contract:` prose; `contract.md` is canonical"
         )
+    return errors, warnings
+
+
+def lint_simple_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]]:
+    review_text = (task_root / "initial_review.md").read_text(encoding="utf-8")
+    errors: list[str] = []
+    warnings: list[str] = []
+    if "# Initial Review" not in review_text:
+        errors.append("initial_review.md must begin with `# Initial Review`")
+    if any(marker in review_text for marker in INITIAL_REVIEW_PLACEHOLDER_MARKERS):
+        errors.append("initial_review.md still contains scaffold placeholder text")
+    if not initial_review_items(review_text):
+        errors.append("initial_review.md must contain at least one bullet item")
     return errors, warnings
 
 
@@ -1048,11 +1112,22 @@ def load_task_materials(task_root: Path) -> dict:
         materials["task_text"] = (task_root / "task.md").read_text(encoding="utf-8").strip()
         materials["contract_path"] = task_root / "contract.md"
         materials["contract_text"] = (task_root / "contract.md").read_text(encoding="utf-8").strip()
+        materials["initial_review_path"] = task_root / "initial_review.md"
+        materials["initial_review_text"] = ""
+    elif inspection["workspace_mode"] == WORKSPACE_MODE_SIMPLE:
+        materials["task_path"] = task_root / "task.md"
+        materials["task_text"] = ""
+        materials["contract_path"] = task_root / "contract.md"
+        materials["contract_text"] = ""
+        materials["initial_review_path"] = task_root / "initial_review.md"
+        materials["initial_review_text"] = (task_root / "initial_review.md").read_text(encoding="utf-8").strip()
     else:
         materials["task_path"] = task_root / "task.md"
         materials["task_text"] = ""
         materials["contract_path"] = task_root / "contract.md"
         materials["contract_text"] = ""
+        materials["initial_review_path"] = task_root / "initial_review.md"
+        materials["initial_review_text"] = ""
     return materials
 
 
@@ -1066,6 +1141,8 @@ def canonical_task_paths(task_root: Path, workspace_mode: str | None = None) -> 
     if mode == WORKSPACE_MODE_SPEC_BACKED:
         paths["task"] = task_root / "task.md"
         paths["contract"] = task_root / "contract.md"
+    elif mode == WORKSPACE_MODE_SIMPLE:
+        paths["initial_review"] = task_root / "initial_review.md"
     return paths
 
 
@@ -1528,6 +1605,8 @@ def format_turn_one_context(task_root: Path, role: str, workspace_mode: str) -> 
                 f"- {paths['contract']}",
             ]
         )
+    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
+        sections.append(f"- {paths['initial_review']}")
     sections.extend(
         [
             f"- {paths['agents']}",
@@ -1549,6 +1628,17 @@ def format_turn_one_context(task_root: Path, role: str, workspace_mode: str) -> 
                 "",
                 f"Current definition of done from {paths['contract']}:",
                 paths["contract"].read_text(encoding="utf-8").strip(),
+            ]
+        )
+    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
+        sections.extend(
+            [
+                "",
+                f"Current initial review from {paths['initial_review']}:",
+                paths["initial_review"].read_text(encoding="utf-8").strip(),
+                "",
+                "This task is currently operating in simple review-fix mode.",
+                "Use the initial review as the first generator brief, then use later reviewer turns to detect bad code, introduced errors, unintended behavior, regressions, tech debt, and unnecessary complexity.",
             ]
         )
     else:
@@ -1591,6 +1681,8 @@ def format_later_turn_context(task_root: Path, role: str, workspace_mode: str) -
                 f"- {paths['contract']}",
             ]
         )
+    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
+        lines.append(f"- {paths['initial_review']}")
     lines.extend(
         [
             f"- {paths['agents']}",
@@ -1627,6 +1719,10 @@ def build_continue_context(
     if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
         lines.append(
             "Before proceeding, reread the canonical feature spec, definition of done, and council files, and account for any direct human guidance already present in this chat session."
+        )
+    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
+        lines.append(
+            "Before proceeding, reread the current initial review, the available council files, and any direct human guidance already present in this chat session."
         )
     else:
         lines.append(
@@ -1674,11 +1770,31 @@ def build_generator_turn_prompt(
             previous_reviewer_focus = textwrap.dedent(
                 f"""\
                 The previous reviewer verdict was `changes_requested`.
-                This generator turn must do one of these:
-                - make concrete code, test, config, or documentation changes that reduce the reviewer blocking issues
-                - emit `needs_human` if the remaining blocker comes from an ambiguous, non-auditable, or contradictory task/contract
+                Before coding, classify each reviewer blocking issue as `agree`, `disagree`, or `uncertain`.
+                - Fix the issues you agree are valid.
+                - If you disagree with a blocker, do not implement it blindly. Explain the disagreement with concrete code evidence in `generator/message.md`.
+                - If you are uncertain, investigate before changing code, and surface the uncertainty explicitly if it remains.
+                - Emit `needs_human` if the remaining blocker comes from an ambiguous, non-auditable, or contradictory task/contract.
 
                 Do not use `blocked` merely because the overall contract is still large or not yet complete.
+                Use `blocked` only for a real external implementation blocker unrelated to clarifying the task itself.
+
+                Reviewer blocking issues to address:
+                {joined_issues}
+                """
+            ).rstrip()
+        elif workspace_mode == WORKSPACE_MODE_SIMPLE:
+            previous_reviewer_focus = textwrap.dedent(
+                f"""\
+                The previous reviewer verdict was `changes_requested`.
+                Before coding, classify each reviewer blocking issue as `agree`, `disagree`, or `uncertain`.
+                - Fix the issues you agree are valid.
+                - If you disagree with a blocker, do not implement it blindly. Explain the disagreement with concrete code evidence in `generator/message.md`.
+                - If you are uncertain, investigate before changing code, and surface the uncertainty explicitly if it remains.
+                - Emit `needs_human` if the remaining blocker comes from an ambiguous or contradictory initial review or instruction file.
+
+                Do not introduce bad code, errors, unintended behavior, regressions, tech debt, or unnecessary complexity while addressing the findings.
+                Anticipate plausible future error cases and harden the change where reasonable.
                 Use `blocked` only for a real external implementation blocker unrelated to clarifying the task itself.
 
                 Reviewer blocking issues to address:
@@ -1689,9 +1805,11 @@ def build_generator_turn_prompt(
             previous_reviewer_focus = textwrap.dedent(
                 f"""\
                 The previous reviewer verdict was `changes_requested`.
-                This generator turn must do one of these:
-                - make concrete code, test, config, or documentation changes that reduce the reviewer blocking issues
-                - emit `needs_human` if the remaining blocker comes from ambiguous inherited context, contradictory instructions, or unclear repository state
+                Before coding, classify each reviewer blocking issue as `agree`, `disagree`, or `uncertain`.
+                - Fix the issues you agree are valid.
+                - If you disagree with a blocker, do not implement it blindly. Explain the disagreement with concrete code evidence in `generator/message.md`.
+                - If you are uncertain, investigate before changing code, and surface the uncertainty explicitly if it remains.
+                - Emit `needs_human` if the remaining blocker comes from ambiguous inherited context, contradictory instructions, or unclear repository state.
 
                 Do not use `blocked` merely because the remaining work is broad or incomplete.
                 Use `blocked` only for a real external implementation blocker unrelated to clarifying the task itself.
@@ -1705,6 +1823,7 @@ def build_generator_turn_prompt(
         "task_name": task_name,
         "task_path": str(task_root / "task.md"),
         "contract_path": str(task_root / "contract.md"),
+        "initial_review_path": str(task_root / "initial_review.md"),
         "agents_path": str(task_root / "AGENTS.md"),
         "role_instructions_path": str(task_root / "generator.instructions.md"),
         "turn_name": turn_name(turn_number),
@@ -1721,6 +1840,12 @@ def build_generator_turn_prompt(
     }
     if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
         template_name = "generator_turn_1.md" if inline_context else "generator_turn_n.md"
+    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
+        template_name = (
+            "generator_simple_turn_1.md"
+            if inline_context
+            else "generator_simple_turn_n.md"
+        )
     else:
         template_name = (
             "generator_inherited_turn_1.md"
@@ -1750,6 +1875,7 @@ def build_reviewer_turn_prompt(
         "task_name": task_root.name,
         "task_path": str(task_root / "task.md"),
         "contract_path": str(task_root / "contract.md"),
+        "initial_review_path": str(task_root / "initial_review.md"),
         "agents_path": str(task_root / "AGENTS.md"),
         "role_instructions_path": str(task_root / "reviewer.instructions.md"),
         "turn_name": turn_name(turn_number),
@@ -1766,6 +1892,12 @@ def build_reviewer_turn_prompt(
     }
     if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
         template_name = "reviewer_turn_1.md" if inline_context else "reviewer_turn_n.md"
+    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
+        template_name = (
+            "reviewer_simple_turn_1.md"
+            if inline_context
+            else "reviewer_simple_turn_n.md"
+        )
     else:
         template_name = (
             "reviewer_inherited_turn_1.md"
@@ -1913,6 +2045,8 @@ def pause_for_human(
         print(f"human_message: {human_message}", flush=True)
     if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
         next_step = "update task.md / contract.md / AGENTS.md / role instructions as needed, then use `continue` to resume this run."
+    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
+        next_step = "update initial_review.md / AGENTS.md / role instructions as needed, then use `continue` to resume this run."
     else:
         next_step = (
             "update the available council brief or role instructions as needed; you may also add a repo-local feature spec and definition-of-done to switch into spec-backed mode, then use `continue` to resume this run."
@@ -2446,6 +2580,16 @@ def start_run(args: argparse.Namespace) -> int:
             )
         for warning in readiness_warnings:
             print(f"warning: {warning}")
+    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
+        readiness_errors, readiness_warnings = lint_simple_workspace_readiness(task_root)
+        if readiness_errors:
+            formatted = "\n".join(f"- {item}" for item in readiness_errors)
+            raise SystemExit(
+                f"{task_root} is not ready for start.\n"
+                f"Fix these issues first:\n{formatted}"
+            )
+        for warning in readiness_warnings:
+            print(f"warning: {warning}")
     if workspace_mode == WORKSPACE_MODE_INHERITED_CONTEXT:
         if not args.generator_fork_session_id or not args.reviewer_fork_session_id:
             raise SystemExit(
@@ -2457,7 +2601,7 @@ def start_run(args: argparse.Namespace) -> int:
     if is_git:
         git_state = (
             git_preflight(repo_root)
-            if workspace_mode == WORKSPACE_MODE_SPEC_BACKED
+            if workspace_mode != WORKSPACE_MODE_INHERITED_CONTEXT
             else git_preflight_allowing_dirty(repo_root)
         )
     else:
@@ -2564,6 +2708,12 @@ def init_task(args: argparse.Namespace) -> int:
             initial_task_text=None,
             skip_task_and_contract=True,
         )
+    elif args.simple:
+        result = scaffold_task_root(
+            task_root,
+            initial_task_text=None,
+            simple_mode=True,
+        )
     else:
         result = scaffold_task_root(task_root, initial_task_text=initial_task_text or None)
 
@@ -2574,6 +2724,8 @@ def init_task(args: argparse.Namespace) -> int:
     if result["workspace_mode"] == WORKSPACE_MODE_SPEC_BACKED:
         print(f"task: {task_root / 'task.md'}")
         print(f"contract: {task_root / 'contract.md'}")
+    elif result["workspace_mode"] == WORKSPACE_MODE_SIMPLE:
+        print(f"initial_review: {task_root / 'initial_review.md'}")
     else:
         print("task/contract: skipped for inherited-context mode")
     print(f"agents: {task_root / 'AGENTS.md'}")
@@ -2581,6 +2733,8 @@ def init_task(args: argparse.Namespace) -> int:
     print(f"reviewer: {task_root / 'reviewer.instructions.md'}")
     if result["task_needs_edit"]:
         print("next: edit task.md and any instruction files, then run `start`")
+    elif result["workspace_mode"] == WORKSPACE_MODE_SIMPLE:
+        print("next: edit initial_review.md and any instruction files, then run `start` normally or with fork session ids")
     elif result["workspace_mode"] == WORKSPACE_MODE_INHERITED_CONTEXT:
         print("next: edit the inherited-context instruction files, then run `start` with both fork session ids")
     else:
@@ -2795,7 +2949,9 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--allow-non-git", action="store_true")
     init.add_argument("--task")
     init.add_argument("--task-file")
-    init.add_argument("--skip-task-and-contract", action="store_true")
+    init_mode = init.add_mutually_exclusive_group()
+    init_mode.add_argument("--skip-task-and-contract", action="store_true")
+    init_mode.add_argument("--simple", action="store_true")
     init.set_defaults(func=init_task)
 
     start = sub.add_parser("start", help="start a council run for a task name")

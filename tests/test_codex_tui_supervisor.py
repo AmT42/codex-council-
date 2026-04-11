@@ -32,6 +32,10 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         subprocess.run(["git", "add", "file.txt"], cwd=repo_root, check=True, capture_output=True, text=True)
         subprocess.run(["git", "commit", "-m", "init"], cwd=repo_root, check=True, capture_output=True, text=True)
 
+    def commit_repo_changes(self, repo_root: Path, message: str = "update") -> None:
+        subprocess.run(["git", "add", "."], cwd=repo_root, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", message], cwd=repo_root, check=True, capture_output=True, text=True)
+
     def test_validate_generator_status_accepts_valid_payload(self) -> None:
         status = MODULE.validate_generator_status(
             {
@@ -376,6 +380,23 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 (task_root / "AGENTS.md").read_text(encoding="utf-8"),
             )
 
+    def test_scaffold_task_root_can_create_simple_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            result = MODULE.scaffold_task_root(
+                task_root,
+                initial_task_text=None,
+                simple_mode=True,
+            )
+            self.assertEqual(result["workspace_mode"], MODULE.WORKSPACE_MODE_SIMPLE)
+            self.assertTrue((task_root / "initial_review.md").exists())
+            self.assertFalse((task_root / "task.md").exists())
+            self.assertFalse((task_root / "contract.md").exists())
+            self.assertIn(
+                "canonical first generator brief",
+                (task_root / "initial_review.md").read_text(encoding="utf-8"),
+            )
+
     def test_inspect_task_workspace_detects_modes_and_rejects_partial_spec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             spec_task_root = Path(tmp_dir) / ".codex-council" / "spec-task"
@@ -394,11 +415,27 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 MODULE.WORKSPACE_MODE_INHERITED_CONTEXT,
             )
 
+            simple_task_root = Path(tmp_dir) / ".codex-council" / "simple-task"
+            simple_task_root.mkdir(parents=True)
+            (simple_task_root / "initial_review.md").write_text("review", encoding="utf-8")
+            self.assertEqual(
+                MODULE.inspect_task_workspace(simple_task_root)["workspace_mode"],
+                MODULE.WORKSPACE_MODE_SIMPLE,
+            )
+
             partial_task_root = Path(tmp_dir) / ".codex-council" / "partial-task"
             partial_task_root.mkdir(parents=True)
             (partial_task_root / "task.md").write_text("task", encoding="utf-8")
             with self.assertRaises(SystemExit):
                 MODULE.inspect_task_workspace(partial_task_root)
+
+            mixed_task_root = Path(tmp_dir) / ".codex-council" / "mixed-task"
+            mixed_task_root.mkdir(parents=True)
+            (mixed_task_root / "task.md").write_text("task", encoding="utf-8")
+            (mixed_task_root / "contract.md").write_text("contract", encoding="utf-8")
+            (mixed_task_root / "initial_review.md").write_text("review", encoding="utf-8")
+            with self.assertRaises(SystemExit):
+                MODULE.inspect_task_workspace(mixed_task_root)
 
     def test_init_task_can_skip_task_and_contract_from_cli(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -409,6 +446,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 task=None,
                 task_file=None,
                 skip_task_and_contract=True,
+                simple=False,
             )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
@@ -417,6 +455,25 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertIn("task/contract: skipped for inherited-context mode", rendered)
             self.assertIn("both fork session ids", rendered)
+
+    def test_init_task_can_create_simple_mode_from_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=tmp_dir,
+                allow_non_git=True,
+                task=None,
+                task_file=None,
+                skip_task_and_contract=False,
+                simple=True,
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = MODULE.init_task(args)
+            self.assertEqual(result, 0)
+            rendered = output.getvalue()
+            self.assertIn("initial_review:", rendered)
+            self.assertIn("run `start` normally or with fork session ids", rendered)
 
     def test_build_codex_command_includes_configured_flags(self) -> None:
         repo_root = Path("/repo")
@@ -503,6 +560,23 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
             manifest = MODULE.load_json(turn_one / "context_manifest.json")
             self.assertEqual(manifest["workspace_mode"], MODULE.WORKSPACE_MODE_INHERITED_CONTEXT)
+            self.assertNotIn("task", manifest["files"])
+            self.assertNotIn("contract", manifest["files"])
+
+    def test_prepare_turn_records_simple_manifest_with_initial_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = repo_root / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / "initial_review.md").write_text("# Initial Review\n\n- Fix bug", encoding="utf-8")
+            (task_root / "AGENTS.md").write_text("Shared rules.", encoding="utf-8")
+            (task_root / "generator.instructions.md").write_text("Generator rules.", encoding="utf-8")
+            (task_root / "reviewer.instructions.md").write_text("Reviewer rules.", encoding="utf-8")
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            manifest = MODULE.load_json(turn_one / "context_manifest.json")
+            self.assertEqual(manifest["workspace_mode"], MODULE.WORKSPACE_MODE_SIMPLE)
+            self.assertIn("initial_review", manifest["files"])
             self.assertNotIn("task", manifest["files"])
             self.assertNotIn("contract", manifest["files"])
 
@@ -603,6 +677,26 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             errors, warnings = MODULE.lint_task_workspace_readiness(task_root)
             self.assertEqual(errors, [])
             self.assertTrue(any("production-ready" in item or "viral" in item for item in warnings))
+
+    def test_lint_simple_workspace_readiness_rejects_placeholder_and_accepts_concrete_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / "initial_review.md").write_text(
+                MODULE.read_template("scaffold", "initial_review.md"),
+                encoding="utf-8",
+            )
+            errors, warnings = MODULE.lint_simple_workspace_readiness(task_root)
+            self.assertTrue(errors)
+            self.assertEqual(warnings, [])
+
+            (task_root / "initial_review.md").write_text(
+                "# Initial Review\n\n## Findings To Address\n\n- Fix the nil dereference in the parser.\n",
+                encoding="utf-8",
+            )
+            errors, warnings = MODULE.lint_simple_workspace_readiness(task_root)
+            self.assertEqual(errors, [])
+            self.assertEqual(warnings, [])
 
     def test_build_generator_turn_prompt_includes_task_files_and_not_supervisor_language(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -872,6 +966,48 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertNotIn("contract.md", reviewer_prompt)
             self.assertIn("Critical review dimensions", reviewer_prompt)
 
+    def test_build_simple_mode_prompts_use_initial_review_and_focus_on_code_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            task_root.mkdir(parents=True)
+            (task_root / "initial_review.md").write_text(
+                "# Initial Review\n\n- Fix the regression in parser fallback.",
+                encoding="utf-8",
+            )
+            (task_root / "AGENTS.md").write_text("Simple council brief.", encoding="utf-8")
+            (task_root / "generator.instructions.md").write_text("Simple generator instructions.", encoding="utf-8")
+            (task_root / "reviewer.instructions.md").write_text("Simple reviewer instructions.", encoding="utf-8")
+            generator_prompt = MODULE.build_generator_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                "demo-task",
+                workspace_mode=MODULE.WORKSPACE_MODE_SIMPLE,
+                inline_context=True,
+            )
+            reviewer_prompt = MODULE.build_reviewer_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                workspace_mode=MODULE.WORKSPACE_MODE_SIMPLE,
+                inline_context=True,
+            )
+            self.assertIn("initial_review.md", generator_prompt)
+            self.assertIn("classify each review point as `agree`, `disagree`, or `uncertain`", generator_prompt)
+            self.assertIn("Do not introduce bad code, new errors, unintended behavior, regressions, tech debt, or clear unnecessary complexity", generator_prompt)
+            self.assertNotIn("task.md", generator_prompt)
+            self.assertNotIn("contract.md", generator_prompt)
+            self.assertNotIn("Shared council brief from", generator_prompt)
+            self.assertIn("Read these files directly for the review:", reviewer_prompt)
+            self.assertIn("introduced errors", reviewer_prompt)
+            self.assertIn("clear unnecessary complexity", reviewer_prompt)
+            self.assertIn("Do not restate the same blocker without stronger evidence", reviewer_prompt)
+            self.assertNotIn("task.md", reviewer_prompt)
+            self.assertNotIn("contract.md", reviewer_prompt)
+
     def test_load_critical_review_dimensions_from_template_file(self) -> None:
         dimensions = MODULE.load_critical_review_dimensions()
         self.assertTrue(any(item["key"] == "correctness_vs_intent" for item in dimensions))
@@ -896,6 +1032,24 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertNotIn("task.md", context)
             self.assertNotIn("contract.md", context)
             self.assertIn("available canonical council files", context)
+
+    def test_build_continue_context_simple_mode_mentions_initial_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "runs" / "run-1"
+            previous_turn_dir = run_dir / "turns" / "0001"
+            (previous_turn_dir / "generator").mkdir(parents=True)
+            MODULE.write_text(previous_turn_dir / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                previous_turn_dir / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            context = MODULE.build_continue_context(
+                state={"status": "paused_needs_human"},
+                previous_turn_dir=previous_turn_dir,
+                role="generator",
+                workspace_mode=MODULE.WORKSPACE_MODE_SIMPLE,
+            )
+            self.assertIn("current initial review", context)
 
     def test_wait_for_role_artifacts_returns_valid_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1359,6 +1513,99 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 MODULE.start_run(args)
 
+    def test_start_run_simple_mode_rejects_placeholder_initial_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            MODULE.scaffold_council_root(repo_root)
+            task_root = MODULE.task_root_for(repo_root, "demo-task")
+            MODULE.scaffold_task_root(
+                task_root,
+                initial_task_text=None,
+                simple_mode=True,
+            )
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                generator_session=None,
+                reviewer_session=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+            )
+            with self.assertRaises(SystemExit):
+                MODULE.start_run(args)
+
+    def test_start_run_simple_mode_can_start_fresh_without_fork_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            MODULE.scaffold_council_root(repo_root)
+            task_root = MODULE.task_root_for(repo_root, "demo-task")
+            MODULE.scaffold_task_root(
+                task_root,
+                initial_task_text=None,
+                simple_mode=True,
+            )
+            (task_root / "initial_review.md").write_text(
+                "# Initial Review\n\n- Fix the parser regression.\n",
+                encoding="utf-8",
+            )
+            self.commit_repo_changes(repo_root, "add simple task")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                generator_session="gen",
+                reviewer_session="rev",
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+            )
+            with mock.patch.object(MODULE, "read_codex_session_index", return_value=[]), mock.patch.object(
+                MODULE, "create_tmux_sessions", return_value=None
+            ), mock.patch.object(
+                MODULE, "wait_for_tmux_sessions_ready", return_value=None
+            ), mock.patch.object(MODULE, "supervisor_loop", return_value=None), contextlib.redirect_stdout(
+                io.StringIO()
+            ):
+                result = MODULE.start_run(args)
+            self.assertEqual(result, 0)
+            state = MODULE.load_json(task_root / "runs" / "run-1" / "state.json")
+            self.assertEqual(state["workspace_mode"], MODULE.WORKSPACE_MODE_SIMPLE)
+            self.assertEqual(state["roles"]["generator"]["bootstrap_mode"], "fresh")
+
+    def test_start_run_simple_mode_still_rejects_dirty_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            MODULE.scaffold_council_root(repo_root)
+            task_root = MODULE.task_root_for(repo_root, "demo-task")
+            MODULE.scaffold_task_root(
+                task_root,
+                initial_task_text=None,
+                simple_mode=True,
+            )
+            (task_root / "initial_review.md").write_text(
+                "# Initial Review\n\n- Fix the parser regression.\n",
+                encoding="utf-8",
+            )
+            self.commit_repo_changes(repo_root, "add simple task")
+            (repo_root / "file.txt").write_text("dirty change", encoding="utf-8")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                generator_session=None,
+                reviewer_session=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+            )
+            with self.assertRaises(SystemExit):
+                MODULE.start_run(args)
+
     def test_determine_continue_target_routes_from_generator_pending_same_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "runs" / "run-1"
@@ -1654,6 +1901,32 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertNotIn("task.md", rendered)
             self.assertNotIn("contract.md", rendered)
             self.assertIn("feature spec and definition-of-done", rendered)
+
+    def test_pause_for_human_simple_mode_mentions_initial_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            state = {
+                "status": "waiting_generator",
+                "stop_reason": None,
+                "workspace_mode": MODULE.WORKSPACE_MODE_SIMPLE,
+            }
+            MODULE.save_json(run_dir / "state.json", state)
+            turn_dir = run_dir / "turns" / "0001"
+            turn_dir.mkdir(parents=True)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                MODULE.pause_for_human(
+                    run_dir,
+                    state,
+                    role="generator",
+                    turn_dir=turn_dir,
+                    summary="Need clarification.",
+                    human_message="Clarify the initial review.",
+                    human_source="initial_review.md",
+                )
+            rendered = output.getvalue()
+            self.assertIn("initial_review.md", rendered)
+            self.assertNotIn("task.md / contract.md", rendered)
 
 
 if __name__ == "__main__":
