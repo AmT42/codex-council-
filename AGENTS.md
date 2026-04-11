@@ -18,7 +18,11 @@ If you are working in this repo, you are usually changing the harness, not the t
 The council workspace inside a target repo is:
 
 - `.codex-council/<task_name>/task.md`
-  - canonical **Feature Spec**
+  - canonical **Task Brief**
+- `.codex-council/<task_name>/review.md`
+  - canonical **Review / Findings Input**
+- `.codex-council/<task_name>/spec.md`
+  - canonical **Detailed Spec**
 - `.codex-council/<task_name>/contract.md`
   - canonical **Definition of Done**
 - `.codex-council/<task_name>/AGENTS.md`
@@ -28,16 +32,12 @@ The council workspace inside a target repo is:
 - `.codex-council/<task_name>/reviewer.instructions.md`
   - reviewer-specific additions
 
-Simple mode may use this alternate canonical file instead of `task.md` and `contract.md`:
-
-- `.codex-council/<task_name>/initial_review.md`
-  - canonical **Initial Review** for a review-fix loop
-
 Do not blur these roles.
 
-- `task.md` is where feature requirements belong.
+- `task.md` is the default brief for requested work.
+- `review.md` is where findings, debugging notes, or external review inputs belong.
+- `spec.md` is for detailed design only when the task needs it.
 - `contract.md` is checklist-only and must stay auditable.
-- `initial_review.md` is for a concrete starting review brief when using simple mode.
 - `AGENTS.md` is for stable council behavior, not product requirements.
 
 ## Runtime Model
@@ -87,11 +87,11 @@ Important runtime files:
 
 ## Current Design Expectations
 
-- `task.md` is titled `# Feature Spec` in spec-backed mode.
-- `contract.md` is titled `# Definition of Done` in spec-backed mode.
-- `initial_review.md` is titled `# Initial Review` in simple mode.
-- `start` lint-checks both spec structure and DoD quality before launching.
-- `start` lint-checks simple-mode `initial_review.md` quality before launching.
+- `task.md` is titled `# Task`.
+- `review.md` is titled `# Review`.
+- `spec.md` is titled `# Spec`.
+- `contract.md` is titled `# Definition of Done`.
+- `start` validates whichever of those documents are present before launching.
 - `continue` is artifact-driven and session-aware.
 - If a live tmux role session exists, prefer reusing it.
 - If the tmux session is gone, prefer resuming the same Codex conversation when a tracked session id is available.

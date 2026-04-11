@@ -6,7 +6,7 @@ Rules:
 - Keep this file short and audit-oriented.
 - Every item must be objectively checkable.
 - Each bullet should describe something that must be true before approval.
-- Keep detailed product reasoning, architecture, and implementation notes in `task.md`, not here.
+- Keep detailed product reasoning, architecture, and implementation notes in `task.md`, `review.md`, or `spec.md`, not here.
 - The reviewer will copy this checklist into the reviewer turn message artifact and mark items with `[x]` / `[ ]`.
 
 Bad examples:

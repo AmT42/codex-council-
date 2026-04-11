@@ -1,18 +1,16 @@
 Repository root:
 {{repo_root}}
 
-{{turn_one_context_block}}
-
 {{continue_context_block}}
 
 {{fork_context_block}}
 
-{{migration_warning_block}}
-
 Turn {{turn_name}}.
 
-Read the current feature spec in `task.md` and the current definition of done in `contract.md`.
-Implement the requested change carefully. If the feature spec is critically flawed, contradictory, or unsafe to continue, emit `needs_human` instead of guessing.
+Read these files directly before coding:
+{{docs_to_read_block}}
+
+{{generator_objective_block}}
 
 If you changed repo-tracked files in this turn, create a git commit before writing the generator artifacts for this turn.
 
@@ -21,15 +19,7 @@ When the implementation is complete, write exactly these files:
 - {{generator_status_path}}
 
 In `generator/message.md`, include at minimum:
-- What changed
-- Commit created for this turn, or explicitly say that no repo-tracked files changed
-- Why those changes move the code toward satisfying `contract.md`
-- Changed invariants / preserved invariants
-- Downstream readers / consumers checked
-- Failure modes and fallback behavior considered
-- Verification performed
-- Remaining contract items not yet satisfied
-- Known risks or blockers
+{{generator_message_requirements_block}}
 
 Use exactly one of these status JSON shapes:
 
@@ -37,7 +27,7 @@ Normal case:
 {"result":"implemented|no_changes_needed|blocked","summary":"short string","changed_files":["relative/path"]}
 
 Human intervention case:
-{"result":"needs_human","summary":"short string","changed_files":["relative/path"],"human_source":"task.md|contract.md|AGENTS.md|generator.instructions.md|reviewer.instructions.md|repo_state","human_message":"short string"}
+{"result":"needs_human","summary":"short string","changed_files":["relative/path"],"human_source":"task.md|review.md|spec.md|contract.md|initial_review.md|AGENTS.md|generator.instructions.md|reviewer.instructions.md|repo_state","human_message":"short string"}
 
 After writing the required files, print exactly:
 - `COUNCIL_TERMINAL_SUMMARY_BEGIN`

@@ -12,30 +12,18 @@ templates/
     council_root.gitignore
     config.toml
     task.md
+    review.md
+    spec.md
     contract.md
     AGENTS.md
-    AGENTS.inherited_context.md
-    AGENTS.simple.md
     generator.instructions.md
-    generator.instructions.inherited_context.md
-    generator.instructions.simple.md
     reviewer.instructions.md
-    reviewer.instructions.inherited_context.md
-    reviewer.instructions.simple.md
-    initial_review.md
   prompts/
-    generator_turn_1.md
-    generator_turn_n.md
-    generator_inherited_turn_1.md
-    generator_inherited_turn_n.md
-    generator_simple_turn_1.md
-    generator_simple_turn_n.md
-    reviewer_turn_1.md
-    reviewer_turn_n.md
-    reviewer_inherited_turn_1.md
-    reviewer_inherited_turn_n.md
-    reviewer_simple_turn_1.md
-    reviewer_simple_turn_n.md
+    generator_initial.md
+    generator_followup.md
+    reviewer_initial.md
+    reviewer_followup.md
+    reviewer_fork_bootstrap.md
   data/
     critical_review_dimensions.json
 ```
@@ -45,40 +33,36 @@ Meaning:
 - `templates/prompts/*` are rendered into per-turn role prompt artifacts such as `turns/0001/generator/prompt.md`
 - `templates/data/critical_review_dimensions.json` is the source of truth for reviewer critical-dimension keys and labels
 
-The supervisor now supports three workspace shapes:
-- `spec_backed`
-  - `task.md` + `contract.md` + `AGENTS.md` + role instructions
-- `inherited_context`
-  - `AGENTS.md` + role instructions only
-  - intended for fork-based starts that inherit product context from an existing Codex chat session
-- `simple`
-  - `initial_review.md` + `AGENTS.md` + role instructions
-  - intended for “take this review and fix it safely” workflows, with either fresh or forked session bootstrap
-  - generator must validate each review point before acting; reviewer must adjudicate disagreements instead of blindly looping
+## Document Model
 
-## Spec Model
-
-This repo uses three canonical task files with different jobs:
+This repo now uses a single progressive model based on local task documents:
 
 - `task.md`
-  - The canonical **Feature Spec**
-  - Describes the requested behavior, constraints, boundaries, and validation expectations
+  - default brief for bugs, tickets, and short requests
+- `review.md`
+  - findings input for debugging, review-fix loops, or external comments
+- `spec.md`
+  - detailed design doc when `task.md` is not enough
 - `contract.md`
-  - The canonical **Definition of Done**
-  - Checklist only; each item must be objectively checkable
+  - optional definition of done / stop condition
 - `AGENTS.md`
-  - The canonical **Council Brief**
-  - Stable generator/reviewer behavior only, not feature requirements
+  - stable council behavior only
 
 This separation matters:
-- the feature spec says what should be built
-- the definition of done says when approval is justified
-- the council brief says how the agents should behave
+- `task.md` tells the council what to do in short form
+- `review.md` tells the council what findings to address
+- `spec.md` expands the task into a structured design when needed
+- `contract.md` defines when approval is justified
+- `AGENTS.md` defines how the agents should behave
 
 ### Glossary
 
+- `task`
+  - A short request, bug, or ticket description
+- `review`
+  - A set of findings or blockers to evaluate and fix
 - `spec`
-  - A clear written description of the feature, behavior, constraints, and expected validation
+  - A detailed design layered on top of `task.md`
 - `definition of done`
   - The auditable checklist that must be true before approval
 - `council brief`
@@ -86,22 +70,27 @@ This separation matters:
 - `blocking issue`
   - A concrete problem that prevents approval
 - `needs_human`
-  - A stop state used when the feature spec or definition of done is too ambiguous, contradictory, or non-auditable to continue safely
+  - A stop state used when the task documents are too ambiguous, contradictory, or non-auditable to continue safely
 
 ### Writing Guide
 
-You do not need advanced technical vocabulary to write a good task.
+You do not need advanced technical vocabulary to use this system well.
+
+Use:
+- `task.md` for most work by default
+- `review.md` when you start from findings, debugging notes, or review comments
+- `spec.md` only when the task needs deeper structure than `task.md`
+- `contract.md` only when you need an objective approval bar
 
 Good `task.md` writing:
-- describe behavior concretely
-- describe constraints and non-goals
-- describe what should happen for users or operators
-- describe what parts of the system are in scope
+- describe the bug or request concretely
+- include just enough context to act safely
+- say what success looks like
 
-Bad `task.md` writing:
-- slogans without behavior
-- vague adjectives without concrete follow-up
-- mixing implementation, business aspiration, and approval criteria into one sentence
+Good `review.md` writing:
+- list concrete findings or blockers
+- include logs, repro steps, or code references when useful
+- avoid mixing unrelated issues into one bullet
 
 Good `contract.md` writing:
 - checklist items that can be verified by reading code, running tests, or observing behavior
@@ -113,83 +102,6 @@ Bad `contract.md` writing:
 - `best-in-class`
 
 Those phrases are acceptable only after they are decomposed into measurable engineering conditions.
-
-### Example Workspace
-
-Simple user request:
-- “Make a replay-verified score submission flow for the Snake game.”
-
-Good `task.md`:
-
-```md
-# Feature Spec
-
-## Goal
-Add replay-verified score submission for the Snake game backend.
-
-## User Outcome
-Players can submit scores, but the server stores them only after replay verification.
-
-## In Scope
-- Backend score submission
-- Session validation
-- Frontend score-submit payload changes
-- Tests for replay verification
-
-## Out of Scope
-- Mobile app packaging
-- Marketing or growth features
-
-## Constraints
-- Keep SQLite
-- Keep the current frontend/backend split
-
-## Existing Context
-- The repo already has an Express backend and browser-based Snake frontend.
-
-## Desired Behavior
-- `/api/scores` rejects invalid replay payloads.
-- Verified runs are stored in the leaderboard.
-
-## Technical Boundaries
-- Do not replace the current persistence layer.
-
-## Validation Expectations
-- Add tests for valid and invalid replay submissions.
-
-## Open Questions
-- None
-```
-
-Good `contract.md`:
-
-```md
-# Definition of Done
-
-- [ ] `/api/scores` rejects invalid replay payloads with structured 4xx JSON.
-- [ ] Verified replay submissions are persisted to the leaderboard.
-- [ ] Required tests for replay verification are present and passing.
-```
-
-Good `AGENTS.md`:
-- generator must implement against the feature spec and definition of done
-- reviewer must approve only when the definition of done is satisfied
-- ambiguity must become `needs_human`
-
-### Future Planner / Preparator
-
-The future planner/preparator loop should take a weak user request like:
-- “make viral snake 3d game ios”
-
-and convert it into:
-- a concrete `task.md` feature spec
-- a measurable `contract.md` definition of done
-- optional role-instruction additions only when needed
-
-It should not:
-- dump product requirements into `AGENTS.md`
-- use `contract.md` for vague business aspirations
-- leave `task.md` as a one-line wish
 
 ## Real TUI Mode
 
@@ -214,14 +126,12 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
 ```text
 /path/to/target-repo/.codex-council/config.toml
 /path/to/target-repo/.codex-council/.gitignore
-/path/to/target-repo/.codex-council/my-task/task.md
-/path/to/target-repo/.codex-council/my-task/contract.md
 /path/to/target-repo/.codex-council/my-task/AGENTS.md
 /path/to/target-repo/.codex-council/my-task/generator.instructions.md
 /path/to/target-repo/.codex-council/my-task/reviewer.instructions.md
 ```
 
-If you already know the task brief, you can seed it during init:
+If you already know the brief, you can seed `task.md` during init:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
@@ -229,61 +139,48 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
   --task "Implement feature X"
 ```
 
-If you want a fork-based inherited-context workspace with no repo-local `task.md` or `contract.md` yet:
+Then add whichever input documents you need:
 
 ```bash
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write task my-task \
   --dir /path/to/target-repo \
-  --skip-task-and-contract
+  --body "Fix the bug in ..."
 ```
 
-If you want a simple review-fix workspace driven by a repo-local `initial_review.md`:
-
 ```bash
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task \
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write review my-task \
   --dir /path/to/target-repo \
-  --simple
+  --body "The fallback path keeps returning partial state."
 ```
 
-Simple mode is the right abstraction here. It should stay a dedicated mode, not become a multi-flag combination like `--with-review --skip-task-and-contract`.
-
-Then edit the scaffolded files as needed and start the council:
-
 ```bash
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
-  --dir /path/to/target-repo
-```
-
-Fork-based start examples:
-
-Spec-backed fork start:
-
-```bash
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write spec my-task \
   --dir /path/to/target-repo \
-  --generator-fork-session-id <generator_parent_session_id> \
-  --reviewer-fork-session-id <reviewer_parent_session_id>
+  --body "Implement a memory subsystem inspired by repo A and repo B."
 ```
 
-Inherited-context fork start:
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write contract my-task \
+  --dir /path/to/target-repo \
+  --body "Full answer is always captured before the send button becomes active."
+```
+
+`start` chooses the first role automatically:
+- `review.md` present => starts with `generator`
+- `task.md` present => starts with `generator`
+- fork with no local docs => starts with a reviewer bootstrap that materializes `review.md`, then continues with `generator`
+
+You can override that rarely with `--start-role`.
+
+Simple fork start for both roles from the same parent session:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
   --dir /path/to/target-repo \
-  --generator-fork-session-id <generator_parent_session_id> \
-  --reviewer-fork-session-id <reviewer_parent_session_id>
+  --fork-session-id <parent_session_id>
 ```
 
-In inherited-context mode, both fork session ids are required. This mode is intended for forked starts, not fresh spec-less runs.
-
-Simple-mode fresh start:
-
-```bash
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
-  --dir /path/to/target-repo
-```
-
-Simple-mode fork start:
+Advanced per-role fork override:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
@@ -315,12 +212,10 @@ The supervisor will:
 
 - resolve the target directory to its git root by default
 - refuse to start on a detached HEAD
-- refuse to start on a dirty repo in spec-backed mode
-- refuse to start on a dirty repo in simple mode
-- allow a dirty repo in inherited-context fork mode
+- refuse to start on a dirty repo except during the fork bootstrap path
 - launch two real `codex` TUIs in `tmux` inside that target repo
-- build each turn prompt from the available canonical task files for that workspace mode
-- inline the canonical task files on turn 1, then only reference their canonical paths on later turns so the agents can inspect the current files directly
+- build short path-based prompts from the available task documents
+- bootstrap a local `review.md` when a fork start has no local `task.md`, `review.md`, or `spec.md`
 - store per-turn canonical file hashes and metadata in `context_manifest.json`
 - advance turns only when the required role artifact pair exists and validates
 - automatically request one artifact rewrite if a role writes invalid status JSON
@@ -338,31 +233,23 @@ Important:
 
 - watch the sessions, but do not type into them unless you intentionally want to override the council
 - the authoritative control signal is only the artifact pair for the role
-- `task.md` is the canonical feature spec
-- `contract.md` is the canonical definition of done
-- `initial_review.md` is the canonical first generator brief in simple mode
-- in simple mode, `initial_review.md` is a starting review brief, not unquestionable truth
-- in simple mode, generator must classify review points as `agree` / `disagree` / `uncertain` before coding
-- in simple mode, reviewer must adjudicate generator disagreements with evidence and must not restate the same blocker without stronger evidence
+- `task.md` is the default brief
+- `review.md` is the canonical findings input
+- `spec.md` is the detailed design doc layered on top of `task.md`
+- `contract.md` is the optional definition of done
+- when `review.md` is present, generator must classify review points as `agree` / `disagree` / `uncertain` before coding
+- reviewer must adjudicate generator disagreements with evidence and must not restate the same blocker without stronger evidence
 - `AGENTS.md` is the canonical council brief
-- `start` refuses to launch if `task.md` is missing required spec sections
-- `start` refuses to launch if `contract.md` is still scaffold text or has no checklist items
-- `start` refuses to launch if `initial_review.md` is still scaffold text or has no concrete bullet items in simple mode
-- inherited-context mode intentionally omits repo-local `task.md` and `contract.md`
-- inherited-context mode requires both `--generator-fork-session-id` and `--reviewer-fork-session-id`
-- inherited-context mode allows a dirty worktree so the council can continue from already-modified forked context
-- spec-backed mode keeps the old clean-worktree requirement, even when fork session ids are supplied
-- simple mode can start either fresh or from fork; it keeps the normal clean-worktree requirement
-- approval means both:
-  - the contract checklist is satisfied
-  - all critical review dimensions pass
+- `start` validates whichever of `task.md`, `review.md`, `spec.md`, and `contract.md` are present
+- `spec.md` requires `task.md`
+- `contract.md` requires at least `task.md` or `review.md`
+- approval means all critical review dimensions pass, and also the contract checklist passes when `contract.md` exists
 - generator must write `generator/message.md` and `generator/status.json`
 - reviewer must write `reviewer/message.md` and `reviewer/status.json`
 - `raw_final_output.md` is trace-only and now captures only an explicit terminal summary block, not the full pasted prompt or tool trace
-- `.codex-council/<task_name>/AGENTS.md` is injected into prompts as a council brief; it does not automatically scope repo-root edits through Codex AGENTS semantics
-- either role may emit `needs_human` when `task.md` or the task instructions are flawed enough that continuing would be unsafe or misleading
-- a reviewer should use `needs_human`, not `changes_requested`, when the remaining blocker is that the contract itself is too broad or non-auditable
-- a generator should use `needs_human`, not `blocked`, when the remaining blocker is task or contract ambiguity rather than an external implementation blocker
+- either role may emit `needs_human` when the task documents are flawed enough that continuing would be unsafe or misleading
+- a reviewer should use `needs_human`, not `changes_requested`, when the remaining blocker is that the task documents themselves are too broad or non-auditable
+- a generator should use `needs_human`, not `blocked`, when the remaining blocker is document ambiguity rather than an external implementation blocker
 
 Reviewer stop conditions are structured, not guessed from prose:
 
@@ -419,7 +306,7 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task 
 
 When the original tmux session still exists, `continue` keeps using that same live role session so direct human chat in the terminal is preserved. If the tmux session is gone, the harness prefers resuming the same Codex conversation when it has a tracked session id; otherwise it starts a fresh role session with a continuation prompt.
 
-This is the intended path after you edit `task.md`, `contract.md`, `AGENTS.md`, or role instructions, or after you discuss changes directly in the live Codex session and want the council to proceed.
+This is the intended path after you edit `task.md`, `review.md`, `spec.md`, `contract.md`, `AGENTS.md`, or role instructions, or after you discuss changes directly in the live Codex session and want the council to proceed.
 
 Generated runtime state and traces live under the task run tree and are ignored by `.codex-council/.gitignore`.
 

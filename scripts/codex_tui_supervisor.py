@@ -19,39 +19,32 @@ from typing import Literal
 
 COUNCIL_DIRNAME = ".codex-council"
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "templates"
-WORKSPACE_MODE_SPEC_BACKED = "spec_backed"
-WORKSPACE_MODE_INHERITED_CONTEXT = "inherited_context"
-WORKSPACE_MODE_SIMPLE = "simple"
-WORKSPACE_MODES = {
-    WORKSPACE_MODE_SPEC_BACKED,
-    WORKSPACE_MODE_INHERITED_CONTEXT,
-    WORKSPACE_MODE_SIMPLE,
-}
 ROLE_NAMES = ("generator", "reviewer")
-SPEC_BACKED_REQUIRED_FILENAMES = (
-    "task.md",
-    "contract.md",
+BASE_REQUIRED_FILENAMES = (
     "AGENTS.md",
     "generator.instructions.md",
     "reviewer.instructions.md",
 )
-INHERITED_CONTEXT_REQUIRED_FILENAMES = (
-    "AGENTS.md",
-    "generator.instructions.md",
-    "reviewer.instructions.md",
-)
-SIMPLE_REQUIRED_FILENAMES = (
-    "initial_review.md",
-    "AGENTS.md",
-    "generator.instructions.md",
-    "reviewer.instructions.md",
-)
+TASK_FILENAME = "task.md"
+REVIEW_FILENAME = "review.md"
+LEGACY_REVIEW_FILENAME = "initial_review.md"
+SPEC_FILENAME = "spec.md"
+CONTRACT_FILENAME = "contract.md"
+INPUT_DOC_ORDER = ("task", "review", "spec", "contract")
+INPUT_DOC_FILENAMES = {
+    "task": TASK_FILENAME,
+    "review": REVIEW_FILENAME,
+    "spec": SPEC_FILENAME,
+    "contract": CONTRACT_FILENAME,
+}
 GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked", "needs_human"}
 REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
 HUMAN_SOURCES = {
-    "task.md",
-    "contract.md",
-    "initial_review.md",
+    TASK_FILENAME,
+    REVIEW_FILENAME,
+    LEGACY_REVIEW_FILENAME,
+    SPEC_FILENAME,
+    CONTRACT_FILENAME,
     "AGENTS.md",
     "generator.instructions.md",
     "reviewer.instructions.md",
@@ -64,17 +57,23 @@ TMUX_CAPTURE_HISTORY_LINES = 1000
 ROLE_ARTIFACT_POLL_SECONDS = 1.0
 TASK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 CHECKLIST_ITEM_RE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+\S")
-SIMPLE_REVIEW_ITEM_RE = re.compile(r"^\s*[-*]\s+\S")
+REVIEW_ITEM_RE = re.compile(r"^\s*[-*]\s+\S")
 CONTRACT_PLACEHOLDER_MARKERS = (
     "Write the definition of done for this task here as a checklist.",
     "Bad examples:",
 )
-INITIAL_REVIEW_PLACEHOLDER_MARKERS = (
-    "Describe the concrete bug, cleanup, or review finding to fix.",
+REVIEW_PLACEHOLDER_MARKERS = (
+    "Describe the concrete issue, finding, or blocker to fix.",
     "Optional extra context",
 )
 TASK_REQUIRED_HEADINGS = (
-    "# Feature Spec",
+    "# Task",
+    "## Request",
+    "## Context",
+    "## Success Signal",
+)
+SPEC_REQUIRED_HEADINGS = (
+    "# Spec",
     "## Goal",
     "## User Outcome",
     "## In Scope",
@@ -200,13 +199,55 @@ def default_scaffold_text(filename: str) -> str:
     return read_template("scaffold", filename)
 
 
-def build_task_spec_from_seed(initial_task_text: str) -> str:
+def build_task_doc_from_seed(initial_task_text: str) -> str:
     stripped = initial_task_text.strip()
-    if stripped.startswith("# Feature Spec"):
+    if stripped.startswith("# Task"):
         return stripped
     return textwrap.dedent(
         f"""\
-        # Feature Spec
+        # Task
+
+        ## Request
+
+        {stripped}
+
+        ## Context
+
+        Add any concrete context, constraints, or references needed to act safely.
+
+        ## Success Signal
+
+        Describe what should be true when this task is done. Keep it short unless this needs a full `spec.md`.
+        """
+    ).rstrip()
+
+
+def build_review_doc_from_seed(initial_review_text: str) -> str:
+    stripped = initial_review_text.strip()
+    if stripped.startswith("# Review"):
+        return stripped
+    return textwrap.dedent(
+        f"""\
+        # Review
+
+        ## Findings
+
+        - {stripped}
+
+        ## Context
+
+        Add any logs, repro steps, links, or code references that support the findings.
+        """
+    ).rstrip()
+
+
+def build_spec_doc_from_seed(initial_task_text: str) -> str:
+    stripped = initial_task_text.strip()
+    if stripped.startswith("# Spec"):
+        return stripped
+    return textwrap.dedent(
+        f"""\
+        # Spec
 
         ## Goal
 
@@ -247,6 +288,30 @@ def build_task_spec_from_seed(initial_task_text: str) -> str:
         ## Open Questions
 
         - None yet
+        """
+    ).rstrip()
+
+
+def build_contract_doc_from_seed(initial_contract_text: str) -> str:
+    stripped = initial_contract_text.strip()
+    if stripped.startswith("# Definition of Done"):
+        return stripped
+    bullets = [
+        line.strip()
+        for line in stripped.splitlines()
+        if line.strip()
+    ]
+    if not bullets:
+        return read_template("scaffold", CONTRACT_FILENAME).rstrip()
+    checklist = "\n".join(
+        line if CHECKLIST_ITEM_RE.match(line) else f"- [ ] {line.lstrip('-* ').strip()}"
+        for line in bullets
+    )
+    return textwrap.dedent(
+        f"""\
+        # Definition of Done
+
+        {checklist}
         """
     ).rstrip()
 
@@ -520,36 +585,44 @@ def role_validation_error_md_path(turn_dir: Path, role: str) -> Path:
 
 
 def inspect_task_workspace(task_root: Path) -> dict:
-    task_path = task_root / "task.md"
-    contract_path = task_root / "contract.md"
-    initial_review_path = task_root / "initial_review.md"
-    task_exists = task_path.exists()
-    contract_exists = contract_path.exists()
-    initial_review_exists = initial_review_path.exists()
-    if task_exists != contract_exists:
+    base_required_files = [task_root / name for name in BASE_REQUIRED_FILENAMES]
+    task_path = task_root / TASK_FILENAME
+    review_path = task_root / REVIEW_FILENAME
+    legacy_review_path = task_root / LEGACY_REVIEW_FILENAME
+    spec_path = task_root / SPEC_FILENAME
+    contract_path = task_root / CONTRACT_FILENAME
+
+    if review_path.exists() and legacy_review_path.exists():
         raise SystemExit(
             f"invalid task workspace for {task_root.name}.\n"
-            "task.md and contract.md must either both exist or both be absent."
+            f"{REVIEW_FILENAME} and {LEGACY_REVIEW_FILENAME} cannot both exist."
         )
-    if task_exists and initial_review_exists:
+
+    doc_paths: dict[str, Path | None] = {
+        "task": task_path if task_path.exists() else None,
+        "review": review_path if review_path.exists() else (legacy_review_path if legacy_review_path.exists() else None),
+        "spec": spec_path if spec_path.exists() else None,
+        "contract": contract_path if contract_path.exists() else None,
+    }
+    if doc_paths["spec"] and not doc_paths["task"]:
         raise SystemExit(
             f"invalid task workspace for {task_root.name}.\n"
-            "initial_review.md cannot be combined with task.md / contract.md."
+            f"{SPEC_FILENAME} requires {TASK_FILENAME}."
         )
-    if task_exists:
-        workspace_mode = WORKSPACE_MODE_SPEC_BACKED
-        filenames = SPEC_BACKED_REQUIRED_FILENAMES
-    elif initial_review_exists:
-        workspace_mode = WORKSPACE_MODE_SIMPLE
-        filenames = SIMPLE_REQUIRED_FILENAMES
-    else:
-        workspace_mode = WORKSPACE_MODE_INHERITED_CONTEXT
-        filenames = INHERITED_CONTEXT_REQUIRED_FILENAMES
-    required_files = [task_root / name for name in filenames]
+    if doc_paths["contract"] and not (doc_paths["task"] or doc_paths["review"]):
+        raise SystemExit(
+            f"invalid task workspace for {task_root.name}.\n"
+            f"{CONTRACT_FILENAME} requires at least {TASK_FILENAME} or {REVIEW_FILENAME}."
+        )
+
+    present_docs = tuple(name for name in INPUT_DOC_ORDER if doc_paths[name] is not None)
     return {
-        "workspace_mode": workspace_mode,
-        "required_files": required_files,
-        "missing_files": [path for path in required_files if not path.exists()],
+        "doc_paths": doc_paths,
+        "legacy_review_source": bool(doc_paths["review"] and doc_paths["review"].name == LEGACY_REVIEW_FILENAME),
+        "present_docs": present_docs,
+        "profile": "+".join(present_docs) if present_docs else "undocumented",
+        "required_files": base_required_files,
+        "missing_files": [path for path in base_required_files if not path.exists()],
     }
 
 
@@ -578,91 +651,36 @@ def scaffold_task_root(
     task_root: Path,
     *,
     initial_task_text: str | None,
-    skip_task_and_contract: bool = False,
-    simple_mode: bool = False,
 ) -> dict:
     ensure_dir(task_root)
-    if sum(1 for flag in (skip_task_and_contract, simple_mode) if flag) > 1:
-        raise SystemExit("choose only one alternate init mode")
-    if (skip_task_and_contract or simple_mode) and initial_task_text:
-        raise SystemExit("cannot seed task text when using an alternate init mode")
     task_created = False
-    contract_created = False
-    initial_review_created = False
-    if not skip_task_and_contract:
-        if simple_mode:
-            initial_review_created = write_if_missing(
-                task_root / "initial_review.md",
-                read_template("scaffold", "initial_review.md"),
-            )
-        else:
-            task_template = (
-                build_task_spec_from_seed(initial_task_text)
-                if initial_task_text
-                else read_template("scaffold", "task.md")
-            )
-            task_created = write_if_missing(
-                task_root / "task.md",
-                task_template,
-            )
-            contract_created = write_if_missing(
-                task_root / "contract.md",
-                read_template("scaffold", "contract.md"),
-            )
+    if initial_task_text:
+        task_created = write_if_missing(
+            task_root / TASK_FILENAME,
+            build_task_doc_from_seed(initial_task_text),
+        )
     agents_created = write_if_missing(
         task_root / "AGENTS.md",
-        read_template(
-            "scaffold",
-            (
-                "AGENTS.inherited_context.md"
-                if skip_task_and_contract
-                else "AGENTS.simple.md"
-                if simple_mode
-                else "AGENTS.md"
-            ),
-        ),
+        read_template("scaffold", "AGENTS.md"),
     )
     generator_created = write_if_missing(
         task_root / "generator.instructions.md",
-        read_template(
-            "scaffold",
-            (
-                "generator.instructions.inherited_context.md"
-                if skip_task_and_contract
-                else "generator.instructions.simple.md"
-                if simple_mode
-                else "generator.instructions.md"
-            ),
-        ),
+        read_template("scaffold", "generator.instructions.md"),
     )
     reviewer_created = write_if_missing(
         task_root / "reviewer.instructions.md",
-        read_template(
-            "scaffold",
-            (
-                "reviewer.instructions.inherited_context.md"
-                if skip_task_and_contract
-                else "reviewer.instructions.simple.md"
-                if simple_mode
-                else "reviewer.instructions.md"
-            ),
-        ),
+        read_template("scaffold", "reviewer.instructions.md"),
     )
     return {
         "task_created": task_created,
-        "task_needs_edit": task_created and not initial_task_text and not skip_task_and_contract,
-        "contract_created": contract_created,
-        "initial_review_created": initial_review_created,
+        "task_needs_edit": task_created and not initial_task_text,
+        "review_created": False,
+        "spec_created": False,
+        "contract_created": False,
         "agents_created": agents_created,
         "generator_created": generator_created,
         "reviewer_created": reviewer_created,
-        "workspace_mode": (
-            WORKSPACE_MODE_INHERITED_CONTEXT
-            if skip_task_and_contract
-            else WORKSPACE_MODE_SIMPLE
-            if simple_mode
-            else WORKSPACE_MODE_SPEC_BACKED
-        ),
+        "profile": inspect_task_workspace(task_root)["profile"],
     }
 
 
@@ -687,51 +705,75 @@ def contract_checklist_items(contract_text: str) -> list[str]:
     ]
 
 
-def initial_review_items(review_text: str) -> list[str]:
+def review_items(review_text: str) -> list[str]:
     return [
         line.strip()
         for line in review_text.splitlines()
-        if SIMPLE_REVIEW_ITEM_RE.match(line)
+        if REVIEW_ITEM_RE.match(line)
     ]
 
 
 def lint_task_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]]:
-    task_text = (task_root / "task.md").read_text(encoding="utf-8")
-    contract_text = (task_root / "contract.md").read_text(encoding="utf-8")
+    task_text = (task_root / TASK_FILENAME).read_text(encoding="utf-8")
     errors: list[str] = []
     warnings: list[str] = []
+    if task_text.strip() == read_template("scaffold", TASK_FILENAME).strip():
+        errors.append(f"{TASK_FILENAME} still contains scaffold placeholder text")
     for heading in TASK_REQUIRED_HEADINGS:
         if heading not in task_text:
-            errors.append(f"task.md is missing required heading: {heading}")
+            errors.append(f"{TASK_FILENAME} is missing required heading: {heading}")
     lowered_task = task_text.lower()
     for vague_word in TASK_VAGUE_WORDS:
         if vague_word in lowered_task:
             warnings.append(
-                f"task.md uses vague wording `{vague_word}`; decompose it into concrete feature-spec behavior or constraints"
+                f"{TASK_FILENAME} uses vague wording `{vague_word}`; decompose it into concrete task behavior or promote the task into {SPEC_FILENAME}"
             )
-    if any(marker in contract_text for marker in CONTRACT_PLACEHOLDER_MARKERS):
-        errors.append("contract.md still contains scaffold placeholder text")
-    if "# Definition of Done" not in contract_text:
-        errors.append("contract.md must begin with `# Definition of Done`")
-    if not contract_checklist_items(contract_text):
-        errors.append("contract.md must contain at least one checklist item")
-    if "Success contract:" in task_text:
-        warnings.append(
-            "task.md still contains embedded `Success contract:` prose; `contract.md` is canonical"
-        )
     return errors, warnings
 
 
-def lint_simple_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]]:
-    review_text = (task_root / "initial_review.md").read_text(encoding="utf-8")
+def lint_review_workspace_readiness(review_path: Path) -> tuple[list[str], list[str]]:
+    review_text = review_path.read_text(encoding="utf-8")
     errors: list[str] = []
     warnings: list[str] = []
-    if "# Initial Review" not in review_text:
-        errors.append("initial_review.md must begin with `# Initial Review`")
-    if any(marker in review_text for marker in INITIAL_REVIEW_PLACEHOLDER_MARKERS):
-        errors.append("initial_review.md still contains scaffold placeholder text")
-    if not initial_review_items(review_text):
-        errors.append("initial_review.md must contain at least one bullet item")
+    if review_text.strip() == read_template("scaffold", REVIEW_FILENAME).strip():
+        errors.append(f"{review_path.name} still contains scaffold placeholder text")
+    if "# Review" not in review_text and "# Initial Review" not in review_text:
+        errors.append(f"{review_path.name} must begin with `# Review`")
+    if any(marker in review_text for marker in REVIEW_PLACEHOLDER_MARKERS):
+        errors.append(f"{review_path.name} still contains scaffold placeholder text")
+    if not review_items(review_text):
+        errors.append(f"{review_path.name} must contain at least one bullet item")
+    return errors, warnings
+
+
+def lint_spec_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]]:
+    spec_text = (task_root / SPEC_FILENAME).read_text(encoding="utf-8")
+    errors: list[str] = []
+    warnings: list[str] = []
+    if spec_text.strip() == read_template("scaffold", SPEC_FILENAME).strip():
+        errors.append(f"{SPEC_FILENAME} still contains scaffold placeholder text")
+    for heading in SPEC_REQUIRED_HEADINGS:
+        if heading not in spec_text:
+            errors.append(f"{SPEC_FILENAME} is missing required heading: {heading}")
+    lowered_spec = spec_text.lower()
+    for vague_word in TASK_VAGUE_WORDS:
+        if vague_word in lowered_spec:
+            warnings.append(
+                f"{SPEC_FILENAME} uses vague wording `{vague_word}`; decompose it into concrete behavior or constraints"
+            )
+    return errors, warnings
+
+
+def lint_contract_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]]:
+    contract_text = (task_root / CONTRACT_FILENAME).read_text(encoding="utf-8")
+    errors: list[str] = []
+    warnings: list[str] = []
+    if any(marker in contract_text for marker in CONTRACT_PLACEHOLDER_MARKERS):
+        errors.append(f"{CONTRACT_FILENAME} still contains scaffold placeholder text")
+    if "# Definition of Done" not in contract_text:
+        errors.append(f"{CONTRACT_FILENAME} must begin with `# Definition of Done`")
+    if not contract_checklist_items(contract_text):
+        errors.append(f"{CONTRACT_FILENAME} must contain at least one checklist item")
     return errors, warnings
 
 
@@ -1099,7 +1141,8 @@ def build_tmux_session_name(task_name: str, role: str, run_id: str) -> str:
 def load_task_materials(task_root: Path) -> dict:
     inspection = inspect_task_workspace(task_root)
     materials = {
-        "workspace_mode": inspection["workspace_mode"],
+        "profile": inspection["profile"],
+        "doc_paths": inspection["doc_paths"],
         "agents_path": task_root / "AGENTS.md",
         "agents_text": (task_root / "AGENTS.md").read_text(encoding="utf-8").strip(),
         "generator_path": task_root / "generator.instructions.md",
@@ -1107,42 +1150,22 @@ def load_task_materials(task_root: Path) -> dict:
         "reviewer_path": task_root / "reviewer.instructions.md",
         "reviewer_text": (task_root / "reviewer.instructions.md").read_text(encoding="utf-8").strip(),
     }
-    if inspection["workspace_mode"] == WORKSPACE_MODE_SPEC_BACKED:
-        materials["task_path"] = task_root / "task.md"
-        materials["task_text"] = (task_root / "task.md").read_text(encoding="utf-8").strip()
-        materials["contract_path"] = task_root / "contract.md"
-        materials["contract_text"] = (task_root / "contract.md").read_text(encoding="utf-8").strip()
-        materials["initial_review_path"] = task_root / "initial_review.md"
-        materials["initial_review_text"] = ""
-    elif inspection["workspace_mode"] == WORKSPACE_MODE_SIMPLE:
-        materials["task_path"] = task_root / "task.md"
-        materials["task_text"] = ""
-        materials["contract_path"] = task_root / "contract.md"
-        materials["contract_text"] = ""
-        materials["initial_review_path"] = task_root / "initial_review.md"
-        materials["initial_review_text"] = (task_root / "initial_review.md").read_text(encoding="utf-8").strip()
-    else:
-        materials["task_path"] = task_root / "task.md"
-        materials["task_text"] = ""
-        materials["contract_path"] = task_root / "contract.md"
-        materials["contract_text"] = ""
-        materials["initial_review_path"] = task_root / "initial_review.md"
-        materials["initial_review_text"] = ""
+    for doc_name, doc_path in inspection["doc_paths"].items():
+        materials[f"{doc_name}_path"] = doc_path or (task_root / INPUT_DOC_FILENAMES.get(doc_name, f"{doc_name}.md"))
+        materials[f"{doc_name}_text"] = doc_path.read_text(encoding="utf-8").strip() if doc_path else ""
     return materials
 
 
-def canonical_task_paths(task_root: Path, workspace_mode: str | None = None) -> dict:
-    mode = workspace_mode or inspect_task_workspace(task_root)["workspace_mode"]
-    paths = {
+def canonical_task_paths(task_root: Path, inspection: dict | None = None) -> dict:
+    inspection = inspection or inspect_task_workspace(task_root)
+    paths: dict[str, Path] = {
         "agents": task_root / "AGENTS.md",
         "generator": task_root / "generator.instructions.md",
         "reviewer": task_root / "reviewer.instructions.md",
     }
-    if mode == WORKSPACE_MODE_SPEC_BACKED:
-        paths["task"] = task_root / "task.md"
-        paths["contract"] = task_root / "contract.md"
-    elif mode == WORKSPACE_MODE_SIMPLE:
-        paths["initial_review"] = task_root / "initial_review.md"
+    for doc_name, doc_path in inspection["doc_paths"].items():
+        if doc_path is not None:
+            paths[doc_name] = doc_path
     return paths
 
 
@@ -1166,11 +1189,11 @@ def snapshot_context_manifest(run_dir: Path, task_root: Path) -> dict:
     manifest: dict[str, dict] = {
         "generated_at": now_ts(),
         "files": {},
-        "workspace_mode": inspection["workspace_mode"],
+        "profile": inspection["profile"],
     }
     for key, canonical_path in canonical_task_paths(
         task_root,
-        inspection["workspace_mode"],
+        inspection,
     ).items():
         text = canonical_path.read_text(encoding="utf-8")
         digest = hash_text(text)
@@ -1594,103 +1617,173 @@ def format_review_dimensions_block() -> str:
     )
 
 
-def format_turn_one_context(task_root: Path, role: str, workspace_mode: str) -> str:
-    paths = canonical_task_paths(task_root, workspace_mode)
-    role_path = paths[role]
-    sections = ["Canonical council files for this task:"]
-    if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
-        sections.extend(
-            [
-                f"- {paths['task']}",
-                f"- {paths['contract']}",
-            ]
-        )
-    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
-        sections.append(f"- {paths['initial_review']}")
-    sections.extend(
+def format_doc_paths_block(task_root: Path, inspection: dict, role: str) -> str:
+    paths = canonical_task_paths(task_root, inspection)
+    lines = []
+    for doc_name in INPUT_DOC_ORDER:
+        doc_path = inspection["doc_paths"].get(doc_name)
+        if doc_path is not None:
+            lines.append(f"- {doc_path}")
+    lines.append(f"- {paths['agents']}")
+    lines.append(f"- {paths[role]}")
+    return "\n".join(lines).rstrip()
+
+
+def format_reviewer_input_files_block(task_root: Path, inspection: dict, turn_dir: Path) -> str:
+    lines = [format_doc_paths_block(task_root, inspection, "reviewer")]
+    lines.extend(
         [
-            f"- {paths['agents']}",
-            f"- {role_path}",
-            "",
-            f"Shared council brief from {paths['agents']}:",
-            paths["agents"].read_text(encoding="utf-8").strip(),
-            "",
-            f"Role instructions from {role_path}:",
-            role_path.read_text(encoding="utf-8").strip(),
+            f"- {role_message_path(turn_dir, 'generator')}",
+            f"- {role_status_path(turn_dir, 'generator')}",
         ]
     )
-    if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
-        sections.extend(
+    return "\n".join(lines).rstrip()
+
+
+def format_bootstrap_reviewer_input_files_block(task_root: Path, inspection: dict) -> str:
+    return format_doc_paths_block(task_root, inspection, "reviewer")
+
+
+def format_generator_objective_block(inspection: dict) -> str:
+    has_task = inspection["doc_paths"]["task"] is not None
+    has_review = inspection["doc_paths"]["review"] is not None
+    has_spec = inspection["doc_paths"]["spec"] is not None
+    has_contract = inspection["doc_paths"]["contract"] is not None
+    lines: list[str] = []
+    if has_review:
+        lines.extend(
             [
-                "",
-                f"Current feature spec from {paths['task']}:",
-                paths["task"].read_text(encoding="utf-8").strip(),
-                "",
-                f"Current definition of done from {paths['contract']}:",
-                paths["contract"].read_text(encoding="utf-8").strip(),
+                "Treat the review document as a set of review findings, not unquestionable truth.",
+                "Before changing code, classify each review point as `agree`, `disagree`, or `uncertain`.",
+                "- Fix the points you agree are valid.",
+                "- If you disagree with a point, do not implement it blindly. Explain the disagreement with concrete code evidence in `generator/message.md`.",
+                "- If you are uncertain, investigate before changing code and surface the uncertainty explicitly if it remains.",
             ]
         )
-    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
-        sections.extend(
+    if has_task and has_spec:
+        lines.append("Implement the requested work using `task.md` as the brief and `spec.md` as the detailed design reference.")
+    elif has_task:
+        lines.append("Implement the requested work described in `task.md`.")
+    elif has_review:
+        lines.append("Use the review findings as the starting brief for the fix.")
+    if has_contract:
+        lines.append("Use `contract.md` as an objective stop condition and do not claim completion if its relevant items are not satisfied.")
+    lines.extend(
+        [
+            "Resolve root cause, not symptoms.",
+            "Do not introduce bad code, new errors, unintended behavior, regressions, tech debt, or unnecessary complexity.",
+            "Anticipate plausible future error cases and harden the change where reasonable.",
+            "If the available documents are contradictory or too ambiguous to continue safely, emit `needs_human` instead of guessing.",
+        ]
+    )
+    return "\n".join(lines).rstrip()
+
+
+def format_generator_message_requirements_block(inspection: dict) -> str:
+    has_review = inspection["doc_paths"]["review"] is not None
+    has_contract = inspection["doc_paths"]["contract"] is not None
+    lines = []
+    if has_review:
+        lines.extend(
             [
-                "",
-                f"Current initial review from {paths['initial_review']}:",
-                paths["initial_review"].read_text(encoding="utf-8").strip(),
-                "",
-                "This task is currently operating in simple review-fix mode.",
-                "Use the initial review as the first generator brief, then use later reviewer turns to detect bad code, introduced errors, unintended behavior, regressions, tech debt, and unnecessary complexity.",
+                "- Findings triage:",
+                "  - Agreed points",
+                "  - Disagreed points",
+                "  - Uncertain points",
+            ]
+        )
+    lines.extend(
+        [
+            "- What changed",
+            "- Commit created for this turn, or explicitly say that no repo-tracked files changed",
+        ]
+    )
+    if has_review:
+        lines.extend(
+            [
+                "- Which review findings or reviewer blockers were addressed",
+                "- Evidence for rejected points",
             ]
         )
     else:
-        sections.extend(
-            [
-                "",
-                "This task is currently operating in inherited-context mode.",
-                "Rely on the inherited chat context in this Codex session, the current repository state, and the available council files above.",
-            ]
-        )
-    return "\n".join(sections).rstrip()
-
-
-def format_contract_migration_warning(task_root: Path, workspace_mode: str) -> str:
-    if workspace_mode != WORKSPACE_MODE_SPEC_BACKED:
-        return ""
-    task_text = (task_root / "task.md").read_text(encoding="utf-8")
-    if "Success contract:" not in task_text:
-        return ""
-    return textwrap.dedent(
-        """\
-        Migration note:
-        - `task.md` is the canonical feature spec.
-        - `contract.md` is the canonical definition of done.
-        - Any embedded “Success contract” prose inside `task.md` is secondary context only and must not override `contract.md`.
-        """
-    ).rstrip()
-
-
-def format_later_turn_context(task_root: Path, role: str, workspace_mode: str) -> str:
-    paths = canonical_task_paths(task_root, workspace_mode)
-    role_path = paths[role]
-    lines = [
-        "If you need current guidance or want to see whether the canonical files changed since your last turn, inspect these files directly:",
-    ]
-    if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
-        lines.extend(
-            [
-                f"- {paths['task']}",
-                f"- {paths['contract']}",
-            ]
-        )
-    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
-        lines.append(f"- {paths['initial_review']}")
+        lines.append("- Which task or spec requirements were addressed")
+    if has_contract:
+        lines.append("- Why those changes move the code toward satisfying `contract.md`")
+        lines.append("- Remaining contract items not yet satisfied")
     lines.extend(
         [
-            f"- {paths['agents']}",
-            f"- {role_path}",
+            "- Why the changes avoid bad code, errors, unintended behavior, regressions, tech debt, and unnecessary complexity",
+            "- Anticipated future error cases and how they were handled",
+            "- Changed invariants / preserved invariants",
+            "- Downstream readers / consumers checked",
+            "- Verification performed",
+            "- Known risks or blockers",
         ]
     )
+    return "\n".join(lines).rstrip()
+
+
+def format_reviewer_focus_block(inspection: dict) -> str:
+    has_task = inspection["doc_paths"]["task"] is not None
+    has_review = inspection["doc_paths"]["review"] is not None
+    has_spec = inspection["doc_paths"]["spec"] is not None
+    has_contract = inspection["doc_paths"]["contract"] is not None
+    lines = ["Review the current repository state and the generator artifacts carefully."]
+    if has_review:
+        lines.extend(
+            [
+                "Use the review document as the starting findings set.",
+                "Verify whether the cited issues were fixed, whether the generator rejected any points correctly, and whether new bugs or regressions were introduced while fixing them.",
+                "If the generator disputes a blocker with concrete code evidence, adjudicate that disagreement explicitly.",
+                "Do not repeat the same blocker without stronger evidence. If you cannot add stronger evidence, use `needs_human` instead of looping.",
+            ]
+        )
+    if has_task and has_spec:
+        lines.append("Verify the implementation matches both the brief in `task.md` and the detailed requirements in `spec.md`.")
+    elif has_task:
+        lines.append("Verify the implementation matches the brief in `task.md`.")
+    if has_contract:
+        lines.append("Treat `contract.md` as an objective approval bar. Approval is invalid if the relevant checklist items are not satisfied.")
+    lines.extend(
+        [
+            "Focus on correctness, unintended behavior, regressions, state integrity, maintainability, test adequacy, tech debt, and unnecessary complexity.",
+            "Look for fragile changes that are likely to cause future errors.",
+        ]
+    )
+    return "\n".join(lines).rstrip()
+
+
+def format_reviewer_message_requirements_block(inspection: dict) -> str:
+    has_review = inspection["doc_paths"]["review"] is not None
+    has_contract = inspection["doc_paths"]["contract"] is not None
+    lines = ["- Verdict summary"]
+    if has_review:
+        lines.append("- Disagreement Adjudication")
+    if has_contract:
+        lines.append("- Contract checklist copied from `contract.md`, using `[x]` and `[ ]`")
+    lines.extend(
+        [
+            "- Critical review dimensions, using `[pass]`, `[fail]`, or `[uncertain]`, one line for each of:",
+            format_review_dimensions_block(),
+            "- Blocking issues",
+            "- Independent verification performed",
+            "- Residual risks or follow-up notes",
+        ]
+    )
+    return "\n".join(lines).rstrip()
+
+
+def format_fork_bootstrap_review_block(task_root: Path) -> str:
+    review_path = task_root / REVIEW_FILENAME
     return textwrap.dedent(
-        "\n".join(lines)
+        f"""\
+        This run started from forked chat context without a usable local {TASK_FILENAME}, {REVIEW_FILENAME}, or {SPEC_FILENAME}.
+        Your first job is to distill the current fork/session context plus repository state into a local `{REVIEW_FILENAME}` at:
+        - {review_path}
+
+        In that file, capture concrete findings, blockers, or risks the generator should address next.
+        Unless you must use `needs_human` or `blocked`, emit `changes_requested` so the next turn goes to the generator with the newly materialized review.
+        """
     ).rstrip()
 
 
@@ -1699,7 +1792,7 @@ def build_continue_context(
     state: dict,
     previous_turn_dir: Path | None,
     role: str,
-    workspace_mode: str,
+    inspection: dict,
 ) -> str:
     if previous_turn_dir is None:
         return ""
@@ -1716,17 +1809,19 @@ def build_continue_context(
         f"This run is continuing after `{state['status']}`.",
         "The human may have edited canonical task files and may also have discussed updates directly in this same session.",
     ]
-    if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
+    doc_names = []
+    for doc_name in INPUT_DOC_ORDER:
+        if inspection["doc_paths"][doc_name] is not None:
+            doc_names.append(INPUT_DOC_FILENAMES[doc_name])
+    if doc_names:
         lines.append(
-            "Before proceeding, reread the canonical feature spec, definition of done, and council files, and account for any direct human guidance already present in this chat session."
-        )
-    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
-        lines.append(
-            "Before proceeding, reread the current initial review, the available council files, and any direct human guidance already present in this chat session."
+            "Before proceeding, reread the current task documents "
+            + ", ".join(f"`{name}`" for name in doc_names)
+            + ", the council files, and any direct human guidance already present in this chat session."
         )
     else:
         lines.append(
-            "Before proceeding, reread the available canonical council files, inspect the current repository state, and account for any direct human guidance already present in this chat session."
+            "Before proceeding, inspect the current repository state, the council files, and any direct human guidance already present in this chat session."
         )
     if previous_message.exists() and previous_status.exists():
         lines.extend(
@@ -1746,7 +1841,7 @@ def build_generator_turn_prompt(
     turn_number: int,
     task_name: str,
     *,
-    workspace_mode: str,
+    inspection: dict,
     inline_context: bool,
     continue_context_block: str = "",
     fork_context_block: str = "",
@@ -1766,92 +1861,37 @@ def build_generator_turn_prompt(
         joined_issues = "\n".join(
             f"- {item}" for item in previous_reviewer_status["blocking_issues"]
         ) or "- Address the reviewer blocking issues from the previous turn."
-        if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
-            previous_reviewer_focus = textwrap.dedent(
-                f"""\
-                The previous reviewer verdict was `changes_requested`.
-                Before coding, classify each reviewer blocking issue as `agree`, `disagree`, or `uncertain`.
-                - Fix the issues you agree are valid.
-                - If you disagree with a blocker, do not implement it blindly. Explain the disagreement with concrete code evidence in `generator/message.md`.
-                - If you are uncertain, investigate before changing code, and surface the uncertainty explicitly if it remains.
-                - Emit `needs_human` if the remaining blocker comes from an ambiguous, non-auditable, or contradictory task/contract.
+        previous_reviewer_focus = textwrap.dedent(
+            f"""\
+            The previous reviewer verdict was `changes_requested`.
+            Before coding, classify each reviewer blocking issue as `agree`, `disagree`, or `uncertain`.
+            - Fix the issues you agree are valid.
+            - If you disagree with a blocker, do not implement it blindly. Explain the disagreement with concrete code evidence in `generator/message.md`.
+            - If you are uncertain, investigate before changing code, and surface the uncertainty explicitly if it remains.
+            - Emit `needs_human` if the remaining blocker comes from ambiguous, contradictory, or unsafe task documents.
 
-                Do not use `blocked` merely because the overall contract is still large or not yet complete.
-                Use `blocked` only for a real external implementation blocker unrelated to clarifying the task itself.
+            Use `blocked` only for a real external implementation blocker unrelated to clarifying the task itself.
 
-                Reviewer blocking issues to address:
-                {joined_issues}
-                """
-            ).rstrip()
-        elif workspace_mode == WORKSPACE_MODE_SIMPLE:
-            previous_reviewer_focus = textwrap.dedent(
-                f"""\
-                The previous reviewer verdict was `changes_requested`.
-                Before coding, classify each reviewer blocking issue as `agree`, `disagree`, or `uncertain`.
-                - Fix the issues you agree are valid.
-                - If you disagree with a blocker, do not implement it blindly. Explain the disagreement with concrete code evidence in `generator/message.md`.
-                - If you are uncertain, investigate before changing code, and surface the uncertainty explicitly if it remains.
-                - Emit `needs_human` if the remaining blocker comes from an ambiguous or contradictory initial review or instruction file.
-
-                Do not introduce bad code, errors, unintended behavior, regressions, tech debt, or unnecessary complexity while addressing the findings.
-                Anticipate plausible future error cases and harden the change where reasonable.
-                Use `blocked` only for a real external implementation blocker unrelated to clarifying the task itself.
-
-                Reviewer blocking issues to address:
-                {joined_issues}
-                """
-            ).rstrip()
-        else:
-            previous_reviewer_focus = textwrap.dedent(
-                f"""\
-                The previous reviewer verdict was `changes_requested`.
-                Before coding, classify each reviewer blocking issue as `agree`, `disagree`, or `uncertain`.
-                - Fix the issues you agree are valid.
-                - If you disagree with a blocker, do not implement it blindly. Explain the disagreement with concrete code evidence in `generator/message.md`.
-                - If you are uncertain, investigate before changing code, and surface the uncertainty explicitly if it remains.
-                - Emit `needs_human` if the remaining blocker comes from ambiguous inherited context, contradictory instructions, or unclear repository state.
-
-                Do not use `blocked` merely because the remaining work is broad or incomplete.
-                Use `blocked` only for a real external implementation blocker unrelated to clarifying the task itself.
-
-                Reviewer blocking issues to address:
-                {joined_issues}
-                """
-            ).rstrip()
+            Reviewer blocking issues to address:
+            {joined_issues}
+            """
+        ).rstrip()
     values = {
         "repo_root": str(repo_root),
         "task_name": task_name,
-        "task_path": str(task_root / "task.md"),
-        "contract_path": str(task_root / "contract.md"),
-        "initial_review_path": str(task_root / "initial_review.md"),
-        "agents_path": str(task_root / "AGENTS.md"),
-        "role_instructions_path": str(task_root / "generator.instructions.md"),
         "turn_name": turn_name(turn_number),
-        "turn_one_context_block": format_turn_one_context(task_root, "generator", workspace_mode),
-        "later_turn_context_block": format_later_turn_context(task_root, "generator", workspace_mode),
         "continue_context_block": continue_context_block,
         "fork_context_block": fork_context_block,
-        "migration_warning_block": format_contract_migration_warning(task_root, workspace_mode),
+        "docs_to_read_block": format_doc_paths_block(task_root, inspection, "generator"),
+        "generator_objective_block": format_generator_objective_block(inspection),
+        "generator_message_requirements_block": format_generator_message_requirements_block(inspection),
         "previous_reviewer_message_path": str(role_message_path(previous_turn_dir, "reviewer")),
         "previous_reviewer_status_path": str(previous_reviewer_status_path),
         "previous_reviewer_focus_block": previous_reviewer_focus,
         "generator_message_path": str(role_message_path(turn_dir, "generator")),
         "generator_status_path": str(role_status_path(turn_dir, "generator")),
     }
-    if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
-        template_name = "generator_turn_1.md" if inline_context else "generator_turn_n.md"
-    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
-        template_name = (
-            "generator_simple_turn_1.md"
-            if inline_context
-            else "generator_simple_turn_n.md"
-        )
-    else:
-        template_name = (
-            "generator_inherited_turn_1.md"
-            if inline_context
-            else "generator_inherited_turn_n.md"
-        )
+    template_name = "generator_initial.md" if inline_context else "generator_followup.md"
     return render_template_text(
         read_template("prompts", template_name),
         values,
@@ -1865,45 +1905,36 @@ def build_reviewer_turn_prompt(
     turn_dir: Path,
     turn_number: int,
     *,
-    workspace_mode: str,
+    inspection: dict,
     inline_context: bool,
     continue_context_block: str = "",
     fork_context_block: str = "",
+    bootstrap_review_block: str = "",
 ) -> str:
+    docs_to_read_block = (
+        format_bootstrap_reviewer_input_files_block(task_root, inspection)
+        if bootstrap_review_block
+        else format_reviewer_input_files_block(task_root, inspection, turn_dir)
+    )
     values = {
         "repo_root": str(repo_root),
         "task_name": task_root.name,
-        "task_path": str(task_root / "task.md"),
-        "contract_path": str(task_root / "contract.md"),
-        "initial_review_path": str(task_root / "initial_review.md"),
-        "agents_path": str(task_root / "AGENTS.md"),
-        "role_instructions_path": str(task_root / "reviewer.instructions.md"),
         "turn_name": turn_name(turn_number),
-        "turn_one_context_block": format_turn_one_context(task_root, "reviewer", workspace_mode),
-        "later_turn_context_block": format_later_turn_context(task_root, "reviewer", workspace_mode),
         "continue_context_block": continue_context_block,
         "fork_context_block": fork_context_block,
-        "migration_warning_block": format_contract_migration_warning(task_root, workspace_mode),
+        "docs_to_read_block": docs_to_read_block,
+        "reviewer_focus_block": format_reviewer_focus_block(inspection),
+        "reviewer_message_requirements_block": format_reviewer_message_requirements_block(inspection),
+        "bootstrap_review_block": bootstrap_review_block,
         "generator_message_path": str(role_message_path(turn_dir, "generator")),
         "generator_status_path": str(role_status_path(turn_dir, "generator")),
         "reviewer_message_path": str(role_message_path(turn_dir, "reviewer")),
         "reviewer_status_path": str(role_status_path(turn_dir, "reviewer")),
-        "critical_review_dimensions_block": format_review_dimensions_block(),
     }
-    if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
-        template_name = "reviewer_turn_1.md" if inline_context else "reviewer_turn_n.md"
-    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
-        template_name = (
-            "reviewer_simple_turn_1.md"
-            if inline_context
-            else "reviewer_simple_turn_n.md"
-        )
+    if bootstrap_review_block:
+        template_name = "reviewer_fork_bootstrap.md"
     else:
-        template_name = (
-            "reviewer_inherited_turn_1.md"
-            if inline_context
-            else "reviewer_inherited_turn_n.md"
-        )
+        template_name = "reviewer_initial.md" if inline_context else "reviewer_followup.md"
     return render_template_text(
         read_template("prompts", template_name),
         values,
@@ -2018,7 +2049,7 @@ def pause_for_human(
     human_source: str | None,
 ) -> None:
     turn_number = int(turn_dir.name)
-    workspace_mode = state.get("workspace_mode", WORKSPACE_MODE_SPEC_BACKED)
+    inspection = inspect_task_workspace(Path(state["task_root"]))
     state["status"] = "paused_needs_human"
     state["stop_reason"] = summary
     save_run_state(run_dir, state)
@@ -2043,13 +2074,16 @@ def pause_for_human(
         print(f"human_source: {human_source}", flush=True)
     if human_message:
         print(f"human_message: {human_message}", flush=True)
-    if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
-        next_step = "update task.md / contract.md / AGENTS.md / role instructions as needed, then use `continue` to resume this run."
-    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
-        next_step = "update initial_review.md / AGENTS.md / role instructions as needed, then use `continue` to resume this run."
+    doc_names = [INPUT_DOC_FILENAMES[name] for name in INPUT_DOC_ORDER if inspection["doc_paths"][name] is not None]
+    if doc_names:
+        next_step = (
+            "update "
+            + " / ".join(doc_names + ["AGENTS.md", "role instructions"])
+            + " as needed, then use `continue` to resume this run."
+        )
     else:
         next_step = (
-            "update the available council brief or role instructions as needed; you may also add a repo-local feature spec and definition-of-done to switch into spec-backed mode, then use `continue` to resume this run."
+            f"add {TASK_FILENAME}, {REVIEW_FILENAME}, or {SPEC_FILENAME}, or update the council files as needed, then use `continue` to resume this run."
         )
     print(next_step, flush=True)
 
@@ -2060,7 +2094,7 @@ def create_run_state(
     task_root: Path,
     task_name: str,
     run_id: str,
-    workspace_mode: str,
+    workspace_profile: str,
     council_config: dict,
     git_state: dict | None,
     generator_session: str,
@@ -2069,6 +2103,7 @@ def create_run_state(
     reviewer_bootstrap_mode: str = "fresh",
     generator_fork_parent_session_id: str | None = None,
     reviewer_fork_parent_session_id: str | None = None,
+    bootstrap_phase: str | None = None,
 ) -> dict:
     run_dir = task_root / "runs" / run_id
     return {
@@ -2104,12 +2139,103 @@ def create_run_state(
         "task_name": task_name,
         "task_root": str(task_root),
         "session_index_snapshot_ids": [],
-        "workspace_mode": workspace_mode,
+        "workspace_profile": workspace_profile,
+        "bootstrap_phase": bootstrap_phase,
     }
 
 
 def save_run_state(run_dir: Path, state: dict) -> None:
     save_json(run_dir / "state.json", state)
+
+
+def resolve_fork_parent_session_ids(args: argparse.Namespace) -> tuple[str | None, str | None]:
+    shared = normalize_optional_text(getattr(args, "fork_session_id", None), field_name="fork session id")
+    generator = normalize_optional_text(
+        getattr(args, "generator_fork_session_id", None),
+        field_name="generator fork session id",
+    )
+    reviewer = normalize_optional_text(
+        getattr(args, "reviewer_fork_session_id", None),
+        field_name="reviewer fork session id",
+    )
+    if shared:
+        generator = generator or shared
+        reviewer = reviewer or shared
+    return generator, reviewer
+
+
+def has_any_fork_parent(generator_fork_id: str | None, reviewer_fork_id: str | None) -> bool:
+    return bool(generator_fork_id or reviewer_fork_id)
+
+
+def validate_task_workspace_for_start(task_root: Path, inspection: dict) -> None:
+    errors: list[str] = []
+    warnings: list[str] = []
+    if inspection["doc_paths"]["task"] is not None:
+        task_errors, task_warnings = lint_task_workspace_readiness(task_root)
+        errors.extend(task_errors)
+        warnings.extend(task_warnings)
+    if inspection["doc_paths"]["review"] is not None:
+        review_errors, review_warnings = lint_review_workspace_readiness(inspection["doc_paths"]["review"])
+        errors.extend(review_errors)
+        warnings.extend(review_warnings)
+    if inspection["doc_paths"]["spec"] is not None:
+        spec_errors, spec_warnings = lint_spec_workspace_readiness(task_root)
+        errors.extend(spec_errors)
+        warnings.extend(spec_warnings)
+    if inspection["doc_paths"]["contract"] is not None:
+        contract_errors, contract_warnings = lint_contract_workspace_readiness(task_root)
+        errors.extend(contract_errors)
+        warnings.extend(contract_warnings)
+    if errors:
+        formatted = "\n".join(f"- {item}" for item in errors)
+        raise SystemExit(
+            f"{task_root} is not ready for start.\n"
+            f"Fix these issues first:\n{formatted}"
+        )
+    for warning in warnings:
+        print(f"warning: {warning}")
+
+
+def determine_start_role(
+    *,
+    inspection: dict,
+    fork_enabled: bool,
+    requested_role: str,
+) -> tuple[str, str | None]:
+    if requested_role not in {"auto", "generator", "reviewer"}:
+        raise SystemExit("--start-role must be one of: auto, generator, reviewer")
+    has_task = inspection["doc_paths"]["task"] is not None
+    has_review = inspection["doc_paths"]["review"] is not None
+    has_spec = inspection["doc_paths"]["spec"] is not None
+    has_docs = bool(inspection["present_docs"])
+
+    if requested_role == "generator":
+        if has_task or has_review or has_spec:
+            return "generator", None
+        raise SystemExit(f"cannot start with generator without a local {TASK_FILENAME}, {REVIEW_FILENAME}, or {SPEC_FILENAME}")
+
+    if requested_role == "reviewer":
+        if has_docs:
+            return "reviewer", None
+        if fork_enabled:
+            return "reviewer", "fork_to_review"
+        raise SystemExit(f"cannot start with reviewer without a local document or fork session id")
+
+    if has_review:
+        return "generator", None
+    if has_task:
+        return "generator", None
+    if fork_enabled:
+        return "reviewer", "fork_to_review"
+    raise SystemExit(
+        f"no local input documents found for {inspection['profile']}.\n"
+        f"Create {TASK_FILENAME}, {REVIEW_FILENAME}, or {SPEC_FILENAME}, or start from a fork session."
+    )
+
+
+def build_review_write_path(task_root: Path) -> Path:
+    return task_root / REVIEW_FILENAME
 
 
 def assign_recent_codex_session_ids(run_dir: Path, state: dict) -> None:
@@ -2246,8 +2372,8 @@ def run_generator_phase(
     continue_context_block: str = "",
 ) -> dict:
     repo_root = Path(state["repo_root"])
-    workspace_mode = inspect_task_workspace(task_root)["workspace_mode"]
-    state["workspace_mode"] = workspace_mode
+    inspection = inspect_task_workspace(task_root)
+    state["workspace_profile"] = inspection["profile"]
     turn_timeout_seconds = float(state["council_config"]["council"]["turn_timeout_seconds"])
     generator_prompt = build_generator_turn_prompt(
         repo_root,
@@ -2255,7 +2381,7 @@ def run_generator_phase(
         current_turn_dir,
         turn_number,
         state["task_name"],
-        workspace_mode=workspace_mode,
+        inspection=inspection,
         inline_context=inline_context,
         continue_context_block=continue_context_block,
         fork_context_block=format_fork_context_block(state["roles"]["generator"]),
@@ -2317,20 +2443,26 @@ def run_reviewer_phase(
     *,
     inline_context: bool,
     continue_context_block: str = "",
+    bootstrap_review_phase: bool = False,
 ) -> dict:
     repo_root = Path(state["repo_root"])
-    workspace_mode = inspect_task_workspace(task_root)["workspace_mode"]
-    state["workspace_mode"] = workspace_mode
+    inspection = inspect_task_workspace(task_root)
+    state["workspace_profile"] = inspection["profile"]
     turn_timeout_seconds = float(state["council_config"]["council"]["turn_timeout_seconds"])
     reviewer_prompt = build_reviewer_turn_prompt(
         repo_root,
         task_root,
         current_turn_dir,
         turn_number,
-        workspace_mode=workspace_mode,
+        inspection=inspection,
         inline_context=inline_context,
         continue_context_block=continue_context_block,
         fork_context_block=format_fork_context_block(state["roles"]["reviewer"]),
+        bootstrap_review_block=(
+            format_fork_bootstrap_review_block(task_root)
+            if bootstrap_review_phase
+            else ""
+        ),
     )
     write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
     state["status"] = "waiting_reviewer"
@@ -2395,7 +2527,7 @@ def supervisor_loop_from(
     last_turn = start_turn + max_turn_budget - 1
 
     for turn_number in range(start_turn, last_turn + 1):
-        state["workspace_mode"] = inspect_task_workspace(task_root)["workspace_mode"]
+        state["workspace_profile"] = inspect_task_workspace(task_root)["profile"]
         state["current_turn"] = turn_number
         if turn_number == start_turn and reuse_existing_turn_for_first:
             current_turn_dir = turn_dir_for(run_dir, turn_number)
@@ -2454,6 +2586,7 @@ def supervisor_loop_from(
                 turn_number,
                 current_turn_dir,
                 inline_context=turn_number == 1,
+                bootstrap_review_phase=state.get("bootstrap_phase") == "fork_to_review",
             )
         else:
             reviewer_status = run_reviewer_phase(
@@ -2464,6 +2597,7 @@ def supervisor_loop_from(
                 current_turn_dir,
                 inline_context=turn_number == 1,
                 continue_context_block=continue_context_block,
+                bootstrap_review_phase=state.get("bootstrap_phase") == "fork_to_review",
             )
 
         if reviewer_status["verdict"] == "approved":
@@ -2516,6 +2650,9 @@ def supervisor_loop_from(
             )
             return
         if reviewer_status["verdict"] == "changes_requested":
+            if state.get("bootstrap_phase") == "fork_to_review":
+                state["bootstrap_phase"] = None
+                save_run_state(run_dir, state)
             save_turn_metadata(
                 current_turn_dir,
                 turn_number,
@@ -2549,6 +2686,41 @@ def supervisor_loop(run_dir: Path, state: dict, task_root: Path) -> None:
     )
 
 
+def render_doc_content(doc_kind: str, body: str) -> str:
+    if doc_kind == "task":
+        return build_task_doc_from_seed(body)
+    if doc_kind == "review":
+        return build_review_doc_from_seed(body)
+    if doc_kind == "spec":
+        return build_spec_doc_from_seed(body)
+    if doc_kind == "contract":
+        return build_contract_doc_from_seed(body)
+    raise SystemExit(f"unsupported doc kind: {doc_kind}")
+
+
+def document_path_for(task_root: Path, doc_kind: str) -> Path:
+    return task_root / INPUT_DOC_FILENAMES[doc_kind]
+
+
+def write_document_command(args: argparse.Namespace) -> int:
+    task_name = validate_task_name(args.task_name)
+    target_input = Path(args.dir or Path.cwd()).resolve()
+    repo_root, _ = resolve_target_root(target_input, allow_non_git=args.allow_non_git)
+    scaffold_council_root(repo_root)
+    task_root = task_root_for(repo_root, task_name)
+    scaffold_task_root(task_root, initial_task_text=None)
+
+    body = read_text_arg(args.body, args.body_file, default="")
+    target_path = document_path_for(task_root, args.doc_kind)
+    if not body.strip():
+        template_name = INPUT_DOC_FILENAMES[args.doc_kind]
+        write_text(target_path, read_template("scaffold", template_name))
+    else:
+        write_text(target_path, render_doc_content(args.doc_kind, body))
+    print(f"wrote: {target_path}")
+    return 0
+
+
 def start_run(args: argparse.Namespace) -> int:
     task_name = validate_task_name(args.task_name)
     target_input = Path(args.dir or Path.cwd()).resolve()
@@ -2561,47 +2733,28 @@ def start_run(args: argparse.Namespace) -> int:
             f"Run `init {task_name}` first."
         )
     inspection = ensure_task_workspace_exists(task_root)
-    workspace_mode = inspection["workspace_mode"]
-    if workspace_mode == WORKSPACE_MODE_INHERITED_CONTEXT and not is_git:
-        raise SystemExit("inherited-context mode requires a git worktree and cannot start with --allow-non-git")
     council_config = load_council_config(repo_root)
-    if workspace_mode == WORKSPACE_MODE_SPEC_BACKED:
-        materials = load_task_materials(task_root)
-        if not materials["task_text"] or materials["task_text"] == default_scaffold_text("task.md").strip():
-            raise SystemExit(
-                f"{task_root / 'task.md'} is still a placeholder. Fill it in before running start."
-            )
-        readiness_errors, readiness_warnings = lint_task_workspace_readiness(task_root)
-        if readiness_errors:
-            formatted = "\n".join(f"- {item}" for item in readiness_errors)
-            raise SystemExit(
-                f"{task_root} is not ready for start.\n"
-                f"Fix these issues first:\n{formatted}"
-            )
-        for warning in readiness_warnings:
-            print(f"warning: {warning}")
-    elif workspace_mode == WORKSPACE_MODE_SIMPLE:
-        readiness_errors, readiness_warnings = lint_simple_workspace_readiness(task_root)
-        if readiness_errors:
-            formatted = "\n".join(f"- {item}" for item in readiness_errors)
-            raise SystemExit(
-                f"{task_root} is not ready for start.\n"
-                f"Fix these issues first:\n{formatted}"
-            )
-        for warning in readiness_warnings:
-            print(f"warning: {warning}")
-    if workspace_mode == WORKSPACE_MODE_INHERITED_CONTEXT:
-        if not args.generator_fork_session_id or not args.reviewer_fork_session_id:
-            raise SystemExit(
-                "inherited-context mode requires both --generator-fork-session-id and --reviewer-fork-session-id"
-            )
-    for session_id in (args.generator_fork_session_id, args.reviewer_fork_session_id):
+    generator_fork_session_id, reviewer_fork_session_id = resolve_fork_parent_session_ids(args)
+    for session_id in (generator_fork_session_id, reviewer_fork_session_id):
         if session_id and not find_codex_session_entry(session_id):
             raise SystemExit(f"unknown fork parent session id: {session_id}")
+    fork_enabled = has_any_fork_parent(generator_fork_session_id, reviewer_fork_session_id)
+    if not is_git and fork_enabled:
+        raise SystemExit("fork start requires a git worktree and cannot be used with --allow-non-git")
+    validate_task_workspace_for_start(task_root, inspection)
+    start_role, bootstrap_phase = determine_start_role(
+        inspection=inspection,
+        fork_enabled=fork_enabled,
+        requested_role=args.start_role,
+    )
+    if bootstrap_phase == "fork_to_review" and not reviewer_fork_session_id:
+        raise SystemExit(
+            "fork bootstrap requires reviewer fork context; pass --fork-session-id or --reviewer-fork-session-id"
+        )
     if is_git:
         git_state = (
             git_preflight(repo_root)
-            if workspace_mode != WORKSPACE_MODE_INHERITED_CONTEXT
+            if bootstrap_phase != "fork_to_review"
             else git_preflight_allowing_dirty(repo_root)
         )
     else:
@@ -2622,15 +2775,16 @@ def start_run(args: argparse.Namespace) -> int:
         task_root=task_root,
         task_name=task_name,
         run_id=run_id,
-        workspace_mode=workspace_mode,
+        workspace_profile=inspection["profile"],
         council_config=council_config,
         git_state=git_state,
         generator_session=generator_session,
         reviewer_session=reviewer_session,
-        generator_bootstrap_mode="fork" if args.generator_fork_session_id else "fresh",
-        reviewer_bootstrap_mode="fork" if args.reviewer_fork_session_id else "fresh",
-        generator_fork_parent_session_id=args.generator_fork_session_id,
-        reviewer_fork_parent_session_id=args.reviewer_fork_session_id,
+        generator_bootstrap_mode="fork" if generator_fork_session_id else "fresh",
+        reviewer_bootstrap_mode="fork" if reviewer_fork_session_id else "fresh",
+        generator_fork_parent_session_id=generator_fork_session_id,
+        reviewer_fork_parent_session_id=reviewer_fork_session_id,
+        bootstrap_phase=bootstrap_phase,
     )
     state["session_index_snapshot_ids"] = session_index_snapshot_ids
     save_run_state(run_dir, state)
@@ -2649,7 +2803,13 @@ def start_run(args: argparse.Namespace) -> int:
 
         wait_for_tmux_sessions_ready(run_dir, state)
         print("both Codex TUI sessions are ready")
-        supervisor_loop(run_dir, state, task_root)
+        supervisor_loop_from(
+            run_dir,
+            state,
+            task_root,
+            start_turn=1,
+            start_role=start_role,
+        )
     except SupervisorRuntimeError as error:
         state = load_json(run_dir / "state.json")
         state["status"] = (
@@ -2702,43 +2862,23 @@ def init_task(args: argparse.Namespace) -> int:
     scaffold_council_root(repo_root)
     task_root = task_root_for(repo_root, task_name)
     initial_task_text = read_text_arg(args.task, args.task_file, default="").strip()
-    if args.skip_task_and_contract:
-        result = scaffold_task_root(
-            task_root,
-            initial_task_text=None,
-            skip_task_and_contract=True,
-        )
-    elif args.simple:
-        result = scaffold_task_root(
-            task_root,
-            initial_task_text=None,
-            simple_mode=True,
-        )
-    else:
-        result = scaffold_task_root(task_root, initial_task_text=initial_task_text or None)
+    result = scaffold_task_root(task_root, initial_task_text=initial_task_text or None)
 
     print(f"repo_root: {repo_root}")
     print(f"council_root: {council_root_for(repo_root)}")
     print(f"task_root: {task_root}")
     print(f"config: {config_path_for(repo_root)}")
-    if result["workspace_mode"] == WORKSPACE_MODE_SPEC_BACKED:
-        print(f"task: {task_root / 'task.md'}")
-        print(f"contract: {task_root / 'contract.md'}")
-    elif result["workspace_mode"] == WORKSPACE_MODE_SIMPLE:
-        print(f"initial_review: {task_root / 'initial_review.md'}")
-    else:
-        print("task/contract: skipped for inherited-context mode")
+    print(f"task: {task_root / TASK_FILENAME}")
+    print(f"review: {task_root / REVIEW_FILENAME}")
+    print(f"spec: {task_root / SPEC_FILENAME}")
+    print(f"contract: {task_root / CONTRACT_FILENAME}")
     print(f"agents: {task_root / 'AGENTS.md'}")
     print(f"generator: {task_root / 'generator.instructions.md'}")
     print(f"reviewer: {task_root / 'reviewer.instructions.md'}")
     if result["task_needs_edit"]:
-        print("next: edit task.md and any instruction files, then run `start`")
-    elif result["workspace_mode"] == WORKSPACE_MODE_SIMPLE:
-        print("next: edit initial_review.md and any instruction files, then run `start` normally or with fork session ids")
-    elif result["workspace_mode"] == WORKSPACE_MODE_INHERITED_CONTEXT:
-        print("next: edit the inherited-context instruction files, then run `start` with both fork session ids")
+        print(f"next: review {TASK_FILENAME}, then run `start` or use `write` to add other documents")
     else:
-        print("next: review/edit the scaffolded files if needed, then run `start`")
+        print(f"next: use `write task|review|spec|contract {task_name}` or edit the files directly, then run `start`")
     return 0
 
 
@@ -2889,16 +3029,18 @@ def continue_run(args: argparse.Namespace) -> int:
         raise SystemExit(f"missing run directory: {run_dir}")
 
     state = load_json(run_dir / "state.json")
-    workspace_mode = inspect_task_workspace(task_root)["workspace_mode"]
-    state["workspace_mode"] = workspace_mode
+    inspection = inspect_task_workspace(task_root)
+    state["workspace_profile"] = inspection["profile"]
     latest_turn, turn_number, role, create_new_turn, prior_status = determine_continue_target(run_dir, state)
     previous_turn_dir = latest_turn if create_new_turn else (turn_dir_for(run_dir, turn_number - 1) if turn_number > 1 else None)
     continue_context = build_continue_context(
         state=state,
         previous_turn_dir=previous_turn_dir,
         role=role,
-        workspace_mode=workspace_mode,
+        inspection=inspection,
     )
+    if state.get("bootstrap_phase") == "fork_to_review" and prior_status == "reviewer_changes_requested":
+        state["bootstrap_phase"] = None
 
     state["current_turn"] = turn_number
     state["stop_reason"] = None
@@ -2949,10 +3091,16 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--allow-non-git", action="store_true")
     init.add_argument("--task")
     init.add_argument("--task-file")
-    init_mode = init.add_mutually_exclusive_group()
-    init_mode.add_argument("--skip-task-and-contract", action="store_true")
-    init_mode.add_argument("--simple", action="store_true")
     init.set_defaults(func=init_task)
+
+    write = sub.add_parser("write", help="write or replace one canonical task document")
+    write.add_argument("doc_kind", choices=["task", "review", "spec", "contract"])
+    write.add_argument("task_name")
+    write.add_argument("--dir", help="target repository or working directory")
+    write.add_argument("--allow-non-git", action="store_true")
+    write.add_argument("--body")
+    write.add_argument("--body-file")
+    write.set_defaults(func=write_document_command)
 
     start = sub.add_parser("start", help="start a council run for a task name")
     start.add_argument("task_name")
@@ -2961,8 +3109,10 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--run-id")
     start.add_argument("--generator-session")
     start.add_argument("--reviewer-session")
+    start.add_argument("--fork-session-id")
     start.add_argument("--generator-fork-session-id")
     start.add_argument("--reviewer-fork-session-id")
+    start.add_argument("--start-role", choices=["auto", "generator", "reviewer"], default="auto")
     start.set_defaults(func=start_run)
 
     cont = sub.add_parser("continue", help="continue a stopped or paused council run")
