@@ -2542,7 +2542,10 @@ def write_raw_final_output_artifact(turn_dir: Path, role: str, tmux_name: str) -
             phase=f"{role}_raw_output_capture",
             role=role,
         )
-        captured_text = capture_last_tmux_slice(tmux_name)
+        # Search the full recent pane history for summary markers. Looking only
+        # at the last slice can miss a valid summary when Codex prints another
+        # prompt line after the summary block.
+        captured_text = tmux_capture_joined_pane(tmux_name)
     except SupervisorRuntimeError:
         captured_text = ""
     summary_text = extract_terminal_summary_block(captured_text)
