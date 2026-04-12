@@ -10,6 +10,8 @@ Turn {{turn_name}}.
 Read these files directly before coding:
 {{docs_to_read_block}}
 
+{{review_bridge_block}}
+
 Before making changes, read the previous reviewer artifacts carefully:
 - {{previous_reviewer_message_path}}
 - {{previous_reviewer_status_path}}

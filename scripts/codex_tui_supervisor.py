@@ -20,6 +20,7 @@ from typing import Literal
 COUNCIL_DIRNAME = ".codex-council"
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "templates"
 ROLE_NAMES = ("generator", "reviewer")
+REVIEW_MODES = {"internal", "github_pr_codex"}
 BASE_REQUIRED_FILENAMES = (
     "AGENTS.md",
     "generator.instructions.md",
@@ -56,6 +57,7 @@ TMUX_PASTE_SETTLE_SECONDS = 0.1
 TMUX_CAPTURE_HISTORY_LINES = 1000
 ROLE_ARTIFACT_POLL_SECONDS = 1.0
 TASK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+GITHUB_PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/([0-9]+)(?:/.*)?$")
 CHECKLIST_ITEM_RE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+\S")
 REVIEW_ITEM_RE = re.compile(r"^\s*[-*]\s+\S")
 CONTRACT_PLACEHOLDER_MARKERS = (
@@ -91,6 +93,10 @@ SESSION_RECOVERY_ATTEMPTS = 1
 RAW_OUTPUT_CAPTURE_TIMEOUT_SECONDS = 30.0
 TERMINAL_SUMMARY_BEGIN = "COUNCIL_TERMINAL_SUMMARY_BEGIN"
 TERMINAL_SUMMARY_END = "COUNCIL_TERMINAL_SUMMARY_END"
+GITHUB_CODEX_REVIEW_PREFIX = "Codex Review:"
+GITHUB_CODEX_APPROVED_PREFIX = "Codex Review: Didn't find any major issues. Keep it up!"
+GITHUB_CODEX_INITIAL_WAIT_SECONDS = 600
+GITHUB_CODEX_POLL_INTERVAL_SECONDS = 300
 
 
 class SupervisorRuntimeError(RuntimeError):
@@ -110,6 +116,10 @@ class SupervisorRuntimeError(RuntimeError):
 
 def now_ts() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def ts_from_epoch(epoch_seconds: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch_seconds))
 
 
 def ensure_dir(path: Path) -> None:
@@ -350,11 +360,16 @@ def find_codex_session_entry(session_id: str) -> dict | None:
 
 
 def run_subprocess(
-    args: list[str], *, check: bool = True, input_text: str | None = None
+    args: list[str],
+    *,
+    check: bool = True,
+    cwd: Path | None = None,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
         args,
         check=check,
+        cwd=str(cwd) if cwd is not None else None,
         text=True,
         capture_output=True,
         input=input_text,
@@ -389,6 +404,63 @@ def git_stdout(repo_root: Path, *args: str) -> str:
             },
         )
     return proc.stdout.strip()
+
+
+def git_current_branch(repo_root: Path) -> str:
+    return git_stdout(repo_root, "symbolic-ref", "--quiet", "--short", "HEAD")
+
+
+def git_head_sha(repo_root: Path) -> str:
+    return git_stdout(repo_root, "rev-parse", "HEAD")
+
+
+def gh_run(
+    repo_root: Path,
+    args: list[str],
+    *,
+    phase: str,
+    input_text: str | None = None,
+) -> subprocess.CompletedProcess:
+    proc = run_subprocess(
+        ["gh", *args],
+        check=False,
+        cwd=repo_root,
+        input_text=input_text,
+    )
+    if proc.returncode != 0:
+        raise SupervisorRuntimeError(
+            phase,
+            f"gh {' '.join(args)} failed: {proc.stderr.strip() or proc.stdout.strip()}",
+            role="reviewer",
+            details={
+                "command": ["gh", *args],
+                "stderr": proc.stderr,
+                "stdout": proc.stdout,
+            },
+        )
+    return proc
+
+
+def gh_json(
+    repo_root: Path,
+    args: list[str],
+    *,
+    phase: str,
+    input_text: str | None = None,
+):
+    proc = gh_run(repo_root, args, phase=phase, input_text=input_text)
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise SupervisorRuntimeError(
+            phase,
+            f"gh {' '.join(args)} returned invalid JSON",
+            role="reviewer",
+            details={
+                "command": ["gh", *args],
+                "stdout": proc.stdout,
+            },
+        ) from exc
 
 
 def git_preflight(repo_root: Path) -> dict:
@@ -1679,6 +1751,29 @@ def format_generator_objective_block(inspection: dict) -> str:
     return "\n".join(lines).rstrip()
 
 
+def format_review_bridge_block(state: dict) -> str:
+    if review_bridge_mode(state) != "github_pr_codex":
+        return ""
+    github_state = state["review_bridge"]["github"]
+    lines = [
+        "GitHub PR review mode is enabled.",
+        f"- Work on branch `{github_state['branch']}` and ensure the latest branch head is pushed before ending the turn.",
+    ]
+    if github_state.get("pr_url"):
+        lines.append(f"- Reuse the existing PR: {github_state['pr_url']}")
+    else:
+        lines.append(
+            f"- No PR has been resolved yet; after your push, the harness will reuse or create the PR for branch `{github_state['branch']}`."
+        )
+    lines.extend(
+        [
+            f"- The harness will post the `@codex` review request comment and poll GitHub for the response; do not perform that PR bookkeeping manually.",
+            f"- The expected base branch for PR creation is `{github_state['base_branch']}`.",
+        ]
+    )
+    return "\n".join(lines).rstrip()
+
+
 def format_generator_message_requirements_block(inspection: dict) -> str:
     has_review = inspection["doc_paths"]["review"] is not None
     has_contract = inspection["doc_paths"]["contract"] is not None
@@ -1841,6 +1936,7 @@ def build_generator_turn_prompt(
     turn_number: int,
     task_name: str,
     *,
+    state: dict,
     inspection: dict,
     inline_context: bool,
     continue_context_block: str = "",
@@ -1883,6 +1979,7 @@ def build_generator_turn_prompt(
         "continue_context_block": continue_context_block,
         "fork_context_block": fork_context_block,
         "docs_to_read_block": format_doc_paths_block(task_root, inspection, "generator"),
+        "review_bridge_block": format_review_bridge_block(state),
         "generator_objective_block": format_generator_objective_block(inspection),
         "generator_message_requirements_block": format_generator_message_requirements_block(inspection),
         "previous_reviewer_message_path": str(role_message_path(previous_turn_dir, "reviewer")),
@@ -2098,7 +2195,8 @@ def create_run_state(
     council_config: dict,
     git_state: dict | None,
     generator_session: str,
-    reviewer_session: str,
+    reviewer_session: str | None,
+    review_bridge: dict,
     generator_bootstrap_mode: str = "fresh",
     reviewer_bootstrap_mode: str = "fresh",
     generator_fork_parent_session_id: str | None = None,
@@ -2114,6 +2212,7 @@ def create_run_state(
         "diagnostics_dir": str(run_dir / "diagnostics"),
         "git": git_state,
         "repo_root": str(repo_root),
+        "review_bridge": review_bridge,
         "roles": {
             "generator": {
                 "bootstrap_mode": generator_bootstrap_mode,
@@ -2238,6 +2337,914 @@ def build_review_write_path(task_root: Path) -> Path:
     return task_root / REVIEW_FILENAME
 
 
+def normalize_review_mode(args: argparse.Namespace) -> str:
+    mode = getattr(args, "review_mode", "internal")
+    github_options_present = any(
+        getattr(args, field, None)
+        for field in ("github_pr", "github_branch", "github_base")
+    )
+    if mode == "internal" and github_options_present:
+        mode = "github_pr_codex"
+    if mode not in REVIEW_MODES:
+        raise SystemExit(
+            f"--review-mode must be one of: {', '.join(sorted(REVIEW_MODES))}"
+        )
+    return mode
+
+
+def review_bridge_mode(state: dict) -> str:
+    review_bridge = state.get("review_bridge", {})
+    mode = review_bridge.get("mode", "internal")
+    return mode if mode in REVIEW_MODES else "internal"
+
+
+def role_uses_tmux(state: dict, role: str) -> bool:
+    return not (role == "reviewer" and review_bridge_mode(state) == "github_pr_codex")
+
+
+def active_tmux_roles(state: dict) -> tuple[str, ...]:
+    return tuple(role for role in ROLE_NAMES if role_uses_tmux(state, role))
+
+
+def parse_github_pr_ref(value: str) -> dict:
+    normalized = value.strip()
+    if not normalized:
+        raise SystemExit("--github-pr must be a pull request number or URL")
+    if normalized.isdigit():
+        return {
+            "ref": normalized,
+            "number": int(normalized),
+            "repo_name_with_owner": None,
+        }
+    match = GITHUB_PR_URL_RE.match(normalized)
+    if match:
+        owner, repo, number = match.groups()
+        return {
+            "ref": normalized,
+            "number": int(number),
+            "repo_name_with_owner": f"{owner}/{repo}",
+        }
+    raise SystemExit("--github-pr must be a pull request number or GitHub pull request URL")
+
+
+def load_github_repo_metadata(repo_root: Path) -> dict:
+    data = gh_json(
+        repo_root,
+        ["repo", "view", "--json", "defaultBranchRef,nameWithOwner,url"],
+        phase="github_repo_view",
+    )
+    name_with_owner = data.get("nameWithOwner")
+    repo_url = data.get("url")
+    default_branch_ref = data.get("defaultBranchRef")
+    default_branch = (
+        default_branch_ref.get("name")
+        if isinstance(default_branch_ref, dict)
+        else None
+    )
+    if (
+        not isinstance(name_with_owner, str)
+        or not name_with_owner.strip()
+        or not isinstance(repo_url, str)
+        or not repo_url.strip()
+        or not isinstance(default_branch, str)
+        or not default_branch.strip()
+    ):
+        raise SupervisorRuntimeError(
+            "github_repo_view",
+            "gh repo view returned incomplete repository metadata",
+            role="reviewer",
+            details={"response": data},
+        )
+    owner, repo = name_with_owner.split("/", 1)
+    return {
+        "default_branch": default_branch.strip(),
+        "name_with_owner": name_with_owner.strip(),
+        "owner": owner,
+        "repo": repo,
+        "url": repo_url.strip(),
+    }
+
+
+def _normalize_github_pr_payload(data: dict) -> dict:
+    number = data.get("number")
+    url = data.get("url")
+    head_ref_name = data.get("headRefName")
+    base_ref_name = data.get("baseRefName")
+    head_ref_oid = data.get("headRefOid")
+    title = data.get("title")
+    if (
+        not isinstance(number, int)
+        or not isinstance(url, str)
+        or not url.strip()
+        or not isinstance(head_ref_name, str)
+        or not head_ref_name.strip()
+        or not isinstance(base_ref_name, str)
+        or not base_ref_name.strip()
+        or not isinstance(head_ref_oid, str)
+        or not head_ref_oid.strip()
+    ):
+        raise SupervisorRuntimeError(
+            "github_pr_payload",
+            "GitHub pull request metadata was incomplete",
+            role="reviewer",
+            details={"response": data},
+        )
+    return {
+        "number": number,
+        "url": url.strip(),
+        "head_ref_name": head_ref_name.strip(),
+        "base_ref_name": base_ref_name.strip(),
+        "head_ref_oid": head_ref_oid.strip(),
+        "title": title.strip() if isinstance(title, str) and title.strip() else None,
+    }
+
+
+def resolve_github_pr_reference(repo_root: Path, pr_ref: str) -> dict:
+    data = gh_json(
+        repo_root,
+        [
+            "pr",
+            "view",
+            pr_ref,
+            "--json",
+            "baseRefName,headRefName,headRefOid,number,title,url",
+        ],
+        phase="github_pr_resolve",
+    )
+    return _normalize_github_pr_payload(data)
+
+
+def find_existing_github_pr_for_branch(repo_root: Path, branch: str) -> dict | None:
+    data = gh_json(
+        repo_root,
+        [
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--limit",
+            "10",
+            "--json",
+            "baseRefName,headRefName,headRefOid,number,title,updatedAt,url",
+        ],
+        phase="github_pr_lookup",
+    )
+    if not isinstance(data, list):
+        raise SupervisorRuntimeError(
+            "github_pr_lookup",
+            "gh pr list returned invalid data",
+            role="reviewer",
+            details={"response": data},
+        )
+    candidates = [
+        _normalize_github_pr_payload(item)
+        | {
+            "updated_at": item.get("updatedAt")
+            if isinstance(item.get("updatedAt"), str)
+            else "",
+        }
+        for item in data
+        if isinstance(item, dict)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item["updated_at"], item["number"]), reverse=True)
+    return candidates[0]
+
+
+def extract_task_request_summary(task_root: Path) -> str:
+    task_path = task_root / TASK_FILENAME
+    if task_path.exists():
+        in_request = False
+        for line in task_path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped == "## Request":
+                in_request = True
+                continue
+            if in_request and stripped.startswith("## "):
+                break
+            if in_request and stripped:
+                return stripped.lstrip("-* ").strip()
+    return task_root.name.replace("-", " ")
+
+
+def build_github_pr_create_title(task_root: Path) -> str:
+    summary = extract_task_request_summary(task_root)
+    return summary[:120] if summary else task_root.name
+
+
+def build_github_pr_create_body(task_root: Path, run_id: str) -> str:
+    return textwrap.dedent(
+        f"""\
+        Automated PR opened by codex-council for task `{task_root.name}`.
+
+        - Council workspace: `{task_root}`
+        - Run: `{run_id}`
+        """
+    ).rstrip()
+
+
+def create_github_pr(
+    repo_root: Path,
+    *,
+    branch: str,
+    base_branch: str,
+    title: str,
+    body: str,
+) -> dict:
+    if branch == base_branch:
+        raise SupervisorRuntimeError(
+            "github_pr_create",
+            f"cannot create a pull request when branch `{branch}` and base `{base_branch}` are the same",
+            role="reviewer",
+            details={"branch": branch, "base_branch": base_branch},
+        )
+    proc = gh_run(
+        repo_root,
+        [
+            "pr",
+            "create",
+            "--head",
+            branch,
+            "--base",
+            base_branch,
+            "--title",
+            title,
+            "--body",
+            body,
+        ],
+        phase="github_pr_create",
+    )
+    created_url = next(
+        (line.strip() for line in reversed(proc.stdout.splitlines()) if line.strip()),
+        "",
+    )
+    if not created_url:
+        raise SupervisorRuntimeError(
+            "github_pr_create",
+            "gh pr create did not return a pull request URL",
+            role="reviewer",
+            details={"stdout": proc.stdout},
+        )
+    return resolve_github_pr_reference(repo_root, created_url)
+
+
+def resolve_pushed_branch_head_sha(repo_root: Path, branch: str) -> str:
+    local_head_sha = git_head_sha(repo_root)
+    upstream_proc = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "--abbrev-ref", f"{branch}@{{upstream}}"],
+        text=True,
+        capture_output=True,
+    )
+    if upstream_proc.returncode == 0 and upstream_proc.stdout.strip():
+        upstream_ref = upstream_proc.stdout.strip()
+        upstream_sha = git_stdout(repo_root, "rev-parse", upstream_ref)
+        if upstream_sha == local_head_sha:
+            return upstream_sha
+        raise SupervisorRuntimeError(
+            "github_branch_not_pushed",
+            f"branch `{branch}` is not pushed at the current HEAD `{local_head_sha}`",
+            role="reviewer",
+            details={
+                "branch": branch,
+                "local_head_sha": local_head_sha,
+                "upstream_ref": upstream_ref,
+                "upstream_sha": upstream_sha,
+            },
+        )
+
+    remotes = [line.strip() for line in git_stdout(repo_root, "remote").splitlines() if line.strip()]
+    remote_name = "origin" if "origin" in remotes else (remotes[0] if len(remotes) == 1 else None)
+    if not remote_name:
+        raise SupervisorRuntimeError(
+            "github_branch_not_pushed",
+            f"branch `{branch}` has no configured upstream or resolvable git remote",
+            role="reviewer",
+            details={"branch": branch, "remotes": remotes},
+        )
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "ls-remote", "--heads", remote_name, branch],
+        text=True,
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise SupervisorRuntimeError(
+            "github_branch_not_pushed",
+            f"failed to inspect remote branch `{branch}` on `{remote_name}`: {proc.stderr.strip() or proc.stdout.strip()}",
+            role="reviewer",
+            details={
+                "branch": branch,
+                "remote": remote_name,
+                "stderr": proc.stderr,
+                "stdout": proc.stdout,
+            },
+        )
+    remote_line = next((line for line in proc.stdout.splitlines() if line.strip()), "")
+    if not remote_line:
+        raise SupervisorRuntimeError(
+            "github_branch_not_pushed",
+            f"branch `{branch}` is not pushed to remote `{remote_name}`",
+            role="reviewer",
+            details={"branch": branch, "remote": remote_name},
+        )
+    remote_sha = remote_line.split()[0]
+    if remote_sha != local_head_sha:
+        raise SupervisorRuntimeError(
+            "github_branch_not_pushed",
+            f"branch `{branch}` is pushed to `{remote_name}`, but the remote HEAD does not match local HEAD `{local_head_sha}`",
+            role="reviewer",
+            details={
+                "branch": branch,
+                "local_head_sha": local_head_sha,
+                "remote": remote_name,
+                "remote_sha": remote_sha,
+            },
+        )
+    return remote_sha
+
+
+def build_review_bridge_state(
+    repo_root: Path,
+    task_root: Path,
+    git_state: dict | None,
+    args: argparse.Namespace,
+) -> dict:
+    mode = normalize_review_mode(args)
+    if mode == "internal":
+        return {"mode": "internal"}
+    if git_state is None:
+        raise SystemExit("github_pr_codex review mode requires a git worktree")
+    if getattr(args, "start_role", "auto") == "reviewer":
+        raise SystemExit("github_pr_codex review mode cannot start with reviewer")
+    repo_meta = load_github_repo_metadata(repo_root)
+    github_pr_value = normalize_optional_text(
+        getattr(args, "github_pr", None),
+        field_name="github pr",
+    )
+    github_branch_value = normalize_optional_text(
+        getattr(args, "github_branch", None),
+        field_name="github branch",
+    )
+    github_base_value = normalize_optional_text(
+        getattr(args, "github_base", None),
+        field_name="github base",
+    )
+
+    pr_number = None
+    pr_url = None
+    pr_head_sha = None
+    branch_source = "auto"
+    branch = github_branch_value or git_state["current_branch"]
+    base_branch = github_base_value or repo_meta["default_branch"]
+
+    if github_pr_value:
+        parsed_pr = parse_github_pr_ref(github_pr_value)
+        if (
+            parsed_pr["repo_name_with_owner"]
+            and parsed_pr["repo_name_with_owner"] != repo_meta["name_with_owner"]
+        ):
+            raise SystemExit(
+                f"provided PR repo `{parsed_pr['repo_name_with_owner']}` does not match target repo `{repo_meta['name_with_owner']}`"
+            )
+        pr_info = resolve_github_pr_reference(repo_root, parsed_pr["ref"])
+        if github_branch_value and github_branch_value != pr_info["head_ref_name"]:
+            raise SystemExit(
+                f"--github-branch `{github_branch_value}` does not match PR head branch `{pr_info['head_ref_name']}`"
+            )
+        branch = pr_info["head_ref_name"]
+        base_branch = pr_info["base_ref_name"]
+        branch_source = "pr"
+        pr_number = pr_info["number"]
+        pr_url = pr_info["url"]
+        pr_head_sha = pr_info["head_ref_oid"]
+    else:
+        branch_source = "explicit" if github_branch_value else "auto"
+        existing_pr = find_existing_github_pr_for_branch(repo_root, branch)
+        if existing_pr is not None:
+            pr_number = existing_pr["number"]
+            pr_url = existing_pr["url"]
+            base_branch = existing_pr["base_ref_name"]
+            pr_head_sha = existing_pr["head_ref_oid"]
+
+    return {
+        "mode": "github_pr_codex",
+        "github": {
+            "base_branch": base_branch,
+            "branch": branch,
+            "branch_source": branch_source,
+            "last_consumed_review_comment_body_sha256": None,
+            "last_consumed_review_comment_created_at": None,
+            "last_consumed_review_comment_id": None,
+            "last_consumed_review_turn": None,
+            "last_observed_head_sha": pr_head_sha,
+            "last_request_comment_created_at": None,
+            "last_request_comment_id": None,
+            "last_request_turn": None,
+            "pr_head_sha": pr_head_sha,
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "repo_name_with_owner": repo_meta["name_with_owner"],
+            "repo_owner": repo_meta["owner"],
+            "repo": repo_meta["repo"],
+            "repo_url": repo_meta["url"],
+            "review_wait": {
+                "deadline_at": None,
+                "initial_wait_seconds": GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                "last_polled_at": None,
+                "poll_count": 0,
+                "poll_interval_seconds": GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                "started_at": None,
+            },
+        },
+    }
+
+
+def record_current_git_state(run_dir: Path, state: dict) -> tuple[str | None, str | None]:
+    if not state.get("git"):
+        return None, None
+    repo_root = Path(state["repo_root"])
+    current_branch = git_current_branch(repo_root)
+    head_sha = git_head_sha(repo_root)
+    state["git"]["current_branch"] = current_branch
+    state["git"]["last_generator_commit_sha"] = head_sha
+    save_run_state(run_dir, state)
+    return current_branch, head_sha
+
+
+def sync_github_review_branch_state(run_dir: Path, state: dict) -> tuple[str, str]:
+    repo_root = Path(state["repo_root"])
+    current_branch = git_current_branch(repo_root)
+    head_sha = git_head_sha(repo_root)
+    github_state = state["review_bridge"]["github"]
+    expected_branch = github_state["branch"]
+    if current_branch != expected_branch:
+        if github_state.get("pr_number") is None and github_state.get("branch_source") == "auto":
+            github_state["branch"] = current_branch
+        else:
+            raise SupervisorRuntimeError(
+                "github_branch_mismatch",
+                f"current git branch `{current_branch}` does not match the GitHub review branch `{expected_branch}`",
+                role="reviewer",
+                details={
+                    "current_branch": current_branch,
+                    "expected_branch": expected_branch,
+                },
+            )
+    github_state["last_observed_head_sha"] = head_sha
+    if state.get("git"):
+        state["git"]["current_branch"] = current_branch
+        state["git"]["last_generator_commit_sha"] = head_sha
+    save_run_state(run_dir, state)
+    return current_branch, head_sha
+
+
+def ensure_github_pr_ready(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_number: int,
+) -> dict:
+    current_branch, current_head_sha = sync_github_review_branch_state(run_dir, state)
+    repo_root = Path(state["repo_root"])
+    github_state = state["review_bridge"]["github"]
+    created = False
+    if github_state.get("pr_number"):
+        pr_info = resolve_github_pr_reference(repo_root, str(github_state["pr_number"]))
+    else:
+        pr_info = find_existing_github_pr_for_branch(repo_root, current_branch)
+        if pr_info is None:
+            resolve_pushed_branch_head_sha(repo_root, current_branch)
+            pr_info = create_github_pr(
+                repo_root,
+                branch=current_branch,
+                base_branch=github_state["base_branch"],
+                title=build_github_pr_create_title(task_root),
+                body=build_github_pr_create_body(task_root, state["run_id"]),
+            )
+            created = True
+    if pr_info["head_ref_name"] != current_branch:
+        raise SupervisorRuntimeError(
+            "github_branch_mismatch",
+            f"GitHub PR #{pr_info['number']} targets branch `{pr_info['head_ref_name']}`, but the local branch is `{current_branch}`",
+            role="reviewer",
+            details={
+                "current_branch": current_branch,
+                "pr_head_ref_name": pr_info["head_ref_name"],
+                "pr_number": pr_info["number"],
+            },
+        )
+    if pr_info["head_ref_oid"] != current_head_sha:
+        raise SupervisorRuntimeError(
+            "github_branch_not_pushed",
+            f"GitHub PR #{pr_info['number']} is still at `{pr_info['head_ref_oid']}` instead of local HEAD `{current_head_sha}`; push branch `{current_branch}` before review can continue",
+            role="reviewer",
+            details={
+                "current_branch": current_branch,
+                "current_head_sha": current_head_sha,
+                "pr_head_ref_oid": pr_info["head_ref_oid"],
+                "pr_number": pr_info["number"],
+            },
+        )
+    github_state["base_branch"] = pr_info["base_ref_name"]
+    github_state["branch"] = pr_info["head_ref_name"]
+    github_state["pr_head_sha"] = pr_info["head_ref_oid"]
+    github_state["pr_number"] = pr_info["number"]
+    github_state["pr_url"] = pr_info["url"]
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "github_pr_created" if created else "github_pr_reused",
+        turn_number=turn_number,
+        role="reviewer",
+        details={
+            "branch": github_state["branch"],
+            "pr_number": github_state["pr_number"],
+            "pr_url": github_state["pr_url"],
+        },
+    )
+    return pr_info
+
+
+def build_github_codex_request_comment(state: dict, turn_number: int, commit_sha: str) -> str:
+    github_state = state["review_bridge"]["github"]
+    return textwrap.dedent(
+        f"""\
+        @codex review
+
+        Please review the latest PR state for blocking correctness issues, regressions, failure modes, and missing tests.
+
+        - Task: {state['task_name']}
+        - Run: {state['run_id']}
+        - Turn: {turn_name(turn_number)}
+        - Branch: {github_state['branch']}
+        - Commit: {commit_sha}
+
+        Reply with a new PR comment that starts with `{GITHUB_CODEX_REVIEW_PREFIX}`.
+        """
+    ).rstrip()
+
+
+def post_github_pr_review_request_comment(
+    run_dir: Path,
+    state: dict,
+    turn_number: int,
+    commit_sha: str,
+) -> dict:
+    repo_root = Path(state["repo_root"])
+    github_state = state["review_bridge"]["github"]
+    pr_number = github_state.get("pr_number")
+    if not isinstance(pr_number, int):
+        raise SupervisorRuntimeError(
+            "github_review_request_post",
+            "cannot post a GitHub review request without a PR number",
+            role="reviewer",
+        )
+    request_body = build_github_codex_request_comment(state, turn_number, commit_sha)
+    response = gh_json(
+        repo_root,
+        [
+            "api",
+            f"repos/{github_state['repo_owner']}/{github_state['repo']}/issues/{pr_number}/comments",
+            "-f",
+            f"body={request_body}",
+        ],
+        phase="github_review_request_post",
+    )
+    comment_id = response.get("id")
+    created_at = response.get("created_at")
+    html_url = response.get("html_url")
+    if (
+        not isinstance(comment_id, int)
+        or not isinstance(created_at, str)
+        or not created_at.strip()
+    ):
+        raise SupervisorRuntimeError(
+            "github_review_request_post",
+            "GitHub did not return the posted request comment metadata",
+            role="reviewer",
+            details={"response": response},
+        )
+    github_state["last_request_comment_id"] = comment_id
+    github_state["last_request_comment_created_at"] = created_at.strip()
+    github_state["last_request_turn"] = turn_name(turn_number)
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "github_review_request_posted",
+        turn_number=turn_number,
+        role="reviewer",
+        details={
+            "comment_id": comment_id,
+            "comment_url": html_url if isinstance(html_url, str) else None,
+            "pr_number": pr_number,
+        },
+    )
+    return {
+        "body": request_body,
+        "created_at": created_at.strip(),
+        "html_url": html_url.strip() if isinstance(html_url, str) and html_url.strip() else None,
+        "id": comment_id,
+    }
+
+
+def list_github_pr_issue_comments(
+    repo_root: Path,
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+) -> list[dict]:
+    response = gh_json(
+        repo_root,
+        [
+            "api",
+            "--paginate",
+            "--slurp",
+            f"repos/{owner}/{repo}/issues/{pr_number}/comments?per_page=100",
+        ],
+        phase="github_review_poll",
+    )
+    pages = response if isinstance(response, list) else [response]
+    comments: list[dict] = []
+    for page in pages:
+        if isinstance(page, list):
+            comments.extend(item for item in page if isinstance(item, dict))
+        elif isinstance(page, dict):
+            comments.append(page)
+    return comments
+
+
+def extract_github_review_blocking_issues(comment_body: str) -> list[str]:
+    bullets: list[str] = []
+    for line in comment_body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(GITHUB_CODEX_REVIEW_PREFIX):
+            continue
+        if REVIEW_ITEM_RE.match(stripped):
+            bullets.append(stripped)
+            continue
+        numbered = re.match(r"^\d+\.\s+\S", stripped)
+        if numbered:
+            bullets.append(stripped)
+    if bullets:
+        return bullets
+    paragraphs = [line.strip() for line in comment_body.splitlines() if line.strip()]
+    if len(paragraphs) > 1:
+        return [paragraphs[1][:300]]
+    if paragraphs:
+        return [paragraphs[0][:300]]
+    return ["GitHub Codex requested changes."]
+
+
+def select_latest_unconsumed_github_codex_review_comment(
+    comments: list[dict],
+    *,
+    request_comment_id: int | None,
+    request_comment_created_at: str | None,
+    last_consumed_comment_id: int | None,
+) -> dict | None:
+    candidates: list[dict] = []
+    for comment in comments:
+        comment_id = comment.get("id")
+        body = comment.get("body")
+        created_at = comment.get("created_at")
+        if (
+            not isinstance(comment_id, int)
+            or not isinstance(body, str)
+            or not isinstance(created_at, str)
+        ):
+            continue
+        if request_comment_id is not None and comment_id <= request_comment_id:
+            continue
+        if last_consumed_comment_id is not None and comment_id == last_consumed_comment_id:
+            continue
+        if request_comment_created_at and created_at < request_comment_created_at:
+            continue
+        if not body.lstrip().startswith(GITHUB_CODEX_REVIEW_PREFIX):
+            continue
+        candidates.append(comment)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item.get("created_at", ""), item.get("id", 0)))
+    return candidates[-1]
+
+
+def wait_for_new_github_codex_review_comment(
+    run_dir: Path,
+    state: dict,
+    turn_number: int,
+    *,
+    timeout_seconds: float,
+) -> dict:
+    if timeout_seconds < GITHUB_CODEX_INITIAL_WAIT_SECONDS:
+        raise SupervisorRuntimeError(
+            "github_review_timeout_config",
+            f"github_pr_codex review mode requires turn_timeout_seconds >= {GITHUB_CODEX_INITIAL_WAIT_SECONDS}",
+            role="reviewer",
+            details={"turn_timeout_seconds": timeout_seconds},
+        )
+    repo_root = Path(state["repo_root"])
+    github_state = state["review_bridge"]["github"]
+    pr_number = github_state.get("pr_number")
+    request_comment_id = github_state.get("last_request_comment_id")
+    request_comment_created_at = github_state.get("last_request_comment_created_at")
+    if not isinstance(pr_number, int) or not isinstance(request_comment_id, int):
+        raise SupervisorRuntimeError(
+            "github_review_poll",
+            "cannot poll GitHub review comments before posting a request comment",
+            role="reviewer",
+            details={
+                "pr_number": pr_number,
+                "request_comment_id": request_comment_id,
+            },
+        )
+    started_at_epoch = time.time()
+    wait_state = github_state["review_wait"]
+    wait_state["started_at"] = ts_from_epoch(started_at_epoch)
+    wait_state["deadline_at"] = ts_from_epoch(started_at_epoch + timeout_seconds)
+    wait_state["last_polled_at"] = None
+    wait_state["poll_count"] = 0
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "github_review_wait_started",
+        turn_number=turn_number,
+        role="reviewer",
+        details={
+            "initial_wait_seconds": GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+            "poll_interval_seconds": GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+            "pr_number": pr_number,
+        },
+    )
+
+    time.sleep(GITHUB_CODEX_INITIAL_WAIT_SECONDS)
+    deadline = started_at_epoch + timeout_seconds
+    while True:
+        polled_at = time.time()
+        wait_state["last_polled_at"] = ts_from_epoch(polled_at)
+        wait_state["poll_count"] = int(wait_state.get("poll_count", 0)) + 1
+        save_run_state(run_dir, state)
+        comments = list_github_pr_issue_comments(
+            repo_root,
+            owner=github_state["repo_owner"],
+            repo=github_state["repo"],
+            pr_number=pr_number,
+        )
+        comment = select_latest_unconsumed_github_codex_review_comment(
+            comments,
+            request_comment_id=request_comment_id,
+            request_comment_created_at=request_comment_created_at,
+            last_consumed_comment_id=github_state.get("last_consumed_review_comment_id"),
+        )
+        if comment is not None:
+            github_state["last_consumed_review_comment_body_sha256"] = hash_text(
+                comment["body"]
+            )
+            github_state["last_consumed_review_comment_created_at"] = comment["created_at"]
+            github_state["last_consumed_review_comment_id"] = comment["id"]
+            github_state["last_consumed_review_turn"] = turn_name(turn_number)
+            save_run_state(run_dir, state)
+            append_run_event(
+                run_dir,
+                "github_review_comment_received",
+                turn_number=turn_number,
+                role="reviewer",
+                details={
+                    "comment_id": comment["id"],
+                    "pr_number": pr_number,
+                },
+            )
+            return comment
+        if polled_at >= deadline:
+            raise SupervisorRuntimeError(
+                "github_review_timeout",
+                f"no new Codex review comment appeared on PR #{pr_number} within {int(timeout_seconds)} seconds",
+                role="reviewer",
+                details={
+                    "last_request_comment_created_at": request_comment_created_at,
+                    "last_request_comment_id": request_comment_id,
+                    "poll_count": wait_state["poll_count"],
+                    "pr_number": pr_number,
+                },
+            )
+        time.sleep(min(GITHUB_CODEX_POLL_INTERVAL_SECONDS, deadline - polled_at))
+
+
+def github_reviewer_status_from_comment(comment_body: str, reviewed_commit_sha: str) -> dict:
+    if comment_body.startswith(GITHUB_CODEX_APPROVED_PREFIX):
+        dimensions = {
+            key: "pass" for key in critical_review_dimension_keys()
+        }
+        return {
+            "verdict": "approved",
+            "summary": "GitHub Codex reported no major blocking issues.",
+            "blocking_issues": [],
+            "critical_dimensions": dimensions,
+            "reviewed_commit_sha": reviewed_commit_sha,
+        }
+    dimensions = {
+        key: (
+            "fail"
+            if key == "correctness_vs_intent"
+            else "uncertain"
+        )
+        for key in critical_review_dimension_keys()
+    }
+    return {
+        "verdict": "changes_requested",
+        "summary": "GitHub Codex requested follow-up changes.",
+        "blocking_issues": extract_github_review_blocking_issues(comment_body),
+        "critical_dimensions": dimensions,
+        "reviewed_commit_sha": reviewed_commit_sha,
+    }
+
+
+def build_github_reviewer_message(
+    state: dict,
+    turn_number: int,
+    *,
+    comment: dict | None = None,
+    request_comment: dict | None = None,
+    status: dict,
+    error: SupervisorRuntimeError | None = None,
+) -> str:
+    github_state = state["review_bridge"]["github"]
+    pr_label = github_state["pr_url"] or f"#{github_state.get('pr_number')}"
+    lines = [
+        "# Review",
+        "",
+        "## Verdict Summary",
+        "",
+        f"- Verdict: `{status['verdict']}`",
+        f"- Summary: {status['summary']}",
+        f"- PR: {pr_label}",
+        f"- Branch: `{github_state['branch']}`",
+        f"- Turn: `{turn_name(turn_number)}`",
+    ]
+    if request_comment is not None:
+        lines.append(f"- Review request comment ID: `{request_comment['id']}`")
+    if comment is not None:
+        lines.append(f"- Imported Codex review comment ID: `{comment['id']}`")
+    if status["blocking_issues"]:
+        lines.extend(["", "## Blocking Issues", ""])
+        lines.extend(f"- {item}" for item in status["blocking_issues"])
+    lines.extend(["", "## Imported Review Comment", ""])
+    if comment is not None:
+        lines.append(comment["body"].rstrip())
+    elif error is not None:
+        lines.append(f"GitHub review bridge failed during `{error.phase}`.")
+        lines.append("")
+        lines.append(str(error))
+    else:
+        lines.append("No review comment was imported.")
+    lines.extend(["", "## Independent Verification Performed", ""])
+    lines.append("- Resolved or created the PR through `gh` in the target repository.")
+    if request_comment is not None:
+        lines.append(
+            f"- Posted an `@codex` review request comment on PR #{github_state['pr_number']}."
+        )
+        lines.append(
+            f"- Waited {GITHUB_CODEX_INITIAL_WAIT_SECONDS // 60} minutes, then polled every {GITHUB_CODEX_POLL_INTERVAL_SECONDS // 60} minutes for a new Codex review comment."
+        )
+    if error is not None:
+        lines.append("- Surfaced the GitHub review bridge failure explicitly as a blocked reviewer artifact.")
+    else:
+        lines.append("- Stored the latest unconsumed Codex review comment in the reviewer turn artifacts for the next generator turn.")
+    lines.extend(["", "## Residual Risks or Follow-up Notes", ""])
+    if status["verdict"] == "changes_requested":
+        lines.append("- The next generator turn should triage the imported GitHub Codex findings just like internal reviewer feedback.")
+    elif status["verdict"] == "approved":
+        lines.append("- The external GitHub Codex reviewer reported no major blocking issues on the current PR head.")
+    else:
+        lines.append("- Review could not be completed because the external GitHub bridge did not reach a usable Codex comment.")
+    return "\n".join(lines).rstrip()
+
+
+def build_github_review_bridge_prompt(
+    state: dict,
+    turn_number: int,
+    *,
+    continue_context_block: str = "",
+    reuse_existing_request: bool,
+) -> str:
+    github_state = state["review_bridge"]["github"]
+    pr_label = github_state["pr_url"] or f"#{github_state.get('pr_number')}"
+    request_mode = "resume the existing review wait" if reuse_existing_request else "post a new `@codex` review request comment"
+    lines = [
+        "GitHub Codex PR review bridge",
+        "",
+        f"Turn: {turn_name(turn_number)}",
+        f"PR: {pr_label}",
+        f"Branch: {github_state['branch']}",
+        f"Base branch: {github_state['base_branch']}",
+        f"Action: {request_mode}",
+    ]
+    if continue_context_block:
+        lines.extend(["", continue_context_block])
+    return "\n".join(lines).rstrip()
+
 def assign_recent_codex_session_ids(run_dir: Path, state: dict) -> None:
     known_ids = set(state.get("session_index_snapshot_ids", []))
     created_at = state.get("created_at")
@@ -2255,7 +3262,7 @@ def assign_recent_codex_session_ids(run_dir: Path, state: dict) -> None:
         and (not isinstance(created_at, str) or entry["updated_at"] >= created_at)
     ]
     changed = False
-    for role in ("generator", "reviewer"):
+    for role in active_tmux_roles(state):
         role_state = state["roles"][role]
         if role_state.get("codex_session_id") or not available:
             continue
@@ -2289,15 +3296,18 @@ def write_failure_diagnostics(run_dir: Path, state: dict, error: SupervisorRunti
         },
     )
     save_json(failure_dir / "state_snapshot.json", state)
-    for role in ("generator", "reviewer"):
+    for role in ROLE_NAMES:
         tmux_name = state["roles"][role]["tmux_session"]
-        write_text(failure_dir / f"{role}.pane.txt", tmux_capture_joined_pane(tmux_name))
+        if role_uses_tmux(state, role) and isinstance(tmux_name, str) and tmux_name:
+            write_text(failure_dir / f"{role}.pane.txt", tmux_capture_joined_pane(tmux_name))
+        else:
+            write_text(failure_dir / f"{role}.pane.txt", "[tmux session not used]\n")
     return failure_dir
 
 
 def create_tmux_sessions(run_dir: Path, state: dict) -> None:
     repo_root = Path(state["repo_root"])
-    for role in ROLE_NAMES:
+    for role in active_tmux_roles(state):
         role_state = state["roles"][role]
         phase = f"{role}_session_start"
         role_state["last_wait_phase"] = phase
@@ -2348,7 +3358,7 @@ def ensure_role_session_ready(run_dir: Path, state: dict, role: str) -> None:
 
 def wait_for_tmux_sessions_ready(run_dir: Path, state: dict) -> None:
     launch_timeout_seconds = float(state["council_config"]["council"]["launch_timeout_seconds"])
-    for role in ROLE_NAMES:
+    for role in active_tmux_roles(state):
         state["roles"][role]["last_wait_phase"] = f"{role}_tmux_boot"
         save_run_state(run_dir, state)
         wait_for_tmux_prompt(
@@ -2381,6 +3391,7 @@ def run_generator_phase(
         current_turn_dir,
         turn_number,
         state["task_name"],
+        state=state,
         inspection=inspection,
         inline_context=inline_context,
         continue_context_block=continue_context_block,
@@ -2512,6 +3523,179 @@ def run_reviewer_phase(
     return reviewer_status
 
 
+def blocked_github_reviewer_status(summary: str, reviewed_commit_sha: str | None) -> dict:
+    dimensions = {
+        key: ("fail" if key == "failure_mode_and_fallback" else "uncertain")
+        for key in critical_review_dimension_keys()
+    }
+    return validate_reviewer_status(
+        {
+            "verdict": "blocked",
+            "summary": summary,
+            "blocking_issues": [summary],
+            "critical_dimensions": dimensions,
+            "reviewed_commit_sha": reviewed_commit_sha,
+        }
+    )
+
+
+def run_github_codex_review_phase(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_number: int,
+    current_turn_dir: Path,
+    *,
+    continue_context_block: str = "",
+) -> dict:
+    github_state = state["review_bridge"]["github"]
+    reuse_existing_request = (
+        github_state.get("last_request_turn") == turn_name(turn_number)
+        and isinstance(github_state.get("last_request_comment_id"), int)
+    )
+    reviewer_prompt = build_github_review_bridge_prompt(
+        state,
+        turn_number,
+        continue_context_block=continue_context_block,
+        reuse_existing_request=reuse_existing_request,
+    )
+    write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
+    state["status"] = "waiting_reviewer"
+    state["roles"]["reviewer"]["last_wait_phase"] = "github_review_bridge"
+    save_run_state(run_dir, state)
+    save_turn_metadata(
+        current_turn_dir,
+        turn_number,
+        "reviewer_bridge_started",
+        role="reviewer",
+        details={"mode": "github_pr_codex", "reused_request": reuse_existing_request},
+    )
+    append_run_event(
+        run_dir,
+        "reviewer_bridge_started",
+        turn_number=turn_number,
+        role="reviewer",
+        details={"mode": "github_pr_codex", "reused_request": reuse_existing_request},
+    )
+
+    request_comment = None
+    reviewed_commit_sha = github_state.get("last_observed_head_sha")
+    try:
+        pr_info = ensure_github_pr_ready(run_dir, state, task_root, turn_number)
+        reviewed_commit_sha = pr_info["head_ref_oid"]
+        if reuse_existing_request:
+            request_comment = {
+                "body": None,
+                "created_at": github_state["last_request_comment_created_at"],
+                "html_url": None,
+                "id": github_state["last_request_comment_id"],
+            }
+        else:
+            request_comment = post_github_pr_review_request_comment(
+                run_dir,
+                state,
+                turn_number,
+                reviewed_commit_sha,
+            )
+        comment = wait_for_new_github_codex_review_comment(
+            run_dir,
+            state,
+            turn_number,
+            timeout_seconds=float(state["council_config"]["council"]["turn_timeout_seconds"]),
+        )
+        reviewer_status = validate_reviewer_status(
+            github_reviewer_status_from_comment(comment["body"], reviewed_commit_sha)
+        )
+        reviewer_message = build_github_reviewer_message(
+            state,
+            turn_number,
+            comment=comment,
+            request_comment=request_comment,
+            status=reviewer_status,
+        )
+        write_final_message_artifact(current_turn_dir, "reviewer", reviewer_message)
+        save_json(role_status_path(current_turn_dir, "reviewer"), reviewer_status)
+        write_text(role_raw_output_path(current_turn_dir, "reviewer"), comment["body"])
+        save_json(
+            role_capture_status_path(current_turn_dir, "reviewer"),
+            {"status": "captured", "source": "github_pr_comment"},
+        )
+        save_turn_metadata(
+            current_turn_dir,
+            turn_number,
+            "reviewer_artifacts_valid",
+            role="reviewer",
+            details={"status_path": str(role_status_path(current_turn_dir, "reviewer"))},
+        )
+        append_run_event(
+            run_dir,
+            "reviewer_artifacts_valid",
+            turn_number=turn_number,
+            role="reviewer",
+            details={"source": "github_pr_codex"},
+        )
+        return reviewer_status
+    except SupervisorRuntimeError as error:
+        reviewer_status = blocked_github_reviewer_status(str(error), reviewed_commit_sha)
+        reviewer_message = build_github_reviewer_message(
+            state,
+            turn_number,
+            request_comment=request_comment,
+            status=reviewer_status,
+            error=error,
+        )
+        write_final_message_artifact(current_turn_dir, "reviewer", reviewer_message)
+        save_json(role_status_path(current_turn_dir, "reviewer"), reviewer_status)
+        write_text(
+            role_raw_output_path(current_turn_dir, "reviewer"),
+            f"[github review bridge blocked]\n{error.phase}: {error}\n",
+        )
+        save_json(
+            role_capture_status_path(current_turn_dir, "reviewer"),
+            {"status": "captured", "source": "github_pr_bridge_error"},
+        )
+        append_run_event(
+            run_dir,
+            "github_review_blocked",
+            turn_number=turn_number,
+            role="reviewer",
+            details={"phase": error.phase, "summary": str(error)},
+        )
+        return reviewer_status
+
+
+def run_review_phase(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_number: int,
+    current_turn_dir: Path,
+    *,
+    inline_context: bool,
+    continue_context_block: str = "",
+    bootstrap_review_phase: bool = False,
+) -> dict:
+    if review_bridge_mode(state) == "github_pr_codex":
+        return run_github_codex_review_phase(
+            run_dir,
+            state,
+            task_root,
+            turn_number,
+            current_turn_dir,
+            continue_context_block=continue_context_block,
+        )
+    return run_reviewer_phase(
+        run_dir,
+        state,
+        task_root,
+        turn_number,
+        current_turn_dir,
+        inline_context=inline_context,
+        continue_context_block=continue_context_block,
+        bootstrap_review_phase=bootstrap_review_phase,
+    )
+
+
 def supervisor_loop_from(
     run_dir: Path,
     state: dict,
@@ -2579,7 +3763,8 @@ def supervisor_loop_from(
                     details={"summary": generator_status["summary"]},
                 )
                 return
-            reviewer_status = run_reviewer_phase(
+            record_current_git_state(run_dir, state)
+            reviewer_status = run_review_phase(
                 run_dir,
                 state,
                 task_root,
@@ -2589,7 +3774,7 @@ def supervisor_loop_from(
                 bootstrap_review_phase=state.get("bootstrap_phase") == "fork_to_review",
             )
         else:
-            reviewer_status = run_reviewer_phase(
+            reviewer_status = run_review_phase(
                 run_dir,
                 state,
                 task_root,
@@ -2725,6 +3910,7 @@ def start_run(args: argparse.Namespace) -> int:
     task_name = validate_task_name(args.task_name)
     target_input = Path(args.dir or Path.cwd()).resolve()
     repo_root, is_git = resolve_target_root(target_input, allow_non_git=args.allow_non_git)
+    review_mode = normalize_review_mode(args)
 
     task_root = task_root_for(repo_root, task_name)
     if not task_root.exists():
@@ -2739,6 +3925,10 @@ def start_run(args: argparse.Namespace) -> int:
         if session_id and not find_codex_session_entry(session_id):
             raise SystemExit(f"unknown fork parent session id: {session_id}")
     fork_enabled = has_any_fork_parent(generator_fork_session_id, reviewer_fork_session_id)
+    if review_mode == "github_pr_codex" and fork_enabled:
+        raise SystemExit("github_pr_codex review mode does not support forked role sessions")
+    if review_mode == "github_pr_codex" and not is_git:
+        raise SystemExit("github_pr_codex review mode requires a git worktree")
     if not is_git and fork_enabled:
         raise SystemExit("fork start requires a git worktree and cannot be used with --allow-non-git")
     validate_task_workspace_for_start(task_root, inspection)
@@ -2759,6 +3949,7 @@ def start_run(args: argparse.Namespace) -> int:
         )
     else:
         git_state = None
+    review_bridge = build_review_bridge_state(repo_root, task_root, git_state, args)
 
     run_id = args.run_id or run_id_value()
     run_dir = task_root / "runs" / run_id
@@ -2767,7 +3958,11 @@ def start_run(args: argparse.Namespace) -> int:
     ensure_dir(run_dir / "turns")
 
     generator_session = args.generator_session or build_tmux_session_name(task_name, "generator", run_id)
-    reviewer_session = args.reviewer_session or build_tmux_session_name(task_name, "reviewer", run_id)
+    reviewer_session = (
+        args.reviewer_session or build_tmux_session_name(task_name, "reviewer", run_id)
+        if review_mode == "internal"
+        else None
+    )
     session_index_snapshot_ids = [entry["id"] for entry in read_codex_session_index()]
 
     state = create_run_state(
@@ -2780,6 +3975,7 @@ def start_run(args: argparse.Namespace) -> int:
         git_state=git_state,
         generator_session=generator_session,
         reviewer_session=reviewer_session,
+        review_bridge=review_bridge,
         generator_bootstrap_mode="fork" if generator_fork_session_id else "fresh",
         reviewer_bootstrap_mode="fork" if reviewer_fork_session_id else "fresh",
         generator_fork_parent_session_id=generator_fork_session_id,
@@ -2797,12 +3993,22 @@ def start_run(args: argparse.Namespace) -> int:
         print(f"run_id: {run_id}")
         print(f"run_dir: {run_dir}")
         print(f"generator tmux: {generator_session}")
-        print(f"reviewer tmux: {reviewer_session}")
         print(f"attach generator: tmux attach -t {generator_session}")
-        print(f"attach reviewer: tmux attach -t {reviewer_session}")
+        if isinstance(reviewer_session, str):
+            print(f"reviewer tmux: {reviewer_session}")
+            print(f"attach reviewer: tmux attach -t {reviewer_session}")
+        elif review_mode == "github_pr_codex":
+            github_state = state["review_bridge"]["github"]
+            print("reviewer bridge: github_pr_codex")
+            print(f"review branch: {github_state['branch']}")
+            if github_state.get("pr_url"):
+                print(f"review pr: {github_state['pr_url']}")
 
         wait_for_tmux_sessions_ready(run_dir, state)
-        print("both Codex TUI sessions are ready")
+        if review_mode == "github_pr_codex":
+            print("generator Codex TUI session is ready")
+        else:
+            print("both Codex TUI sessions are ready")
         supervisor_loop_from(
             run_dir,
             state,
@@ -3007,6 +4213,8 @@ def determine_continue_target(run_dir: Path, state: dict) -> tuple[Path, int, st
     if continuation_state == "reviewer_needs_human":
         return latest_turn, int(latest_turn.name) + 1, "reviewer", True, continuation_state
     if continuation_state == "reviewer_blocked":
+        if review_bridge_mode(state) == "github_pr_codex":
+            return latest_turn, int(latest_turn.name), "reviewer", False, continuation_state
         return latest_turn, int(latest_turn.name) + 1, "reviewer", True, continuation_state
     if continuation_state == "generator_needs_human":
         return latest_turn, int(latest_turn.name) + 1, "generator", True, continuation_state
@@ -3112,6 +4320,10 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--fork-session-id")
     start.add_argument("--generator-fork-session-id")
     start.add_argument("--reviewer-fork-session-id")
+    start.add_argument("--review-mode", choices=["internal", "github_pr_codex"], default="internal")
+    start.add_argument("--github-pr")
+    start.add_argument("--github-branch")
+    start.add_argument("--github-base")
     start.add_argument("--start-role", choices=["auto", "generator", "reviewer"], default="auto")
     start.set_defaults(func=start_run)
 

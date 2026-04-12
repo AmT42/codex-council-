@@ -10,6 +10,8 @@ Turn {{turn_name}}.
 Read these files directly before coding:
 {{docs_to_read_block}}
 
+{{review_bridge_block}}
+
 {{generator_objective_block}}
 
 If you changed repo-tracked files in this turn, create a git commit before writing the generator artifacts for this turn.

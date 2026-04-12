@@ -230,6 +230,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 turn_dir,
                 1,
                 "demo-task",
+                state={"review_bridge": {"mode": "internal"}},
                 inspection=inspection,
                 inline_context=True,
             )
@@ -239,6 +240,35 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn(str(task_root / MODULE.SPEC_FILENAME), prompt)
             self.assertIn("classify each review point as `agree`, `disagree`, or `uncertain`", prompt)
             self.assertNotIn("Shared council brief from", prompt)
+
+    def test_build_generator_prompt_mentions_github_review_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix the parser bug.")
+            inspection = MODULE.inspect_task_workspace(task_root)
+            prompt = MODULE.build_generator_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                "demo-task",
+                state={
+                    "review_bridge": {
+                        "mode": "github_pr_codex",
+                        "github": {
+                            "base_branch": "main",
+                            "branch": "feature/demo",
+                            "pr_url": "https://github.com/acme/repo/pull/123",
+                        },
+                    }
+                },
+                inspection=inspection,
+                inline_context=True,
+            )
+            self.assertIn("GitHub PR review mode is enabled.", prompt)
+            self.assertIn("feature/demo", prompt)
+            self.assertIn("https://github.com/acme/repo/pull/123", prompt)
 
     def test_build_reviewer_initial_prompt_includes_contract_checklist_only_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -421,6 +451,325 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 MODULE.start_run(args)
 
+    def test_build_review_bridge_state_reuses_existing_pr_from_arg(self) -> None:
+        args = argparse.Namespace(
+            review_mode="github_pr_codex",
+            github_pr="https://github.com/acme/repo/pull/42",
+            github_branch=None,
+            github_base=None,
+            start_role="auto",
+        )
+        with mock.patch.object(
+            MODULE,
+            "load_github_repo_metadata",
+            return_value={
+                "default_branch": "main",
+                "name_with_owner": "acme/repo",
+                "owner": "acme",
+                "repo": "repo",
+                "url": "https://github.com/acme/repo",
+            },
+        ), mock.patch.object(
+            MODULE,
+            "resolve_github_pr_reference",
+            return_value={
+                "number": 42,
+                "url": "https://github.com/acme/repo/pull/42",
+                "head_ref_name": "feature/pr",
+                "base_ref_name": "main",
+                "head_ref_oid": "abc123",
+                "title": "Fix issue",
+            },
+        ):
+            state = MODULE.build_review_bridge_state(
+                Path("/repo"),
+                Path("/repo/.codex-council/demo-task"),
+                {"current_branch": "local-branch"},
+                args,
+            )
+        self.assertEqual(state["mode"], "github_pr_codex")
+        self.assertEqual(state["github"]["pr_number"], 42)
+        self.assertEqual(state["github"]["branch"], "feature/pr")
+        self.assertEqual(state["github"]["base_branch"], "main")
+
+    def test_ensure_github_pr_ready_creates_pr_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            state = {
+                "run_id": "run-1",
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "base_branch": "main",
+                        "branch": "feature/demo",
+                        "branch_source": "auto",
+                        "last_observed_head_sha": None,
+                        "pr_number": None,
+                        "pr_url": None,
+                        "review_wait": {
+                            "deadline_at": None,
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": None,
+                            "poll_count": 0,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": None,
+                        },
+                    },
+                },
+            }
+            with mock.patch.object(
+                MODULE,
+                "sync_github_review_branch_state",
+                return_value=("feature/demo", "deadbeef"),
+            ), mock.patch.object(
+                MODULE,
+                "find_existing_github_pr_for_branch",
+                return_value=None,
+            ), mock.patch.object(
+                MODULE,
+                "resolve_pushed_branch_head_sha",
+                return_value="deadbeef",
+            ) as pushed, mock.patch.object(
+                MODULE,
+                "create_github_pr",
+                return_value={
+                    "number": 7,
+                    "url": "https://github.com/acme/repo/pull/7",
+                    "head_ref_name": "feature/demo",
+                    "base_ref_name": "main",
+                    "head_ref_oid": "deadbeef",
+                    "title": "Fix bug",
+                },
+            ) as create_pr:
+                pr_info = MODULE.ensure_github_pr_ready(run_dir, state, task_root, 1)
+            pushed.assert_called_once()
+            create_pr.assert_called_once()
+            self.assertEqual(pr_info["number"], 7)
+            self.assertEqual(state["review_bridge"]["github"]["pr_number"], 7)
+            self.assertEqual(state["review_bridge"]["github"]["pr_url"], "https://github.com/acme/repo/pull/7")
+
+    def test_post_github_pr_review_request_comment_records_comment_id_and_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            state = {
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "run_id": "run-1",
+                "task_name": "demo-task",
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "branch": "feature/demo",
+                        "pr_number": 9,
+                        "repo_owner": "acme",
+                        "repo": "repo",
+                    },
+                },
+            }
+            with mock.patch.object(
+                MODULE,
+                "gh_json",
+                return_value={
+                    "id": 101,
+                    "created_at": "2026-04-12T01:00:00Z",
+                    "html_url": "https://github.com/acme/repo/pull/9#issuecomment-101",
+                },
+            ):
+                request_comment = MODULE.post_github_pr_review_request_comment(run_dir, state, 2, "deadbeef")
+            self.assertEqual(request_comment["id"], 101)
+            self.assertTrue(request_comment["body"].startswith("@codex review"))
+            self.assertEqual(state["review_bridge"]["github"]["last_request_comment_id"], 101)
+            self.assertEqual(state["review_bridge"]["github"]["last_request_turn"], "0002")
+
+    def test_select_latest_unconsumed_github_codex_review_comment_ignores_consumed_comments(self) -> None:
+        comments = [
+            {"id": 10, "created_at": "2026-04-12T00:00:00Z", "body": "@codex review"},
+            {"id": 11, "created_at": "2026-04-12T00:10:00Z", "body": "Codex Review: First review"},
+            {"id": 12, "created_at": "2026-04-12T00:20:00Z", "body": "Codex Review: Latest review"},
+        ]
+        selected = MODULE.select_latest_unconsumed_github_codex_review_comment(
+            comments,
+            request_comment_id=10,
+            request_comment_created_at="2026-04-12T00:00:00Z",
+            last_consumed_comment_id=11,
+        )
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected["id"], 12)
+
+    def test_run_github_codex_review_phase_stops_on_terminal_no_blocker_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            turn_dir = run_dir / "turns" / "0001"
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            state = {
+                "council_config": {"council": {"turn_timeout_seconds": 1800}},
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "base_branch": "main",
+                        "branch": "feature/demo",
+                        "last_request_comment_created_at": None,
+                        "last_request_comment_id": None,
+                        "last_request_turn": None,
+                        "last_observed_head_sha": "deadbeef",
+                        "pr_number": 9,
+                        "pr_url": "https://github.com/acme/repo/pull/9",
+                        "repo": "repo",
+                        "repo_owner": "acme",
+                        "review_wait": {
+                            "deadline_at": None,
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": None,
+                            "poll_count": 0,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": None,
+                        },
+                    },
+                },
+                "roles": {"reviewer": {"last_wait_phase": None}},
+                "status": "booting",
+            }
+            with mock.patch.object(
+                MODULE,
+                "ensure_github_pr_ready",
+                return_value={
+                    "number": 9,
+                    "url": "https://github.com/acme/repo/pull/9",
+                    "head_ref_name": "feature/demo",
+                    "base_ref_name": "main",
+                    "head_ref_oid": "deadbeef",
+                    "title": "Fix bug",
+                },
+            ), mock.patch.object(
+                MODULE,
+                "post_github_pr_review_request_comment",
+                return_value={
+                    "id": 101,
+                    "created_at": "2026-04-12T01:00:00Z",
+                    "html_url": None,
+                    "body": "@codex review",
+                },
+            ), mock.patch.object(
+                MODULE,
+                "wait_for_new_github_codex_review_comment",
+                return_value={
+                    "id": 202,
+                    "created_at": "2026-04-12T01:10:00Z",
+                    "body": "Codex Review: Didn't find any major issues. Keep it up!\nAll good.",
+                },
+            ):
+                reviewer_status = MODULE.run_github_codex_review_phase(run_dir, state, task_root, 1, turn_dir)
+            self.assertEqual(reviewer_status["verdict"], "approved")
+            saved_status = MODULE.load_json(turn_dir / "reviewer" / "status.json")
+            self.assertEqual(saved_status["verdict"], "approved")
+            reviewer_message = (turn_dir / "reviewer" / "message.md").read_text(encoding="utf-8")
+            self.assertIn("Didn't find any major issues", reviewer_message)
+
+    def test_run_github_codex_review_phase_surfaces_timeout_as_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            turn_dir = run_dir / "turns" / "0001"
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            state = {
+                "council_config": {"council": {"turn_timeout_seconds": 1800}},
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "base_branch": "main",
+                        "branch": "feature/demo",
+                        "last_request_comment_created_at": None,
+                        "last_request_comment_id": None,
+                        "last_request_turn": None,
+                        "last_observed_head_sha": "deadbeef",
+                        "pr_number": 9,
+                        "pr_url": "https://github.com/acme/repo/pull/9",
+                        "repo": "repo",
+                        "repo_owner": "acme",
+                        "review_wait": {
+                            "deadline_at": None,
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": None,
+                            "poll_count": 0,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": None,
+                        },
+                    },
+                },
+                "roles": {"reviewer": {"last_wait_phase": None}},
+                "status": "booting",
+            }
+            error = MODULE.SupervisorRuntimeError("github_review_timeout", "timed out waiting for Codex", role="reviewer")
+            with mock.patch.object(
+                MODULE,
+                "ensure_github_pr_ready",
+                return_value={
+                    "number": 9,
+                    "url": "https://github.com/acme/repo/pull/9",
+                    "head_ref_name": "feature/demo",
+                    "base_ref_name": "main",
+                    "head_ref_oid": "deadbeef",
+                    "title": "Fix bug",
+                },
+            ), mock.patch.object(
+                MODULE,
+                "post_github_pr_review_request_comment",
+                return_value={
+                    "id": 101,
+                    "created_at": "2026-04-12T01:00:00Z",
+                    "html_url": None,
+                    "body": "@codex review",
+                },
+            ), mock.patch.object(
+                MODULE,
+                "wait_for_new_github_codex_review_comment",
+                side_effect=error,
+            ):
+                reviewer_status = MODULE.run_github_codex_review_phase(run_dir, state, task_root, 1, turn_dir)
+            self.assertEqual(reviewer_status["verdict"], "blocked")
+            self.assertIn("timed out waiting for Codex", reviewer_status["summary"])
+            reviewer_message = (turn_dir / "reviewer" / "message.md").read_text(encoding="utf-8")
+            self.assertIn("GitHub review bridge failed", reviewer_message)
+
+    def test_determine_continue_target_reuses_same_turn_for_github_review_bridge_blocked_reviewer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            latest_turn = run_dir / "turns" / "0001"
+            latest_turn.mkdir(parents=True)
+            with mock.patch.object(
+                MODULE,
+                "classify_continuation_state",
+                return_value=(latest_turn, "reviewer_blocked", {}),
+            ):
+                result = MODULE.determine_continue_target(
+                    run_dir,
+                    {"review_bridge": {"mode": "github_pr_codex"}},
+                )
+            self.assertEqual(result, (latest_turn, 1, "reviewer", False, "reviewer_blocked"))
+
+    def test_create_tmux_sessions_skips_reviewer_for_github_review_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            state = {
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {"mode": "github_pr_codex"},
+                "roles": {
+                    "generator": {"last_wait_phase": None, "tmux_session": "gen"},
+                    "reviewer": {"last_wait_phase": None, "tmux_session": "rev"},
+                },
+                "council_config": self.build_council_config(),
+            }
+            with mock.patch.object(MODULE, "tmux_new_session") as tmux_new_session:
+                MODULE.create_tmux_sessions(run_dir, state)
+            tmux_new_session.assert_called_once()
+            self.assertEqual(tmux_new_session.call_args.args[0], "gen")
+
     def test_pause_for_human_mentions_present_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
@@ -468,13 +817,31 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("spec:", rendered)
             self.assertIn("contract:", rendered)
 
-    def test_build_parser_exposes_write_and_start_role_and_shared_fork(self) -> None:
+    def test_build_parser_exposes_write_start_role_shared_fork_and_github_review_args(self) -> None:
         parser = MODULE.build_parser()
         write_args = parser.parse_args(["write", "task", "demo-task", "--body", "Fix it"])
-        start_args = parser.parse_args(["start", "demo-task", "--fork-session-id", "id", "--start-role", "reviewer"])
+        start_args = parser.parse_args(
+            [
+                "start",
+                "demo-task",
+                "--fork-session-id",
+                "id",
+                "--start-role",
+                "reviewer",
+                "--review-mode",
+                "github_pr_codex",
+                "--github-pr",
+                "42",
+                "--github-base",
+                "main",
+            ]
+        )
         self.assertEqual(write_args.command, "write")
         self.assertEqual(start_args.fork_session_id, "id")
         self.assertEqual(start_args.start_role, "reviewer")
+        self.assertEqual(start_args.review_mode, "github_pr_codex")
+        self.assertEqual(start_args.github_pr, "42")
+        self.assertEqual(start_args.github_base, "main")
 
 
 if __name__ == "__main__":
