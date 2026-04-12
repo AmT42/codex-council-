@@ -3794,13 +3794,10 @@ def classify_github_pr_review_state_for_current_head(
             "request_comment": latest_request,
             "state": "waiting_for_codex_reply",
         }
-    if last_consumed_comment_id is not None and latest_reply["id"] == last_consumed_comment_id:
-        return {
-            "current_head_started_at": current_head_started_at,
-            "reply_comment": None,
-            "request_comment": None,
-            "state": "needs_request_comment",
-        }
+    # A consumed reply can still be the authoritative current-head state on
+    # continuation when reviewer artifacts need to be rebuilt. Consumption only
+    # suppresses polling for "new" replies; it does not mean the current head
+    # lost its request/reply pair or needs another external @codex post.
     return {
         "current_head_started_at": current_head_started_at,
         "reply_comment": latest_reply,

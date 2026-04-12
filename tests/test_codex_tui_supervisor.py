@@ -953,6 +953,29 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         assert review_state["reply_comment"] is not None
         self.assertEqual(review_state["reply_comment"]["id"], 10)
 
+    def test_classify_github_pr_review_state_for_current_head_keeps_consumed_current_head_reply_ready(self) -> None:
+        review_state = MODULE.classify_github_pr_review_state_for_current_head(
+            [
+                {
+                    "id": 9,
+                    "created_at": "2026-04-12T00:00:00Z",
+                    "body": "@codex",
+                },
+                {
+                    "id": 10,
+                    "created_at": "2026-04-12T00:10:00Z",
+                    "body": "Codex Review: Ready to import.",
+                },
+            ],
+            current_head_started_at="2026-04-12T00:00:00Z",
+            last_consumed_comment_id=10,
+        )
+        self.assertEqual(review_state["state"], "codex_reply_ready_to_ingest")
+        assert review_state["request_comment"] is not None
+        self.assertEqual(review_state["request_comment"]["id"], 9)
+        assert review_state["reply_comment"] is not None
+        self.assertEqual(review_state["reply_comment"]["id"], 10)
+
     def test_classify_github_pr_review_state_for_current_head_ignores_old_head_comments(self) -> None:
         review_state = MODULE.classify_github_pr_review_state_for_current_head(
             [
@@ -1513,6 +1536,99 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                         "body": "Codex Review: Ready to import.",
                     },
                 },
+            ), mock.patch.object(
+                MODULE,
+                "post_github_pr_review_request_comment",
+            ) as post_request, mock.patch.object(
+                MODULE,
+                "wait_for_new_github_codex_review_comment",
+            ) as wait_for_comment:
+                reviewer_status = MODULE.run_github_codex_review_phase(run_dir, state, task_root, 1, turn_dir)
+            self.assertEqual(reviewer_status["verdict"], "changes_requested")
+            post_request.assert_not_called()
+            wait_for_comment.assert_not_called()
+            reviewer_message = (turn_dir / "reviewer" / "message.md").read_text(encoding="utf-8")
+            self.assertIn("Imported Codex review comment ID: `202`", reviewer_message)
+            self.assertNotIn("Waited 10 minutes", reviewer_message)
+
+    def test_run_github_codex_review_phase_reuses_consumed_current_head_reply_without_duplicate_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            turn_dir = run_dir / "turns" / "0001"
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            state = {
+                "council_config": {"council": {"turn_timeout_seconds": 1800}},
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "base_branch": "main",
+                        "branch": "feature/demo",
+                        "current_head_started_at": "2026-04-12T01:00:00Z",
+                        "last_consumed_review_comment_body_sha256": None,
+                        "last_consumed_review_comment_created_at": "2026-04-12T01:04:00Z",
+                        "last_consumed_review_comment_id": 202,
+                        "last_consumed_review_turn": "0001",
+                        "last_request_comment_created_at": "2026-04-12T01:00:00Z",
+                        "last_request_comment_id": 101,
+                        "last_request_turn": "0001",
+                        "last_observed_head_sha": "deadbeef",
+                        "pr_created_at": "2026-04-12T00:00:00Z",
+                        "pr_head_sha": "deadbeef",
+                        "pr_number": 9,
+                        "pr_url": "https://github.com/acme/repo/pull/9",
+                        "repo": "repo",
+                        "repo_owner": "acme",
+                        "review_wait": {
+                            "deadline_at": None,
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": None,
+                            "poll_count": 0,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": None,
+                        },
+                    },
+                },
+                "roles": {"reviewer": {"last_wait_phase": None}},
+                "status": "booting",
+            }
+            with mock.patch.object(
+                MODULE,
+                "ensure_github_pr_ready",
+                return_value={
+                    "number": 9,
+                    "url": "https://github.com/acme/repo/pull/9",
+                    "head_ref_name": "feature/demo",
+                    "base_ref_name": "main",
+                    "head_ref_oid": "deadbeef",
+                    "title": "Fix bug",
+                },
+            ), mock.patch.object(
+                MODULE,
+                "list_github_pr_issue_comments",
+                return_value=[
+                    {
+                        "id": 101,
+                        "created_at": "2026-04-12T01:00:00Z",
+                        "body": "@codex",
+                    },
+                    {
+                        "id": 202,
+                        "created_at": "2026-04-12T01:04:00Z",
+                        "body": "Codex Review: Ready to import.",
+                    },
+                ],
+            ), mock.patch.object(
+                MODULE,
+                "list_github_pr_timeline_events",
+                return_value=[
+                    {
+                        "event": "committed",
+                        "created_at": "2026-04-12T01:00:00Z",
+                        "commit_id": "deadbeef",
+                    },
+                ],
             ), mock.patch.object(
                 MODULE,
                 "post_github_pr_review_request_comment",
