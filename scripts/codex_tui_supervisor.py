@@ -94,6 +94,7 @@ SESSION_RECOVERY_ATTEMPTS = 1
 RAW_OUTPUT_CAPTURE_TIMEOUT_SECONDS = 30.0
 TERMINAL_SUMMARY_BEGIN = "COUNCIL_TERMINAL_SUMMARY_BEGIN"
 TERMINAL_SUMMARY_END = "COUNCIL_TERMINAL_SUMMARY_END"
+TRANSITIONING_TURN_STATUS = "transitioning_turn"
 GITHUB_CODEX_REVIEW_PREFIX = "Codex Review:"
 GITHUB_CODEX_APPROVED_PREFIX = "Codex Review: Didn't find any major issues. Keep it up!"
 GITHUB_CODEX_INITIAL_WAIT_SECONDS = 600
@@ -2146,6 +2147,47 @@ def build_artifact_repair_prompt(
     ).rstrip()
 
 
+def begin_turn_transition(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    *,
+    from_turn: int,
+    to_turn: int,
+    from_role: str,
+    to_role: str,
+    source_verdict: str,
+) -> Path:
+    next_turn_dir = prepare_turn(run_dir, to_turn, task_root)
+    annotate_turn_continuation(
+        next_turn_dir,
+        continuation_source=source_verdict,
+        selected_role=to_role,
+        selected_turn=to_turn,
+    )
+    state["status"] = TRANSITIONING_TURN_STATUS
+    state["current_turn"] = from_turn
+    state["pending_turn"] = to_turn
+    state["pending_role"] = to_role
+    state["transition_source_verdict"] = source_verdict
+    state["stop_reason"] = None
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "turn_transition_started",
+        turn_number=from_turn,
+        role=from_role,
+        details={
+            "from_role": from_role,
+            "from_turn": turn_name(from_turn),
+            "source_verdict": source_verdict,
+            "to_role": to_role,
+            "to_turn": turn_name(to_turn),
+        },
+    )
+    return next_turn_dir
+
+
 def pause_for_human(
     run_dir: Path,
     state: dict,
@@ -2251,10 +2293,120 @@ def create_run_state(
         "session_index_snapshot_ids": [],
         "workspace_profile": workspace_profile,
         "bootstrap_phase": bootstrap_phase,
+        "pending_turn": None,
+        "pending_role": None,
+        "transition_source_verdict": None,
     }
 
 
+def validate_run_state(run_dir: Path, state: dict) -> None:
+    required_keys = {"status", "run_id", "task_root", "roles"}
+    if not required_keys.issubset(state.keys()):
+        return
+    status = state.get("status")
+    if not isinstance(status, str) or not status:
+        raise SupervisorRuntimeError(
+            "invalid_run_state",
+            "run state is missing a valid status",
+            details={"state": state},
+        )
+
+    pending_turn = state.get("pending_turn")
+    pending_role = state.get("pending_role")
+    if status != TRANSITIONING_TURN_STATUS and (pending_turn is not None or pending_role is not None):
+        raise SupervisorRuntimeError(
+            "invalid_run_state",
+            "pending turn metadata may only be present while transitioning turns",
+            details={
+                "status": status,
+                "pending_turn": pending_turn,
+                "pending_role": pending_role,
+            },
+        )
+
+    if status in {"booting", "approved", "blocked", "paused_needs_human", "max_turns_reached"}:
+        return
+
+    current_turn = state.get("current_turn")
+    if not isinstance(current_turn, int) or current_turn < 1:
+        raise SupervisorRuntimeError(
+            "invalid_run_state",
+            "run state current_turn must be a positive integer",
+            details={"status": status, "current_turn": current_turn},
+        )
+
+    current_turn_dir = turn_dir_for(run_dir, current_turn)
+    if status == TRANSITIONING_TURN_STATUS:
+        if not isinstance(pending_turn, int) or pending_turn <= current_turn:
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "transitioning turn state requires a pending_turn greater than current_turn",
+                details={
+                    "current_turn": current_turn,
+                    "pending_turn": pending_turn,
+                    "pending_role": pending_role,
+                },
+            )
+        if pending_role not in ROLE_NAMES:
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "transitioning turn state requires a pending_role of generator or reviewer",
+                details={"pending_role": pending_role},
+            )
+        if not turn_metadata_path(current_turn_dir).exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "transitioning turn state requires the current turn to be initialized",
+                details={
+                    "current_turn": current_turn,
+                    "current_turn_dir": str(current_turn_dir),
+                },
+            )
+        pending_turn_dir = turn_dir_for(run_dir, pending_turn)
+        if not turn_metadata_path(pending_turn_dir).exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "transitioning turn state requires the pending turn to be initialized",
+                details={
+                    "pending_turn": pending_turn,
+                    "pending_turn_dir": str(pending_turn_dir),
+                },
+            )
+        return
+
+    if status == "waiting_generator":
+        if not turn_metadata_path(current_turn_dir).exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "waiting_generator requires the current turn to be initialized",
+                details={"current_turn_dir": str(current_turn_dir)},
+            )
+        if not role_prompt_path(current_turn_dir, "generator").exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "waiting_generator requires a generator prompt artifact for the current turn",
+                details={"prompt_path": str(role_prompt_path(current_turn_dir, "generator"))},
+            )
+        return
+
+    if status == "waiting_reviewer":
+        if not turn_metadata_path(current_turn_dir).exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "waiting_reviewer requires the current turn to be initialized",
+                details={"current_turn_dir": str(current_turn_dir)},
+            )
+        if not role_prompt_path(current_turn_dir, "reviewer").exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "waiting_reviewer requires a reviewer prompt artifact for the current turn",
+                details={"prompt_path": str(role_prompt_path(current_turn_dir, "reviewer"))},
+            )
+        return
+
+
 def save_run_state(run_dir: Path, state: dict) -> None:
+    validate_run_state(run_dir, state)
     save_json(run_dir / "state.json", state)
 
 
@@ -3125,8 +3277,14 @@ def wait_for_new_github_codex_review_comment(
 
     deadline = parse_utc_timestamp(wait_state.get("deadline_at")) or (started_at_epoch + timeout_seconds)
     while True:
-        now_epoch = time.time()
-        if now_epoch >= deadline:
+        last_polled_at_epoch = parse_utc_timestamp(wait_state.get("last_polled_at"))
+        if last_polled_at_epoch is not None:
+            next_poll_epoch = last_polled_at_epoch + GITHUB_CODEX_POLL_INTERVAL_SECONDS
+        else:
+            initial_wait_anchor = request_created_at_epoch or started_at_epoch
+            next_poll_epoch = initial_wait_anchor + GITHUB_CODEX_INITIAL_WAIT_SECONDS
+
+        if next_poll_epoch > deadline:
             raise SupervisorRuntimeError(
                 "github_review_timeout",
                 f"no new Codex review comment appeared on PR #{pr_number} within {int(timeout_seconds)} seconds",
@@ -3139,14 +3297,9 @@ def wait_for_new_github_codex_review_comment(
                 },
             )
 
-        last_polled_at_epoch = parse_utc_timestamp(wait_state.get("last_polled_at"))
-        if last_polled_at_epoch is not None:
-            next_poll_epoch = last_polled_at_epoch + GITHUB_CODEX_POLL_INTERVAL_SECONDS
-        else:
-            initial_wait_anchor = request_created_at_epoch or started_at_epoch
-            next_poll_epoch = initial_wait_anchor + GITHUB_CODEX_INITIAL_WAIT_SECONDS
+        now_epoch = time.time()
         if now_epoch < next_poll_epoch:
-            time.sleep(min(next_poll_epoch - now_epoch, deadline - now_epoch))
+            time.sleep(next_poll_epoch - now_epoch)
             continue
 
         polled_at = time.time()
@@ -3443,6 +3596,9 @@ def run_generator_phase(
     repo_root = Path(state["repo_root"])
     inspection = inspect_task_workspace(task_root)
     state["workspace_profile"] = inspection["profile"]
+    was_transitioning = state.get("status") == TRANSITIONING_TURN_STATUS
+    transition_from_turn = state.get("current_turn")
+    transition_source_verdict = state.get("transition_source_verdict")
     turn_timeout_seconds = float(state["council_config"]["council"]["turn_timeout_seconds"])
     generator_prompt = build_generator_turn_prompt(
         repo_root,
@@ -3457,9 +3613,27 @@ def run_generator_phase(
         fork_context_block=format_fork_context_block(state["roles"]["generator"]),
     )
     write_prompt_artifact(current_turn_dir, "generator", generator_prompt)
+    state["current_turn"] = turn_number
+    state["pending_turn"] = None
+    state["pending_role"] = None
+    state["transition_source_verdict"] = None
     state["status"] = "waiting_generator"
     state["roles"]["generator"]["last_wait_phase"] = "generator_prompt_ready"
     save_run_state(run_dir, state)
+    if was_transitioning and isinstance(transition_from_turn, int):
+        append_run_event(
+            run_dir,
+            "turn_transition_completed",
+            turn_number=turn_number,
+            role="generator",
+            details={
+                "from_role": "reviewer",
+                "from_turn": turn_name(transition_from_turn),
+                "source_verdict": transition_source_verdict,
+                "to_role": "generator",
+                "to_turn": turn_name(turn_number),
+            },
+        )
     save_turn_metadata(current_turn_dir, turn_number, "generator_prompt_sent", role="generator")
     append_run_event(
         run_dir,
@@ -3535,6 +3709,10 @@ def run_reviewer_phase(
         ),
     )
     write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
+    state["current_turn"] = turn_number
+    state["pending_turn"] = None
+    state["pending_role"] = None
+    state["transition_source_verdict"] = None
     state["status"] = "waiting_reviewer"
     state["roles"]["reviewer"]["last_wait_phase"] = "reviewer_prompt_ready"
     save_run_state(run_dir, state)
@@ -3619,6 +3797,10 @@ def run_github_codex_review_phase(
         reuse_existing_request=reuse_existing_request,
     )
     write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
+    state["current_turn"] = turn_number
+    state["pending_turn"] = None
+    state["pending_role"] = None
+    state["transition_source_verdict"] = None
     state["status"] = "waiting_reviewer"
     state["roles"]["reviewer"]["last_wait_phase"] = "github_review_bridge"
     save_run_state(run_dir, state)
@@ -3772,14 +3954,12 @@ def supervisor_loop_from(
 
     for turn_number in range(start_turn, last_turn + 1):
         state["workspace_profile"] = inspect_task_workspace(task_root)["profile"]
-        state["current_turn"] = turn_number
         if turn_number == start_turn and reuse_existing_turn_for_first:
             current_turn_dir = turn_dir_for(run_dir, turn_number)
             ensure_dir(role_dir_for(current_turn_dir, "generator"))
             ensure_dir(role_dir_for(current_turn_dir, "reviewer"))
         else:
             current_turn_dir = prepare_turn(run_dir, turn_number, task_root)
-        save_run_state(run_dir, state)
 
         continue_context_block = first_continue_context_block if turn_number == start_turn else ""
 
@@ -3897,7 +4077,19 @@ def supervisor_loop_from(
         if reviewer_status["verdict"] == "changes_requested":
             if state.get("bootstrap_phase") == "fork_to_review":
                 state["bootstrap_phase"] = None
-                save_run_state(run_dir, state)
+            next_turn_number = turn_number + 1
+            if next_turn_number > last_turn:
+                break
+            begin_turn_transition(
+                run_dir,
+                state,
+                task_root,
+                from_turn=turn_number,
+                to_turn=next_turn_number,
+                from_role="reviewer",
+                to_role="generator",
+                source_verdict="reviewer_changes_requested",
+            )
             save_turn_metadata(
                 current_turn_dir,
                 turn_number,
@@ -4311,22 +4503,51 @@ def continue_run(args: argparse.Namespace) -> int:
     if state.get("bootstrap_phase") == "fork_to_review" and prior_status == "reviewer_changes_requested":
         state["bootstrap_phase"] = None
 
-    state["current_turn"] = turn_number
+    if create_new_turn:
+        state["status"] = TRANSITIONING_TURN_STATUS
+        state["current_turn"] = int(latest_turn.name)
+        state["pending_turn"] = turn_number
+        state["pending_role"] = role
+        state["transition_source_verdict"] = prior_status
+    else:
+        state["current_turn"] = turn_number
+        state["pending_turn"] = None
+        state["pending_role"] = None
+        state["transition_source_verdict"] = None
+        state["status"] = "waiting_generator" if role == "generator" else "waiting_reviewer"
     state["stop_reason"] = None
-    save_run_state(run_dir, state)
+    target_turn_dir = (
+        begin_turn_transition(
+            run_dir,
+            state,
+            task_root,
+            from_turn=int(latest_turn.name),
+            to_turn=turn_number,
+            from_role=(
+                "reviewer"
+                if prior_status.startswith("reviewer_")
+                else "generator"
+            ),
+            to_role=role,
+            source_verdict=prior_status,
+        )
+        if create_new_turn
+        else turn_dir_for(run_dir, turn_number)
+    )
+    if not create_new_turn:
+        save_run_state(run_dir, state)
+        annotate_turn_continuation(
+            target_turn_dir,
+            continuation_source=prior_status,
+            selected_role=role,
+            selected_turn=turn_number,
+        )
     append_run_event(
         run_dir,
         "run_continued",
         turn_number=turn_number,
         role=role,
         details={"prior_status": prior_status},
-    )
-    target_turn_dir = prepare_turn(run_dir, turn_number, task_root) if create_new_turn else turn_dir_for(run_dir, turn_number)
-    annotate_turn_continuation(
-        target_turn_dir,
-        continuation_source=prior_status,
-        selected_role=role,
-        selected_turn=turn_number,
     )
     supervisor_loop_from(
         run_dir,

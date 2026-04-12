@@ -716,6 +716,120 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertEqual(sleeps, [])
             self.assertEqual(state["review_bridge"]["github"]["review_wait"]["poll_count"], 1)
 
+    def test_wait_for_new_github_codex_review_comment_accepts_deadline_boundary_poll(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            request_created_at = "2026-04-12T01:00:00Z"
+            now = [MODULE.parse_utc_timestamp(request_created_at)]
+            sleeps: list[float] = []
+
+            def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+                now[0] += seconds
+
+            state = {
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "last_consumed_review_comment_id": None,
+                        "last_request_comment_created_at": request_created_at,
+                        "last_request_comment_id": 101,
+                        "pr_number": 9,
+                        "repo": "repo",
+                        "repo_owner": "acme",
+                        "review_wait": {
+                            "deadline_at": None,
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": None,
+                            "poll_count": 0,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": None,
+                        },
+                    },
+                },
+            }
+            comment = {
+                "id": 202,
+                "created_at": "2026-04-12T01:30:00Z",
+                "body": "Codex Review: Final window reply.",
+            }
+            with mock.patch.object(MODULE.time, "time", side_effect=lambda: now[0]), mock.patch.object(
+                MODULE.time,
+                "sleep",
+                side_effect=fake_sleep,
+            ), mock.patch.object(
+                MODULE,
+                "list_github_pr_issue_comments",
+                side_effect=[[], [], [], [], [comment]],
+            ):
+                result = MODULE.wait_for_new_github_codex_review_comment(
+                    run_dir,
+                    state,
+                    1,
+                    timeout_seconds=1800,
+                )
+            self.assertEqual(result["id"], 202)
+            self.assertEqual(sleeps, [600, 300, 300, 300, 300])
+            self.assertEqual(state["review_bridge"]["github"]["review_wait"]["poll_count"], 5)
+
+    def test_wait_for_new_github_codex_review_comment_polls_when_timeout_equals_initial_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            request_created_at = "2026-04-12T01:00:00Z"
+            now = [MODULE.parse_utc_timestamp(request_created_at)]
+            sleeps: list[float] = []
+
+            def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+                now[0] += seconds
+
+            state = {
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "last_consumed_review_comment_id": None,
+                        "last_request_comment_created_at": request_created_at,
+                        "last_request_comment_id": 101,
+                        "pr_number": 9,
+                        "repo": "repo",
+                        "repo_owner": "acme",
+                        "review_wait": {
+                            "deadline_at": None,
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": None,
+                            "poll_count": 0,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": None,
+                        },
+                    },
+                },
+            }
+            comment = {
+                "id": 202,
+                "created_at": "2026-04-12T01:10:00Z",
+                "body": "Codex Review: First poll works.",
+            }
+            with mock.patch.object(MODULE.time, "time", side_effect=lambda: now[0]), mock.patch.object(
+                MODULE.time,
+                "sleep",
+                side_effect=fake_sleep,
+            ), mock.patch.object(
+                MODULE,
+                "list_github_pr_issue_comments",
+                return_value=[comment],
+            ):
+                result = MODULE.wait_for_new_github_codex_review_comment(
+                    run_dir,
+                    state,
+                    1,
+                    timeout_seconds=MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                )
+            self.assertEqual(result["id"], 202)
+            self.assertEqual(sleeps, [600])
+            self.assertEqual(state["review_bridge"]["github"]["review_wait"]["poll_count"], 1)
+
     def test_run_github_codex_review_phase_stops_on_terminal_no_blocker_comment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run"
@@ -869,6 +983,180 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                     {"review_bridge": {"mode": "github_pr_codex"}},
                 )
             self.assertEqual(result, (latest_turn, 1, "reviewer", False, "reviewer_blocked"))
+
+    def test_save_run_state_rejects_waiting_reviewer_without_reviewer_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            run_dir.mkdir(parents=True)
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            state = {
+                "status": "waiting_reviewer",
+                "run_id": "run-1",
+                "task_root": str(task_root),
+                "current_turn": 1,
+                "pending_turn": None,
+                "pending_role": None,
+                "transition_source_verdict": None,
+                "roles": {
+                    "generator": {"tmux_session": "gen"},
+                    "reviewer": {"tmux_session": "rev"},
+                },
+            }
+            with self.assertRaises(MODULE.SupervisorRuntimeError):
+                MODULE.save_run_state(run_dir, state)
+
+    def test_save_run_state_rejects_transitioning_turn_without_pending_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            current_turn_dir = run_dir / "turns" / "0001"
+            current_turn_dir.mkdir(parents=True)
+            MODULE.save_json(current_turn_dir / "turn.json", {"turn": "0001", "phase": "changes_requested"})
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            state = {
+                "status": MODULE.TRANSITIONING_TURN_STATUS,
+                "run_id": "run-1",
+                "task_root": str(task_root),
+                "current_turn": 1,
+                "pending_turn": None,
+                "pending_role": None,
+                "transition_source_verdict": "reviewer_changes_requested",
+                "roles": {
+                    "generator": {"tmux_session": "gen"},
+                    "reviewer": {"tmux_session": "rev"},
+                },
+            }
+            with self.assertRaises(MODULE.SupervisorRuntimeError):
+                MODULE.save_run_state(run_dir, state)
+
+    def test_run_generator_phase_completes_transition_and_clears_pending_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix bug\n\n## Context\n\nctx\n\n## Success Signal\n\nworks\n",
+                encoding="utf-8",
+            )
+            run_dir = task_root / "runs" / "run-1"
+            (run_dir / "turns").mkdir(parents=True)
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            MODULE.save_turn_metadata(turn_one, 1, "changes_requested", role="reviewer")
+            turn_two = MODULE.prepare_turn(run_dir, 2, task_root)
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+            )
+            state["status"] = MODULE.TRANSITIONING_TURN_STATUS
+            state["current_turn"] = 1
+            state["pending_turn"] = 2
+            state["pending_role"] = "generator"
+            state["transition_source_verdict"] = "reviewer_changes_requested"
+            MODULE.save_run_state(run_dir, state)
+
+            def fake_wait_for_role_artifacts(current_turn_dir, role, **kwargs):
+                message_path, status_path = MODULE.role_artifact_paths(current_turn_dir, role)
+                MODULE.write_text(message_path, "generator message")
+                MODULE.save_json(
+                    status_path,
+                    {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+                )
+                return message_path, status_path, MODULE.validate_generator_status(MODULE.load_json(status_path))
+
+            with mock.patch.object(MODULE, "wait_for_tmux_prompt", return_value=None), mock.patch.object(
+                MODULE, "tmux_send_prompt", return_value=None
+            ), mock.patch.object(
+                MODULE, "wait_for_role_artifacts", side_effect=fake_wait_for_role_artifacts
+            ), mock.patch.object(MODULE, "write_raw_final_output_artifact", return_value=None):
+                MODULE.run_generator_phase(run_dir, state, task_root, 2, turn_two, inline_context=False)
+
+            saved = MODULE.load_json(run_dir / "state.json")
+            self.assertEqual(saved["current_turn"], 2)
+            self.assertEqual(saved["status"], "waiting_generator")
+            self.assertIsNone(saved["pending_turn"])
+            self.assertIsNone(saved["pending_role"])
+            events = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("turn_transition_completed", events)
+
+    def test_continue_run_recovers_from_broken_changes_requested_half_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix bug\n\n## Context\n\nctx\n\n## Success Signal\n\nworks\n",
+                encoding="utf-8",
+            )
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            (turn_one / "generator").mkdir(exist_ok=True)
+            (turn_one / "reviewer").mkdir(exist_ok=True)
+            MODULE.write_text(turn_one / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_one / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.write_text(turn_one / "reviewer" / "message.md", "reviewer message")
+            MODULE.save_json(
+                turn_one / "reviewer" / "status.json",
+                {
+                    "verdict": "changes_requested",
+                    "summary": "fix it",
+                    "blocking_issues": ["one fix"],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "fail",
+                        "regression_risk": "pass",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "fail",
+                        "maintainability": "pass",
+                    },
+                },
+            )
+            MODULE.save_json(turn_one / "turn.json", {"turn": "0001", "phase": "changes_requested", "role": "reviewer"})
+            broken_state = {
+                "status": "waiting_reviewer",
+                "current_turn": 2,
+                "pending_turn": None,
+                "pending_role": None,
+                "transition_source_verdict": None,
+                "task_root": str(task_root),
+                "run_dir": str(run_dir),
+                "review_bridge": {"mode": "internal"},
+                "roles": {
+                    "generator": {"tmux_session": "gen", "last_wait_phase": None},
+                    "reviewer": {"tmux_session": "rev", "last_wait_phase": None},
+                },
+                "council_config": self.build_council_config(),
+                "repo_root": str(repo_root),
+            }
+            MODULE.save_json(run_dir / "state.json", broken_state)
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+            )
+            captured = {}
+
+            def fake_supervisor_loop_from(run_dir_arg, state_arg, task_root_arg, **kwargs):
+                captured["kwargs"] = kwargs
+
+            with mock.patch.object(MODULE, "supervisor_loop_from", side_effect=fake_supervisor_loop_from), contextlib.redirect_stdout(io.StringIO()):
+                result = MODULE.continue_run(args)
+            self.assertEqual(result, 0)
+            self.assertEqual(captured["kwargs"]["start_turn"], 2)
+            self.assertEqual(captured["kwargs"]["start_role"], "generator")
+            self.assertFalse(captured["kwargs"]["reuse_existing_turn_for_first"])
 
     def test_create_tmux_sessions_skips_reviewer_for_github_review_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
