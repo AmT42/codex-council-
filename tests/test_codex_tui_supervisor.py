@@ -599,6 +599,123 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         assert selected is not None
         self.assertEqual(selected["id"], 12)
 
+    def test_wait_for_new_github_codex_review_comment_uses_initial_wait_then_poll_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            request_created_at = "2026-04-12T01:00:00Z"
+            now = [MODULE.parse_utc_timestamp(request_created_at)]
+            sleeps: list[float] = []
+
+            def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+                now[0] += seconds
+
+            state = {
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "last_consumed_review_comment_id": None,
+                        "last_request_comment_created_at": request_created_at,
+                        "last_request_comment_id": 101,
+                        "pr_number": 9,
+                        "repo": "repo",
+                        "repo_owner": "acme",
+                        "review_wait": {
+                            "deadline_at": None,
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": None,
+                            "poll_count": 0,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": None,
+                        },
+                    },
+                },
+            }
+            comment = {
+                "id": 202,
+                "created_at": "2026-04-12T01:15:00Z",
+                "body": "Codex Review: Needs one more fix.",
+            }
+            with mock.patch.object(MODULE.time, "time", side_effect=lambda: now[0]), mock.patch.object(
+                MODULE.time,
+                "sleep",
+                side_effect=fake_sleep,
+            ), mock.patch.object(
+                MODULE,
+                "list_github_pr_issue_comments",
+                side_effect=[[], [comment]],
+            ):
+                result = MODULE.wait_for_new_github_codex_review_comment(
+                    run_dir,
+                    state,
+                    1,
+                    timeout_seconds=1800,
+                )
+            self.assertEqual(result["id"], 202)
+            self.assertEqual(sleeps, [600, 300])
+            self.assertEqual(state["review_bridge"]["github"]["review_wait"]["poll_count"], 2)
+
+    def test_wait_for_new_github_codex_review_comment_reuses_existing_request_without_restarting_initial_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            request_created_at = "2026-04-12T01:00:00Z"
+            resume_epoch = MODULE.parse_utc_timestamp("2026-04-12T01:11:00Z")
+            assert resume_epoch is not None
+            now = [resume_epoch]
+            sleeps: list[float] = []
+
+            def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+                now[0] += seconds
+
+            state = {
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "last_consumed_review_comment_id": None,
+                        "last_request_comment_created_at": request_created_at,
+                        "last_request_comment_id": 101,
+                        "pr_number": 9,
+                        "repo": "repo",
+                        "repo_owner": "acme",
+                        "review_wait": {
+                            "deadline_at": "2026-04-12T01:30:00Z",
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": None,
+                            "poll_count": 0,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": request_created_at,
+                        },
+                    },
+                },
+            }
+            comment = {
+                "id": 202,
+                "created_at": "2026-04-12T01:11:00Z",
+                "body": "Codex Review: Ready to import.",
+            }
+            with mock.patch.object(MODULE.time, "time", side_effect=lambda: now[0]), mock.patch.object(
+                MODULE.time,
+                "sleep",
+                side_effect=fake_sleep,
+            ), mock.patch.object(
+                MODULE,
+                "list_github_pr_issue_comments",
+                return_value=[comment],
+            ):
+                result = MODULE.wait_for_new_github_codex_review_comment(
+                    run_dir,
+                    state,
+                    1,
+                    timeout_seconds=1800,
+                    reuse_existing_request=True,
+                )
+            self.assertEqual(result["id"], 202)
+            self.assertEqual(sleeps, [])
+            self.assertEqual(state["review_bridge"]["github"]["review_wait"]["poll_count"], 1)
+
     def test_run_github_codex_review_phase_stops_on_terminal_no_blocker_comment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run"
@@ -769,6 +886,51 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 MODULE.create_tmux_sessions(run_dir, state)
             tmux_new_session.assert_called_once()
             self.assertEqual(tmux_new_session.call_args.args[0], "gen")
+
+    def test_start_run_converts_github_startup_failure_into_blocked_state_with_diagnostics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix bug\n\n## Context\n\nctx\n\n## Success Signal\n\nworks\n",
+                encoding="utf-8",
+            )
+            self.commit_repo_changes(repo_root, "add task")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                generator_session="gen",
+                reviewer_session=None,
+                fork_session_id=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+                review_mode="github_pr_codex",
+                github_pr=None,
+                github_branch=None,
+                github_base=None,
+                start_role="auto",
+            )
+            with mock.patch.object(MODULE, "read_codex_session_index", return_value=[]), mock.patch.object(
+                MODULE,
+                "load_github_repo_metadata",
+                side_effect=MODULE.SupervisorRuntimeError(
+                    "github_repo_view",
+                    "gh repo view failed",
+                    role="reviewer",
+                ),
+            ), contextlib.redirect_stdout(io.StringIO()):
+                result = MODULE.start_run(args)
+            self.assertEqual(result, 1)
+            run_dir = task_root / "runs" / "run-1"
+            state = MODULE.load_json(run_dir / "state.json")
+            self.assertEqual(state["status"], "blocked")
+            self.assertIn("github_repo_view", state["stop_reason"])
+            diagnostics_root = run_dir / "diagnostics"
+            self.assertTrue(diagnostics_root.exists())
+            self.assertTrue(any(diagnostics_root.iterdir()))
 
     def test_pause_for_human_mentions_present_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -120,6 +121,16 @@ def now_ts() -> str:
 
 def ts_from_epoch(epoch_seconds: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch_seconds))
+
+
+def parse_utc_timestamp(value: str | None) -> float | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    try:
+        return datetime.fromisoformat(normalized.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp()
+    except ValueError:
+        return None
 
 
 def ensure_dir(path: Path) -> None:
@@ -2929,6 +2940,14 @@ def post_github_pr_review_request_comment(
     github_state["last_request_comment_id"] = comment_id
     github_state["last_request_comment_created_at"] = created_at.strip()
     github_state["last_request_turn"] = turn_name(turn_number)
+    github_state["review_wait"] = {
+        "deadline_at": None,
+        "initial_wait_seconds": GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+        "last_polled_at": None,
+        "poll_count": 0,
+        "poll_interval_seconds": GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+        "started_at": None,
+    }
     save_run_state(run_dir, state)
     append_run_event(
         run_dir,
@@ -3037,6 +3056,7 @@ def wait_for_new_github_codex_review_comment(
     turn_number: int,
     *,
     timeout_seconds: float,
+    reuse_existing_request: bool = False,
 ) -> dict:
     if timeout_seconds < GITHUB_CODEX_INITIAL_WAIT_SECONDS:
         raise SupervisorRuntimeError(
@@ -3060,28 +3080,75 @@ def wait_for_new_github_codex_review_comment(
                 "request_comment_id": request_comment_id,
             },
         )
-    started_at_epoch = time.time()
     wait_state = github_state["review_wait"]
-    wait_state["started_at"] = ts_from_epoch(started_at_epoch)
-    wait_state["deadline_at"] = ts_from_epoch(started_at_epoch + timeout_seconds)
-    wait_state["last_polled_at"] = None
-    wait_state["poll_count"] = 0
-    save_run_state(run_dir, state)
-    append_run_event(
-        run_dir,
-        "github_review_wait_started",
-        turn_number=turn_number,
-        role="reviewer",
-        details={
-            "initial_wait_seconds": GITHUB_CODEX_INITIAL_WAIT_SECONDS,
-            "poll_interval_seconds": GITHUB_CODEX_POLL_INTERVAL_SECONDS,
-            "pr_number": pr_number,
-        },
-    )
+    request_created_at_epoch = parse_utc_timestamp(request_comment_created_at)
+    if not reuse_existing_request:
+        started_at_epoch = request_created_at_epoch or time.time()
+        wait_state["started_at"] = ts_from_epoch(started_at_epoch)
+        wait_state["deadline_at"] = ts_from_epoch(started_at_epoch + timeout_seconds)
+        wait_state["last_polled_at"] = None
+        wait_state["poll_count"] = 0
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            "github_review_wait_started",
+            turn_number=turn_number,
+            role="reviewer",
+            details={
+                "initial_wait_seconds": GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                "poll_interval_seconds": GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                "pr_number": pr_number,
+            },
+        )
+    else:
+        started_at_epoch = (
+            parse_utc_timestamp(wait_state.get("started_at"))
+            or request_created_at_epoch
+            or time.time()
+        )
+        deadline_epoch = parse_utc_timestamp(wait_state.get("deadline_at"))
+        if deadline_epoch is None:
+            deadline_epoch = started_at_epoch + timeout_seconds
+            wait_state["deadline_at"] = ts_from_epoch(deadline_epoch)
+        wait_state["started_at"] = ts_from_epoch(started_at_epoch)
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            "github_review_wait_resumed",
+            turn_number=turn_number,
+            role="reviewer",
+            details={
+                "poll_count": int(wait_state.get("poll_count", 0)),
+                "pr_number": pr_number,
+            },
+        )
 
-    time.sleep(GITHUB_CODEX_INITIAL_WAIT_SECONDS)
-    deadline = started_at_epoch + timeout_seconds
+    deadline = parse_utc_timestamp(wait_state.get("deadline_at")) or (started_at_epoch + timeout_seconds)
     while True:
+        now_epoch = time.time()
+        if now_epoch >= deadline:
+            raise SupervisorRuntimeError(
+                "github_review_timeout",
+                f"no new Codex review comment appeared on PR #{pr_number} within {int(timeout_seconds)} seconds",
+                role="reviewer",
+                details={
+                    "last_request_comment_created_at": request_comment_created_at,
+                    "last_request_comment_id": request_comment_id,
+                    "poll_count": int(wait_state.get("poll_count", 0)),
+                    "pr_number": pr_number,
+                },
+            )
+
+        last_polled_at_epoch = parse_utc_timestamp(wait_state.get("last_polled_at"))
+        if last_polled_at_epoch is not None:
+            next_poll_epoch = last_polled_at_epoch + GITHUB_CODEX_POLL_INTERVAL_SECONDS
+        else:
+            initial_wait_anchor = request_created_at_epoch or started_at_epoch
+            next_poll_epoch = initial_wait_anchor + GITHUB_CODEX_INITIAL_WAIT_SECONDS
+        if now_epoch < next_poll_epoch:
+            time.sleep(min(next_poll_epoch - now_epoch, deadline - now_epoch))
+            continue
+
         polled_at = time.time()
         wait_state["last_polled_at"] = ts_from_epoch(polled_at)
         wait_state["poll_count"] = int(wait_state.get("poll_count", 0)) + 1
@@ -3117,19 +3184,6 @@ def wait_for_new_github_codex_review_comment(
                 },
             )
             return comment
-        if polled_at >= deadline:
-            raise SupervisorRuntimeError(
-                "github_review_timeout",
-                f"no new Codex review comment appeared on PR #{pr_number} within {int(timeout_seconds)} seconds",
-                role="reviewer",
-                details={
-                    "last_request_comment_created_at": request_comment_created_at,
-                    "last_request_comment_id": request_comment_id,
-                    "poll_count": wait_state["poll_count"],
-                    "pr_number": pr_number,
-                },
-            )
-        time.sleep(min(GITHUB_CODEX_POLL_INTERVAL_SECONDS, deadline - polled_at))
 
 
 def github_reviewer_status_from_comment(comment_body: str, reviewed_commit_sha: str) -> dict:
@@ -3202,9 +3256,14 @@ def build_github_reviewer_message(
     lines.extend(["", "## Independent Verification Performed", ""])
     lines.append("- Resolved or created the PR through `gh` in the target repository.")
     if request_comment is not None:
-        lines.append(
-            f"- Posted an `@codex` review request comment on PR #{github_state['pr_number']}."
-        )
+        if request_comment.get("body") is None:
+            lines.append(
+                f"- Reused the previously posted `@codex` review request comment on PR #{github_state['pr_number']}."
+            )
+        else:
+            lines.append(
+                f"- Posted an `@codex` review request comment on PR #{github_state['pr_number']}."
+            )
         lines.append(
             f"- Waited {GITHUB_CODEX_INITIAL_WAIT_SECONDS // 60} minutes, then polled every {GITHUB_CODEX_POLL_INTERVAL_SECONDS // 60} minutes for a new Codex review comment."
         )
@@ -3602,6 +3661,7 @@ def run_github_codex_review_phase(
             state,
             turn_number,
             timeout_seconds=float(state["council_config"]["council"]["turn_timeout_seconds"]),
+            reuse_existing_request=reuse_existing_request,
         )
         reviewer_status = validate_reviewer_status(
             github_reviewer_status_from_comment(comment["body"], reviewed_commit_sha)
@@ -3949,7 +4009,6 @@ def start_run(args: argparse.Namespace) -> int:
         )
     else:
         git_state = None
-    review_bridge = build_review_bridge_state(repo_root, task_root, git_state, args)
 
     run_id = args.run_id or run_id_value()
     run_dir = task_root / "runs" / run_id
@@ -3975,7 +4034,7 @@ def start_run(args: argparse.Namespace) -> int:
         git_state=git_state,
         generator_session=generator_session,
         reviewer_session=reviewer_session,
-        review_bridge=review_bridge,
+        review_bridge={"mode": review_mode},
         generator_bootstrap_mode="fork" if generator_fork_session_id else "fresh",
         reviewer_bootstrap_mode="fork" if reviewer_fork_session_id else "fresh",
         generator_fork_parent_session_id=generator_fork_session_id,
@@ -3987,6 +4046,8 @@ def start_run(args: argparse.Namespace) -> int:
     append_run_event(run_dir, "run_created", details={"task_name": task_name})
 
     try:
+        state["review_bridge"] = build_review_bridge_state(repo_root, task_root, git_state, args)
+        save_run_state(run_dir, state)
         create_tmux_sessions(run_dir, state)
         print(f"repo_root: {repo_root}")
         print(f"task_root: {task_root}")
