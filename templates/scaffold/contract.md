@@ -1,5 +1,9 @@
 # Definition of Done
 
+This file is the default acceptance and approval checklist for most non-trivial council runs.
+
+Skip it only for ultra-trivial tasks or direct-answer-only requests.
+
 Write the definition of done for this task here as a checklist.
 
 Rules:

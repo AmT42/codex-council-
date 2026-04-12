@@ -2,6 +2,10 @@
 
 Use this file only when the task needs deeper structure than `task.md`.
 
+Reach for `spec.md` when the work spans multiple surfaces, needs explicit in-scope and out-of-scope boundaries, or would otherwise be too ambiguous to execute safely from a short task brief.
+
+For most non-trivial spec-driven tasks, keep `contract.md` alongside this file so approval stays auditable.
+
 ## Goal
 
 Describe the main thing that should be built or changed.

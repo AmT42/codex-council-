@@ -1354,6 +1354,56 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertEqual(start_args.github_pr, "42")
         self.assertEqual(start_args.github_base, "main")
 
+    def test_consumer_docs_reference_canonical_cli_and_document_model(self) -> None:
+        repo_root = MODULE_PATH.parents[1]
+        readme = (repo_root / "README.md").read_text(encoding="utf-8")
+        instructs = (repo_root / "INSTRUCTS.md").read_text(encoding="utf-8")
+
+        for command in ("init", "write", "start", "continue", "status"):
+            self.assertIn(f"`{command}`", readme)
+            self.assertIn(f"`{command}`", instructs)
+
+        for doc_name in MODULE.INPUT_DOC_FILENAMES.values():
+            self.assertIn(f"`{doc_name}`", readme)
+            self.assertIn(f"`{doc_name}`", instructs)
+
+        self.assertIn("`AGENTS.md`", readme)
+        self.assertIn("`AGENTS.md`", instructs)
+        self.assertIn("maintainer guidance", instructs)
+
+    def test_codex_council_skill_reference_pack_is_present_and_linked(self) -> None:
+        repo_root = MODULE_PATH.parents[1]
+        skill_root = repo_root / "skills" / "codex-council"
+        skill_path = skill_root / "SKILL.md"
+        self.assertTrue(skill_path.exists())
+        skill_text = skill_path.read_text(encoding="utf-8")
+
+        expected_refs = (
+            "references/routing.md",
+            "references/task-doc.md",
+            "references/review-doc.md",
+            "references/spec-doc.md",
+            "references/contract-doc.md",
+            "references/run-lifecycle.md",
+            "references/examples.md",
+        )
+        for relative_ref in expected_refs:
+            self.assertTrue((skill_root / relative_ref).exists())
+            self.assertIn(relative_ref, skill_text)
+
+    def test_scaffold_templates_emphasize_task_default_spec_escalation_and_contract_default(self) -> None:
+        repo_root = MODULE_PATH.parents[1]
+        task_template = (repo_root / "templates" / "scaffold" / "task.md").read_text(encoding="utf-8")
+        spec_template = (repo_root / "templates" / "scaffold" / "spec.md").read_text(encoding="utf-8")
+        contract_template = (repo_root / "templates" / "scaffold" / "contract.md").read_text(encoding="utf-8")
+
+        self.assertIn("default starting point for most execution requests", task_template)
+        self.assertIn("pair this file with `contract.md`", task_template)
+        self.assertIn("deeper structure than `task.md`", spec_template)
+        self.assertIn("keep `contract.md` alongside this file", spec_template)
+        self.assertIn("default acceptance and approval checklist", contract_template)
+        self.assertIn("Skip it only for ultra-trivial tasks", contract_template)
+
 
 if __name__ == "__main__":
     unittest.main()
