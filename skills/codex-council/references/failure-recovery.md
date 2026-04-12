@@ -7,6 +7,7 @@
 - you are unsure whether `continue` is the right move
 - the docs are too weak to justify `start`
 - the supervisor died while a role session was still running
+- an approved run was wrong or the canonical docs changed after approval
 
 ## Weak-doc failure
 
@@ -42,6 +43,15 @@ If the supervisor died mid-run:
 - if the artifacts show a clear next role, recover with `continue`
 - when restarting orchestration, keep the new supervisor process alive
 
+## Superseded-approval failure
+
+If `status` shows that the selected run is already approved, but that approval is no longer the right source of truth:
+
+- do not use `continue`
+- use `reopen` to create a fresh linked run
+- use `false_approved` when the prior approval was wrong under the old intended requirements
+- use `requirements_changed_after_approval` when the canonical docs changed afterward and now supersede the old approval
+
 ## Human intervention failure
 
 If the runtime or reviewer previously emitted `needs_human`:
@@ -64,4 +74,4 @@ When recovering, explain briefly:
 
 - what went wrong
 - what doc or state you inspected
-- whether you are about to fix the docs, answer directly, or `continue`
+- whether you are about to fix the docs, answer directly, `continue`, or `reopen`

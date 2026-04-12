@@ -22,6 +22,7 @@ COUNCIL_DIRNAME = ".codex-council"
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "templates"
 ROLE_NAMES = ("generator", "reviewer")
 REVIEW_MODES = {"internal", "github_pr_codex"}
+REOPEN_REASON_KINDS = {"false_approved", "requirements_changed_after_approval"}
 BASE_REQUIRED_FILENAMES = (
     "AGENTS.md",
     "generator.instructions.md",
@@ -39,6 +40,13 @@ INPUT_DOC_FILENAMES = {
     "spec": SPEC_FILENAME,
     "contract": CONTRACT_FILENAME,
 }
+CANONICAL_FILE_LABELS = {
+    "agents": "AGENTS.md",
+    "generator": "generator.instructions.md",
+    "reviewer": "reviewer.instructions.md",
+    **INPUT_DOC_FILENAMES,
+}
+CANONICAL_FILE_ORDER = ("task", "review", "spec", "contract", "agents", "generator", "reviewer")
 GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked", "needs_human"}
 REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
 HUMAN_SOURCES = {
@@ -164,6 +172,8 @@ RAW_OUTPUT_CAPTURE_TIMEOUT_SECONDS = 30.0
 TERMINAL_SUMMARY_BEGIN = "COUNCIL_TERMINAL_SUMMARY_BEGIN"
 TERMINAL_SUMMARY_END = "COUNCIL_TERMINAL_SUMMARY_END"
 TRANSITIONING_TURN_STATUS = "transitioning_turn"
+REOPEN_INDEX_FILENAME = "reopen-events.jsonl"
+REOPEN_METADATA_FILENAME = "reopen.json"
 TURN_METADATA_AUDIT_KEYS = (
     "continuation_reason",
     "continuation_source",
@@ -694,6 +704,15 @@ def latest_run_dir(task_root: Path) -> Path:
     return candidates[-1]
 
 
+def resolve_run_dir(task_root: Path, run_id: str | None) -> Path:
+    if run_id in (None, "latest"):
+        return latest_run_dir(task_root)
+    run_dir = task_root / "runs" / run_id
+    if not run_dir.exists():
+        raise SystemExit(f"missing run directory: {run_dir}")
+    return run_dir
+
+
 def list_turn_dirs(run_dir: Path) -> list[Path]:
     turns_root = run_dir / "turns"
     if not turns_root.exists():
@@ -720,6 +739,10 @@ def events_path_for(run_dir: Path) -> Path:
     return run_dir / "events.jsonl"
 
 
+def reopen_index_path_for(repo_root: Path) -> Path:
+    return council_root_for(repo_root) / REOPEN_INDEX_FILENAME
+
+
 def codex_session_index_path() -> Path:
     return Path.home() / ".codex" / "session_index.jsonl"
 
@@ -734,6 +757,10 @@ def turn_metadata_path(turn_dir: Path) -> Path:
 
 def context_manifest_path(turn_dir: Path) -> Path:
     return turn_dir / "context_manifest.json"
+
+
+def reopen_metadata_path(run_dir: Path) -> Path:
+    return run_dir / REOPEN_METADATA_FILENAME
 
 
 def role_dir_for(turn_dir: Path, role: str) -> Path:
@@ -1579,11 +1606,16 @@ def format_fork_context_block(role_state: dict) -> str:
         """
     ).rstrip()
 
+
+def canonical_file_label(key: str) -> str:
+    return CANONICAL_FILE_LABELS.get(key, f"{key}.md")
+
+
 def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def snapshot_context_manifest(run_dir: Path, task_root: Path) -> dict:
+def build_context_manifest(task_root: Path) -> dict:
     inspection = inspect_task_workspace(task_root)
     manifest: dict[str, dict] = {
         "generated_at": now_ts(),
@@ -1604,6 +1636,62 @@ def snapshot_context_manifest(run_dir: Path, task_root: Path) -> dict:
             "mtime_ns": stat.st_mtime_ns,
         }
     return manifest
+
+
+def snapshot_context_manifest(run_dir: Path, task_root: Path) -> dict:
+    return build_context_manifest(task_root)
+
+
+def compare_context_manifests(previous_manifest: dict, current_manifest: dict) -> dict:
+    previous_files = previous_manifest.get("files")
+    current_files = current_manifest.get("files")
+    if not isinstance(previous_files, dict):
+        raise SystemExit("approved run context manifest is missing a valid `files` map")
+    if not isinstance(current_files, dict):
+        raise SystemExit("current context manifest is missing a valid `files` map")
+
+    previous_keys = {key for key in CANONICAL_FILE_ORDER if key in previous_files}
+    current_keys = {key for key in CANONICAL_FILE_ORDER if key in current_files}
+    shared_keys = [key for key in CANONICAL_FILE_ORDER if key in previous_keys and key in current_keys]
+    changed_shared_keys = [
+        key
+        for key in shared_keys
+        if previous_files[key].get("sha256") != current_files[key].get("sha256")
+    ]
+    added_keys = [key for key in CANONICAL_FILE_ORDER if key in current_keys and key not in previous_keys]
+    removed_keys = [key for key in CANONICAL_FILE_ORDER if key in previous_keys and key not in current_keys]
+    return {
+        "approved_profile": previous_manifest.get("profile"),
+        "current_profile": current_manifest.get("profile"),
+        "compared_existing_docs": [canonical_file_label(key) for key in shared_keys],
+        "changed_existing_docs": [canonical_file_label(key) for key in changed_shared_keys],
+        "added_docs": [canonical_file_label(key) for key in added_keys],
+        "removed_docs": [canonical_file_label(key) for key in removed_keys],
+        "docs_changed_since_approval": bool(changed_shared_keys or added_keys or removed_keys),
+    }
+
+
+def load_context_manifest(path: Path) -> dict:
+    if not path.exists():
+        raise SystemExit(f"missing context manifest: {path}")
+    manifest = load_json(path)
+    if not isinstance(manifest, dict):
+        raise SystemExit(f"invalid context manifest: {path}")
+    return manifest
+
+
+def build_reopen_doc_comparison(approved_turn_dir: Path, task_root: Path) -> dict:
+    previous_manifest = load_context_manifest(context_manifest_path(approved_turn_dir))
+    current_manifest = build_context_manifest(task_root)
+    return compare_context_manifests(previous_manifest, current_manifest)
+
+
+def write_reopen_metadata_artifact(run_dir: Path, reopen_metadata: dict) -> None:
+    save_json(reopen_metadata_path(run_dir), reopen_metadata)
+
+
+def append_reopen_index(repo_root: Path, reopen_metadata: dict) -> None:
+    append_jsonl(reopen_index_path_for(repo_root), reopen_metadata)
 
 
 def append_run_event(
@@ -1899,6 +1987,26 @@ def normalize_optional_text(value, *, field_name: str) -> str | None:
     return normalized or None
 
 
+def normalize_required_text(value, *, field_name: str) -> str:
+    normalized = normalize_optional_text(value, field_name=field_name)
+    if normalized is None:
+        raise SystemExit(f"{field_name} must be a non-empty string")
+    return normalized
+
+
+def normalize_reopen_reason_kind(value) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(
+            f"--reason-kind must be one of: {', '.join(sorted(REOPEN_REASON_KINDS))}"
+        )
+    normalized = value.strip()
+    if normalized not in REOPEN_REASON_KINDS:
+        raise SystemExit(
+            f"--reason-kind must be one of: {', '.join(sorted(REOPEN_REASON_KINDS))}"
+        )
+    return normalized
+
+
 def normalize_changed_files(value) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError("generator changed_files must be a list of strings")
@@ -2114,6 +2222,40 @@ def format_review_bridge_block(state: dict) -> str:
     return "\n".join(lines).rstrip()
 
 
+def format_reopen_context_block(state: dict) -> str:
+    reopen = state.get("reopen")
+    if not isinstance(reopen, dict):
+        return ""
+    reopened_from = reopen.get("reopened_from", {})
+    doc_comparison = reopen.get("doc_comparison", {})
+    lines = [
+        "Reopen context:",
+        "- This run explicitly supersedes a prior approved run; do not treat that historical approval as the current source of truth.",
+        f"- Reopened from run `{reopened_from.get('run_id', 'unknown')}` turn `{reopened_from.get('turn', 'unknown')}`.",
+        f"- Reopen reason kind: `{reopen.get('reason_kind', 'unknown')}`.",
+        f"- Reopen reason: {reopen.get('reason_message', '')}",
+    ]
+    if reopen.get("reason_kind") == "false_approved":
+        lines.append("- Interpret the earlier approval as incorrect under the intended requirements that were in force at the time.")
+    elif reopen.get("reason_kind") == "requirements_changed_after_approval":
+        lines.append("- Interpret the earlier approval as historical only; the active canonical docs changed after approval and now supersede it.")
+    docs_changed = doc_comparison.get("docs_changed_since_approval")
+    if docs_changed is True:
+        lines.append("- Canonical docs changed since that approval.")
+        changed_existing = doc_comparison.get("changed_existing_docs") or []
+        added_docs = doc_comparison.get("added_docs") or []
+        removed_docs = doc_comparison.get("removed_docs") or []
+        if changed_existing:
+            lines.append("- Existing docs changed: " + ", ".join(f"`{name}`" for name in changed_existing))
+        if added_docs:
+            lines.append("- Docs added since approval: " + ", ".join(f"`{name}`" for name in added_docs))
+        if removed_docs:
+            lines.append("- Docs removed since approval: " + ", ".join(f"`{name}`" for name in removed_docs))
+    elif docs_changed is False:
+        lines.append("- Canonical docs compared against the approved run are unchanged.")
+    return "\n".join(lines).rstrip()
+
+
 def format_generator_message_requirements_block(inspection: dict) -> str:
     has_review = inspection["doc_paths"]["review"] is not None
     has_contract = inspection["doc_paths"]["contract"] is not None
@@ -2317,6 +2459,7 @@ def build_generator_turn_prompt(
         "task_name": task_name,
         "turn_name": turn_name(turn_number),
         "continue_context_block": continue_context_block,
+        "reopen_context_block": format_reopen_context_block(state),
         "fork_context_block": fork_context_block,
         "docs_to_read_block": format_doc_paths_block(task_root, inspection, "generator"),
         "review_bridge_block": format_review_bridge_block(state),
@@ -2342,6 +2485,7 @@ def build_reviewer_turn_prompt(
     turn_dir: Path,
     turn_number: int,
     *,
+    state: dict,
     inspection: dict,
     inline_context: bool,
     continue_context_block: str = "",
@@ -2358,6 +2502,7 @@ def build_reviewer_turn_prompt(
         "task_name": task_root.name,
         "turn_name": turn_name(turn_number),
         "continue_context_block": continue_context_block,
+        "reopen_context_block": format_reopen_context_block(state),
         "fork_context_block": fork_context_block,
         "docs_to_read_block": docs_to_read_block,
         "reviewer_focus_block": format_reviewer_focus_block(inspection),
@@ -2585,9 +2730,10 @@ def create_run_state(
     generator_fork_parent_session_id: str | None = None,
     reviewer_fork_parent_session_id: str | None = None,
     bootstrap_phase: str | None = None,
+    reopen_context: dict | None = None,
 ) -> dict:
     run_dir = task_root / "runs" / run_id
-    return {
+    state = {
         "created_at": now_ts(),
         "council_config": council_config,
         "council_root": str(council_root_for(repo_root)),
@@ -2627,6 +2773,9 @@ def create_run_state(
         "pending_role": None,
         "transition_source_verdict": None,
     }
+    if reopen_context is not None:
+        state["reopen"] = reopen_context
+    return state
 
 
 def validate_run_state(run_dir: Path, state: dict) -> None:
@@ -3807,6 +3956,9 @@ def build_github_review_bridge_prompt(
     ]
     if continue_context_block:
         lines.extend(["", continue_context_block])
+    reopen_context_block = format_reopen_context_block(state)
+    if reopen_context_block:
+        lines.extend(["", reopen_context_block])
     return "\n".join(lines).rstrip()
 
 def assign_recent_codex_session_ids(run_dir: Path, state: dict) -> None:
@@ -4057,6 +4209,7 @@ def run_reviewer_phase(
         task_root,
         current_turn_dir,
         turn_number,
+        state=state,
         inspection=inspection,
         inline_context=inline_context,
         continue_context_block=continue_context_block,
@@ -4524,6 +4677,99 @@ def write_document_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def print_run_launch_summary(run_dir: Path, state: dict, task_root: Path) -> None:
+    review_mode = review_bridge_mode(state)
+    print(f"repo_root: {state['repo_root']}")
+    print(f"task_root: {task_root}")
+    print(f"run_id: {state['run_id']}")
+    print(f"run_dir: {run_dir}")
+    print(f"generator tmux: {state['roles']['generator']['tmux_session']}")
+    print(f"attach generator: tmux attach -t {state['roles']['generator']['tmux_session']}")
+    reviewer_session = state["roles"]["reviewer"]["tmux_session"]
+    if isinstance(reviewer_session, str):
+        print(f"reviewer tmux: {reviewer_session}")
+        print(f"attach reviewer: tmux attach -t {reviewer_session}")
+    elif review_mode == "github_pr_codex":
+        github_state = state["review_bridge"]["github"]
+        print("reviewer bridge: github_pr_codex")
+        print(f"review branch: {github_state['branch']}")
+        if github_state.get("pr_url"):
+            print(f"review pr: {github_state['pr_url']}")
+    reopen = state.get("reopen")
+    if isinstance(reopen, dict):
+        reopened_from = reopen.get("reopened_from", {})
+        print(f"reopened from run: {reopened_from.get('run_id')}")
+        print(f"reopened from turn: {reopened_from.get('turn')}")
+        print(f"reopen reason kind: {reopen.get('reason_kind')}")
+
+
+def run_supervisor_for_initialized_run(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    *,
+    start_turn: int,
+    start_role: str,
+) -> int:
+    try:
+        create_tmux_sessions(run_dir, state)
+        print_run_launch_summary(run_dir, state, task_root)
+        wait_for_tmux_sessions_ready(run_dir, state)
+        if review_bridge_mode(state) == "github_pr_codex":
+            print("generator Codex TUI session is ready")
+        else:
+            print("both Codex TUI sessions are ready")
+        supervisor_loop_from(
+            run_dir,
+            state,
+            task_root,
+            start_turn=start_turn,
+            start_role=start_role,
+        )
+    except SupervisorRuntimeError as error:
+        state = load_json(run_dir / "state.json")
+        state["status"] = (
+            "blocked_invalid_artifacts"
+            if error.phase == "blocked_invalid_artifacts"
+            else "blocked"
+        )
+        state["stop_reason"] = f"{error.phase}: {error}"
+        failure_dir = write_failure_diagnostics(run_dir, state, error)
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            state["status"],
+            role=error.role,
+            turn_number=state.get("current_turn"),
+            details={"phase": error.phase, "message": str(error)},
+        )
+        print(f"supervisor error during {error.phase}: {error}", flush=True)
+        print(f"diagnostics: {failure_dir}", flush=True)
+        return 1
+    except Exception as exc:
+        error = SupervisorRuntimeError("unexpected", str(exc))
+        state = load_json(run_dir / "state.json")
+        state["status"] = "blocked"
+        state["stop_reason"] = f"{error.phase}: {error}"
+        failure_dir = write_failure_diagnostics(run_dir, state, error)
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            "blocked",
+            turn_number=state.get("current_turn"),
+            details={"phase": error.phase, "message": str(error)},
+        )
+        print(f"supervisor error during {error.phase}: {error}", flush=True)
+        print(f"diagnostics: {failure_dir}", flush=True)
+        return 1
+
+    final_state = load_json(run_dir / "state.json")
+    print(f"final status: {final_state['status']}")
+    if final_state.get("stop_reason"):
+        print(f"stop reason: {final_state['stop_reason']}")
+    return 0
+
+
 def start_run(args: argparse.Namespace) -> int:
     task_name = validate_task_name(args.task_name)
     target_input = Path(args.dir or Path.cwd()).resolve()
@@ -4602,52 +4848,18 @@ def start_run(args: argparse.Namespace) -> int:
     state["session_index_snapshot_ids"] = session_index_snapshot_ids
     save_run_state(run_dir, state)
     append_run_event(run_dir, "run_created", details={"task_name": task_name})
-
     try:
         state["review_bridge"] = build_review_bridge_state(repo_root, task_root, git_state, args)
         save_run_state(run_dir, state)
-        create_tmux_sessions(run_dir, state)
-        print(f"repo_root: {repo_root}")
-        print(f"task_root: {task_root}")
-        print(f"run_id: {run_id}")
-        print(f"run_dir: {run_dir}")
-        print(f"generator tmux: {generator_session}")
-        print(f"attach generator: tmux attach -t {generator_session}")
-        if isinstance(reviewer_session, str):
-            print(f"reviewer tmux: {reviewer_session}")
-            print(f"attach reviewer: tmux attach -t {reviewer_session}")
-        elif review_mode == "github_pr_codex":
-            github_state = state["review_bridge"]["github"]
-            print("reviewer bridge: github_pr_codex")
-            print(f"review branch: {github_state['branch']}")
-            if github_state.get("pr_url"):
-                print(f"review pr: {github_state['pr_url']}")
-
-        wait_for_tmux_sessions_ready(run_dir, state)
-        if review_mode == "github_pr_codex":
-            print("generator Codex TUI session is ready")
-        else:
-            print("both Codex TUI sessions are ready")
-        supervisor_loop_from(
-            run_dir,
-            state,
-            task_root,
-            start_turn=1,
-            start_role=start_role,
-        )
     except SupervisorRuntimeError as error:
         state = load_json(run_dir / "state.json")
-        state["status"] = (
-            "blocked_invalid_artifacts"
-            if error.phase == "blocked_invalid_artifacts"
-            else "blocked"
-        )
+        state["status"] = "blocked"
         state["stop_reason"] = f"{error.phase}: {error}"
         failure_dir = write_failure_diagnostics(run_dir, state, error)
         save_run_state(run_dir, state)
         append_run_event(
             run_dir,
-            state["status"],
+            "blocked",
             role=error.role,
             turn_number=state.get("current_turn"),
             details={"phase": error.phase, "message": str(error)},
@@ -4671,12 +4883,131 @@ def start_run(args: argparse.Namespace) -> int:
         print(f"supervisor error during {error.phase}: {error}", flush=True)
         print(f"diagnostics: {failure_dir}", flush=True)
         return 1
+    return run_supervisor_for_initialized_run(
+        run_dir,
+        state,
+        task_root,
+        start_turn=1,
+        start_role=start_role,
+    )
 
-    final_state = load_json(run_dir / "state.json")
-    print(f"final status: {final_state['status']}")
-    if final_state.get("stop_reason"):
-        print(f"stop reason: {final_state['stop_reason']}")
-    return 0
+
+def reopen_run(args: argparse.Namespace) -> int:
+    task_name = validate_task_name(args.task_name)
+    target_input = Path(args.dir or Path.cwd()).resolve()
+    repo_root, is_git = resolve_target_root(target_input, allow_non_git=args.allow_non_git)
+    task_root = task_root_for(repo_root, task_name)
+    if not task_root.exists():
+        raise SystemExit(
+            f"missing task workspace: {task_root}\n"
+            f"Run `init {task_name}` first."
+        )
+    inspection = ensure_task_workspace_exists(task_root)
+    reason_kind = normalize_reopen_reason_kind(args.reason_kind)
+    reason_message = normalize_required_text(args.reason, field_name="reopen reason")
+    previous_run_dir = resolve_run_dir(task_root, args.run_id)
+    state_path = previous_run_dir / "state.json"
+    if not state_path.exists():
+        raise SystemExit(f"missing run state: {state_path}")
+    previous_state = load_json(state_path)
+    try:
+        continuation_plan_data = resolve_continuation_plan(previous_run_dir, previous_state)
+    except ContinuationResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
+    if continuation_plan_data["mode"] != "terminal":
+        raise SystemExit(
+            build_reopen_nonterminal_message(task_name, previous_run_dir.name, continuation_plan_data)
+        )
+
+    approved_turn_dir = continuation_plan_data["turn_dir"]
+    approved_reviewer_status = load_status_file(
+        role_status_path(approved_turn_dir, "reviewer"),
+        validate_reviewer_status,
+    )
+    validate_task_workspace_for_start(task_root, inspection)
+    doc_comparison = build_reopen_doc_comparison(approved_turn_dir, task_root)
+    reopen_metadata = build_reopen_metadata(
+        task_name=task_name,
+        previous_run_dir=previous_run_dir,
+        approved_turn_dir=approved_turn_dir,
+        approved_reviewer_status=approved_reviewer_status,
+        reason_kind=reason_kind,
+        reason_message=reason_message,
+        doc_comparison=doc_comparison,
+    )
+    council_config = load_council_config(repo_root)
+    start_role, bootstrap_phase = determine_start_role(
+        inspection=inspection,
+        fork_enabled=False,
+        requested_role="auto",
+    )
+    if bootstrap_phase is not None:
+        raise SystemExit("reopen does not support fork bootstrap; add local task documents first")
+    if is_git:
+        git_state = git_preflight(repo_root)
+    else:
+        git_state = None
+
+    run_id = run_id_value()
+    run_dir = task_root / "runs" / run_id
+    if run_dir.exists():
+        raise SystemExit(f"run directory already exists: {run_dir}")
+    ensure_dir(run_dir / "turns")
+    review_bridge = clone_review_bridge_state_for_new_run(previous_state)
+    generator_session = build_tmux_session_name(task_name, "generator", run_id)
+    reviewer_session = (
+        build_tmux_session_name(task_name, "reviewer", run_id)
+        if review_bridge_mode({"review_bridge": review_bridge}) == "internal"
+        else None
+    )
+    session_index_snapshot_ids = [entry["id"] for entry in read_codex_session_index()]
+    state = create_run_state(
+        repo_root=repo_root,
+        task_root=task_root,
+        task_name=task_name,
+        run_id=run_id,
+        workspace_profile=inspection["profile"],
+        council_config=council_config,
+        git_state=git_state,
+        generator_session=generator_session,
+        reviewer_session=reviewer_session,
+        review_bridge=review_bridge,
+        bootstrap_phase=None,
+        reopen_context=reopen_metadata,
+    )
+    state["session_index_snapshot_ids"] = session_index_snapshot_ids
+    save_run_state(run_dir, state)
+    write_reopen_metadata_artifact(run_dir, reopen_metadata)
+    append_reopen_index(
+        repo_root,
+        {
+            **reopen_metadata,
+            "new_run_id": run_id,
+            "new_run_dir": str(run_dir),
+        },
+    )
+    append_run_event(
+        run_dir,
+        "run_created",
+        details={"task_name": task_name, "reopened_from_run_id": previous_run_dir.name},
+    )
+    append_run_event(
+        run_dir,
+        "run_reopened",
+        details={
+            "reason_kind": reason_kind,
+            "reopened_from_run_id": previous_run_dir.name,
+            "reopened_from_turn": approved_turn_dir.name,
+            "docs_changed_since_approval": doc_comparison["docs_changed_since_approval"],
+        },
+    )
+    return run_supervisor_for_initialized_run(
+        run_dir,
+        state,
+        task_root,
+        start_turn=1,
+        start_role=start_role,
+    )
 
 
 def init_task(args: argparse.Namespace) -> int:
@@ -4714,14 +5045,7 @@ def show_status(args: argparse.Namespace) -> int:
     task_root = task_root_for(repo_root, task_name)
     if not task_root.exists():
         raise SystemExit(f"missing task workspace: {task_root}")
-
-    run_id = args.run_id
-    if run_id in (None, "latest"):
-        run_dir = latest_run_dir(task_root)
-    else:
-        run_dir = task_root / "runs" / run_id
-        if not run_dir.exists():
-            raise SystemExit(f"missing run directory: {run_dir}")
+    run_dir = resolve_run_dir(task_root, args.run_id)
 
     state_path = run_dir / "state.json"
     if not state_path.exists():
@@ -4920,6 +5244,10 @@ def terminal_continuation_plan(
         "reason": reason,
         "ignored_turns": ignored_turns,
     }
+
+
+def approved_run_continue_message() -> str:
+    return "cannot continue an approved run; use `reopen` to supersede the approval explicitly"
 
 
 def next_turn_expectation(turn: dict, continuation_state: str, review_mode: str) -> dict | None:
@@ -5123,7 +5451,7 @@ def resolve_turn_continuation(
             turn_dir=turn["turn_dir"],
             turn_number=turn["turn_number"],
             continuation_state=continuation_state,
-            reason=f"turn {turn_label} is approved; this run should not continue.",
+            reason=f"turn {turn_label} is approved; this run should not continue. Use `reopen` to supersede the approval explicitly.",
             ignored_turns=ignored_turns,
         )
 
@@ -5223,7 +5551,7 @@ def determine_continue_target(run_dir: Path, state: dict) -> tuple[Path, int, st
     except ContinuationResolutionError as exc:
         raise SystemExit(str(exc)) from exc
     if plan["mode"] == "terminal":
-        raise SystemExit("cannot continue an approved run")
+        raise SystemExit(approved_run_continue_message())
     return (
         plan["turn_dir"],
         plan["turn_number"],
@@ -5233,6 +5561,83 @@ def determine_continue_target(run_dir: Path, state: dict) -> tuple[Path, int, st
     )
 
 
+def build_reopen_metadata(
+    *,
+    task_name: str,
+    previous_run_dir: Path,
+    approved_turn_dir: Path,
+    approved_reviewer_status: dict,
+    reason_kind: str,
+    reason_message: str,
+    doc_comparison: dict,
+) -> dict:
+    approved_turn_metadata = load_turn_metadata(approved_turn_dir)
+    return {
+        "event": "run_reopened",
+        "reopened_at": now_ts(),
+        "task_name": task_name,
+        "reason_kind": reason_kind,
+        "reason_message": reason_message,
+        "reopened_from": {
+            "run_id": previous_run_dir.name,
+            "run_dir": str(previous_run_dir),
+            "turn": approved_turn_dir.name,
+            "turn_dir": str(approved_turn_dir),
+            "approved_summary": approved_reviewer_status["summary"],
+            "approved_recorded_at": approved_turn_metadata.get("updated_at"),
+        },
+        "doc_comparison": doc_comparison,
+    }
+
+
+def build_reopen_nonterminal_message(task_name: str, run_id: str, plan: dict) -> str:
+    if plan["mode"] == "continue":
+        return (
+            f"cannot reopen run `{run_id}` because it is not approved; "
+            f"it is currently `{plan['continuation_state']}` on turn `{turn_name(plan['turn_number'])}`. "
+            f"Use `continue {task_name} --run-id {run_id}` instead."
+        )
+    return f"cannot reopen run `{run_id}` because it is not in an approved terminal state."
+
+
+def clone_review_bridge_state_for_new_run(previous_state: dict) -> dict:
+    mode = review_bridge_mode(previous_state)
+    if mode != "github_pr_codex":
+        return {"mode": "internal"}
+    previous = previous_state["review_bridge"]["github"]
+    return {
+        "mode": "github_pr_codex",
+        "github": {
+            "base_branch": previous["base_branch"],
+            "branch": previous["branch"],
+            "branch_source": previous.get("branch_source", "auto"),
+            "last_consumed_review_comment_body_sha256": None,
+            "last_consumed_review_comment_created_at": None,
+            "last_consumed_review_comment_id": None,
+            "last_consumed_review_turn": None,
+            "last_observed_head_sha": previous.get("last_observed_head_sha"),
+            "last_request_comment_created_at": None,
+            "last_request_comment_id": None,
+            "last_request_turn": None,
+            "pr_head_sha": previous.get("pr_head_sha"),
+            "pr_number": previous.get("pr_number"),
+            "pr_url": previous.get("pr_url"),
+            "repo_name_with_owner": previous["repo_name_with_owner"],
+            "repo_owner": previous["repo_owner"],
+            "repo": previous["repo"],
+            "repo_url": previous["repo_url"],
+            "review_wait": {
+                "deadline_at": None,
+                "initial_wait_seconds": GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                "last_polled_at": None,
+                "poll_count": 0,
+                "poll_interval_seconds": GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                "started_at": None,
+            },
+        },
+    }
+
+
 def continue_run(args: argparse.Namespace) -> int:
     task_name = validate_task_name(args.task_name)
     target_input = Path(args.dir or Path.cwd()).resolve()
@@ -5240,11 +5645,7 @@ def continue_run(args: argparse.Namespace) -> int:
     task_root = task_root_for(repo_root, task_name)
     if not task_root.exists():
         raise SystemExit(f"missing task workspace: {task_root}")
-
-    run_id = args.run_id
-    run_dir = latest_run_dir(task_root) if run_id in (None, "latest") else task_root / "runs" / run_id
-    if not run_dir.exists():
-        raise SystemExit(f"missing run directory: {run_dir}")
+    run_dir = resolve_run_dir(task_root, args.run_id)
 
     state = load_json(run_dir / "state.json")
     inspection = inspect_task_workspace(task_root)
@@ -5254,7 +5655,7 @@ def continue_run(args: argparse.Namespace) -> int:
     except ContinuationResolutionError as exc:
         raise SystemExit(str(exc)) from exc
     if continuation_plan_data["mode"] == "terminal":
-        raise SystemExit("cannot continue an approved run")
+        raise SystemExit(approved_run_continue_message())
 
     turn_number = continuation_plan_data["turn_number"]
     role = continuation_plan_data["role"]
@@ -5398,6 +5799,15 @@ def build_parser() -> argparse.ArgumentParser:
     cont.add_argument("--allow-non-git", action="store_true")
     cont.add_argument("--run-id", default="latest")
     cont.set_defaults(func=continue_run)
+
+    reopen = sub.add_parser("reopen", help="reopen an approved run into a fresh auditable run")
+    reopen.add_argument("task_name")
+    reopen.add_argument("--dir", help="target repository or working directory")
+    reopen.add_argument("--allow-non-git", action="store_true")
+    reopen.add_argument("--run-id", default="latest")
+    reopen.add_argument("--reason-kind", choices=sorted(REOPEN_REASON_KINDS), required=True)
+    reopen.add_argument("--reason", required=True)
+    reopen.set_defaults(func=reopen_run)
 
     status = sub.add_parser("status", help="show the latest or chosen run state for a task")
     status.add_argument("task_name")

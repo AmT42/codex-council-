@@ -1,6 +1,6 @@
 ---
 name: codex-council
-description: Operate the Codex Council harness from an outer Codex agent. Use when a user wants help turning vague or precise software requests into strong task.md, review.md, spec.md, and contract.md documents, then starting, inspecting, or continuing a generator/reviewer council run in a target repository.
+description: Operate the Codex Council harness from an outer Codex agent. Use when a user wants help turning vague or precise software requests into strong task.md, review.md, spec.md, and contract.md documents, then starting, inspecting, continuing, or reopening a generator/reviewer council run in a target repository.
 ---
 
 # Codex Council
@@ -17,7 +17,7 @@ Your job is to:
 
 - inspect the target repo
 - write or update the canonical council docs
-- choose between direct answer, `start`, and `continue`
+- choose between direct answer, `start`, `continue`, and `reopen`
 - launch or resume the council
 
 Your job is **not** to:
@@ -38,7 +38,7 @@ That includes:
 - discovering missing repo facts
 - normalizing novice input into strong documents
 - choosing the smallest sufficient document set
-- deciding between direct answer, `start`, and `continue`
+- deciding between direct answer, `start`, `continue`, and `reopen`
 
 ## Read order
 
@@ -67,10 +67,10 @@ Then load only the references needed for the chosen route:
 - Ask only high-impact blocking questions.
 - Prefer the smallest sufficient document set.
 - Default to `contract.md` for non-trivial work.
-- Prefer `status` + `continue` over restarting a healthy paused run.
+- Prefer `status` + `continue` over restarting a healthy paused run, but use `reopen` when an approved run must be superseded explicitly.
 - Do not pass vague user wording directly into the council docs.
 - Do not do the target-repo implementation work yourself when the harness is the requested tool.
-- Do not launch `start` or `continue` and then abandon the supervisor process.
+- Do not launch `start`, `continue`, or `reopen` and then abandon the supervisor process.
 - Summarize the chosen route to the user before launching the harness.
 
 ## Required routing
@@ -108,12 +108,13 @@ Do not invent a new interface. Use the existing CLI:
 - `start`
 - `status`
 - `continue`
+- `reopen`
 
 For document authoring, prefer editing the canonical files directly with your normal file tools when you already have them. Treat `write --body` as a convenience fallback, not the primary path for a capable outer agent.
 
-Use [`references/run-lifecycle.md`](./references/run-lifecycle.md) for command recipes and continuation policy.
+Use [`references/run-lifecycle.md`](./references/run-lifecycle.md) for command recipes and continuation policy, including when an approved run should be reopened instead of continued.
 
-When using `start` or `continue`, also read [`references/supervisor-lifetime.md`](./references/supervisor-lifetime.md).
+When using `start`, `continue`, or `reopen`, also read [`references/supervisor-lifetime.md`](./references/supervisor-lifetime.md).
 
 ## Document rules
 
@@ -137,6 +138,7 @@ Use [`references/failure-recovery.md`](./references/failure-recovery.md) when:
 - the current run looks ambiguous
 - the docs are too weak for launch
 - `continue` is likely but not obviously correct
+- an approved run may need `reopen` because it was false-approved or the canonical docs changed after approval
 - a human paused the run and edited task docs
 
 Use [`references/operator-boundary.md`](./references/operator-boundary.md) if you feel tempted to “just do the feature directly” instead of operating the harness.

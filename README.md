@@ -33,6 +33,7 @@ It does that by combining:
 - an outer-agent skill that decides how to frame the work before launch
 - an approval layer centered on `contract.md`
 - artifact-driven `continue` rather than guessing from stale state
+- explicit `reopen` when a historical approval must be superseded audibly
 
 ## Operator Boundary
 
@@ -41,7 +42,7 @@ When a user asks an outer agent to **use this repo or harness** for some task, t
 That means:
 
 - the outer agent should scaffold or update the canonical council docs
-- then `start` or `continue` the harness
+- then `start`, `continue`, or `reopen` the harness as appropriate
 - and let the generator/reviewer council do the actual target-repo implementation work
 
 It must **not**:
@@ -166,7 +167,7 @@ Use when the user is asking about the harness itself.
 
 - answer directly
 - do not scaffold `.codex-council`
-- do not call `start` or `continue`
+- do not call `start`, `continue`, or `reopen`
 
 ### 2. Inspect or resume an existing run
 
@@ -175,6 +176,7 @@ Use when the user wants to understand or resume a current council run.
 - inspect first
 - prefer `status`
 - prefer `continue` over reinitializing
+- use `reopen` instead of `continue` when the selected run is already approved but that approval was wrong or the canonical requirements changed afterward
 
 ### 3. Concrete execution request
 
@@ -255,7 +257,7 @@ The system is only robust if the outer agent can normalize weak input into stron
 2. It classifies the user request.
 3. It discovers facts from the target repo.
 4. It fills the minimal canonical document set needed for safe execution, usually by editing the files directly with its normal file tools.
-5. It starts or continues the harness with the existing CLI.
+5. It starts, continues, or reopens the harness with the existing CLI.
 
 ### Manual fallback
 
@@ -265,7 +267,7 @@ For a capable outer agent, the recommended path is:
 
 - run `init` if the workspace does not exist
 - fill `task.md`, `review.md`, `spec.md`, and `contract.md` directly with normal file-editing tools
-- then run `start` or `continue`
+- then run `start`, `continue`, or `reopen` as appropriate
 
 From a target repository:
 
@@ -291,6 +293,7 @@ Inspect or resume later:
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --dir /path/to/target-repo
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task --dir /path/to/target-repo
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py reopen my-task --dir /path/to/target-repo --run-id latest --reason-kind false_approved --reason "The approval missed a blocking fallback bug."
 ```
 
 ## CLI Overview
@@ -307,8 +310,10 @@ The public CLI stays intentionally small:
   - inspect the latest or chosen run
 - `continue`
   - resume the latest valid run in place
+- `reopen`
+  - supersede an approved run with a fresh run linked back to the historical approval
 
-The outer-agent skill should orchestrate those commands rather than inventing a parallel interface. For strong agents, that usually means using `init`, then editing the canonical files directly, then calling `start` or `continue`. `write` remains available as a convenience command, not the primary authoring path for agents.
+The outer-agent skill should orchestrate those commands rather than inventing a parallel interface. For strong agents, that usually means using `init`, then editing the canonical files directly, then calling `start`, `continue`, or `reopen` as appropriate. `write` remains available as a convenience command, not the primary authoring path for agents.
 
 ## Runtime Notes
 
@@ -319,6 +324,7 @@ The TUI supervisor:
 - writes role-scoped prompts, messages, statuses, and terminal summaries per turn
 - advances turns only when the expected artifact pairs exist and validate
 - prefers artifact-driven `continue` over stale run metadata
+- keeps `continue` terminal for approved runs and requires explicit `reopen` to supersede them
 - can bootstrap from forked session context when local task docs are missing
 - validates task documents before `start`
 
@@ -329,9 +335,18 @@ The TUI supervisor:
 - a `changes_requested` reviewer verdict
 - a stopped session whose validated artifacts still exist
 
+`reopen` is the intended path after an approved run when:
+
+- the approval was wrong under the requirements that existed at the time
+  - use `--reason-kind false_approved`
+- the canonical docs changed after approval and now supersede it
+  - use `--reason-kind requirements_changed_after_approval`
+
+`reopen` creates a fresh run from the current canonical docs, records the superseded run and turn, stores doc-diff metadata, and appends an audit entry under `.codex-council/reopen-events.jsonl`.
+
 ## Supervisor Lifetime
 
-`start` and `continue` launch a live supervisor process. They are not fire-and-forget hints.
+`start`, `continue`, and `reopen` launch a live supervisor process. They are not fire-and-forget hints.
 
 Important:
 
@@ -341,7 +356,7 @@ Important:
 
 So an outer agent must do one of these:
 
-- wait for `start` or `continue` to keep running
+- wait for `start`, `continue`, or `reopen` to keep running
 - or launch the supervisor in a truly persistent environment
 
 Safe persistent environments:

@@ -3,6 +3,8 @@ Repository root:
 
 {{continue_context_block}}
 
+{{reopen_context_block}}
+
 {{fork_context_block}}
 
 Turn {{turn_name}}.

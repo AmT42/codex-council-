@@ -64,6 +64,19 @@ Route:
 - mode: inspect or resume an existing run
 - commands: `status`, then `continue` if the run is still the right one
 
+## Reopen an approved run
+
+User:
+
+> The run was approved, but that approval was wrong after we reviewed the fallback logic.
+
+Route:
+
+- mode: inspect or resume an existing run
+- commands: `status`, then `reopen`
+- reason kind: `false_approved`
+- process rule: preserve the historical approval and create a fresh linked run instead of forcing `continue`
+
 ## Example: stale run after supervisor death
 
 User:

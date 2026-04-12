@@ -9,6 +9,7 @@ Use the existing CLI:
 - `start`
 - `status`
 - `continue`
+- `reopen`
 
 Do not invent parallel wrapper commands in the outer-agent workflow.
 
@@ -94,10 +95,28 @@ Process rule:
 - `continue` is also a live supervisor process
 - it needs the same lifetime guarantees as `start`
 
+Approved runs are terminal for `continue`.
+
+## Reopen
+
+Use `reopen` only when the selected run is already approved and that approval must be superseded explicitly.
+
+- `false_approved`
+  - the earlier approval was wrong under the intended requirements at the time
+- `requirements_changed_after_approval`
+  - the canonical docs changed after approval and now supersede it
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py reopen my-task --dir /path/to/target-repo --run-id latest --reason-kind false_approved --reason "The earlier approval missed a blocking fallback bug."
+```
+
+`reopen` starts a fresh linked run from the current canonical docs, preserves the old approved run unchanged, and appends an audit entry under `.codex-council/reopen-events.jsonl`.
+
 ## Safety notes
 
 - Expect `start` to reject a dirty target repo in the normal path.
 - If the request is direct-answer-only, do not call any lifecycle command.
 - If the existing run is healthy and suitable, prefer continuing it instead of overwriting the workspace.
+- If the existing run is already approved but wrong or outdated, prefer `reopen` over mutating that run or forcing `continue`.
 - If the docs are too weak, improve the docs before launch instead of hoping the council compensates for them.
 - If the supervisor dies, the role sessions may survive but the council will not keep advancing until `continue` is run.

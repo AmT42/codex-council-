@@ -88,6 +88,10 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         )
         self.assertEqual(status["verdict"], "approved")
 
+    def test_normalize_reopen_reason_kind_rejects_unknown_value(self) -> None:
+        with self.assertRaises(SystemExit):
+            MODULE.normalize_reopen_reason_kind("wrong")
+
     def test_extract_terminal_summary_block_returns_last_complete_summary(self) -> None:
         pane = "\n".join(
             [
@@ -480,6 +484,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 task_root,
                 turn_dir,
                 1,
+                state={"review_bridge": {"mode": "internal"}},
                 inspection=inspection,
                 inline_context=True,
             )
@@ -498,6 +503,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 task_root,
                 turn_dir,
                 1,
+                state={"review_bridge": {"mode": "internal"}},
                 inspection=inspection,
                 inline_context=True,
                 bootstrap_review_block=MODULE.format_fork_bootstrap_review_block(task_root),
@@ -505,6 +511,51 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("distill the current fork/session context", prompt)
             self.assertIn(str(task_root / MODULE.REVIEW_FILENAME), prompt)
             self.assertNotIn(str(role_message_path := turn_dir / "generator" / "message.md"), prompt)
+
+    def test_build_prompts_include_reopen_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            inspection = MODULE.inspect_task_workspace(task_root)
+            reopen_state = {
+                "review_bridge": {"mode": "internal"},
+                "reopen": {
+                    "reason_kind": "false_approved",
+                    "reason_message": "The reviewer missed a blocking fallback bug.",
+                    "reopened_from": {"run_id": "run-1", "turn": "0001"},
+                    "doc_comparison": {
+                        "docs_changed_since_approval": True,
+                        "changed_existing_docs": ["review.md"],
+                        "added_docs": [],
+                        "removed_docs": [],
+                    },
+                },
+            }
+            generator_prompt = MODULE.build_generator_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                "demo-task",
+                state=reopen_state,
+                inspection=inspection,
+                inline_context=True,
+            )
+            reviewer_prompt = MODULE.build_reviewer_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                state=reopen_state,
+                inspection=inspection,
+                inline_context=True,
+            )
+            for prompt in (generator_prompt, reviewer_prompt):
+                self.assertIn("Reopen context:", prompt)
+                self.assertIn("false_approved", prompt)
+                self.assertIn("run `run-1` turn `0001`", prompt)
+                self.assertIn("review.md", prompt)
 
     def test_build_continue_context_mentions_present_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1616,6 +1667,179 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertEqual(captured["kwargs"]["start_role"], "generator")
             self.assertFalse(captured["kwargs"]["reuse_existing_turn_for_first"])
 
+    def test_reopen_run_creates_new_run_metadata_index_and_prompt_context_for_review_only_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.REVIEW_FILENAME).write_text(
+                "# Review\n\n## Findings\n\n- Investigate why the fallback path still drops the new invariant on retry.\n",
+                encoding="utf-8",
+            )
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            MODULE.write_text(turn_one / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_one / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.write_text(turn_one / "reviewer" / "message.md", "reviewer message")
+            MODULE.save_json(
+                turn_one / "reviewer" / "status.json",
+                {
+                    "verdict": "approved",
+                    "summary": "looked good at the time",
+                    "blocking_issues": [],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "pass",
+                        "regression_risk": "pass",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "pass",
+                        "maintainability": "pass",
+                    },
+                },
+            )
+            MODULE.save_turn_metadata(turn_one, 1, "approved", role="reviewer")
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="review",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen-old",
+                reviewer_session="rev-old",
+                review_bridge={"mode": "internal"},
+            )
+            state["status"] = "approved"
+            state["current_turn"] = 1
+            MODULE.save_run_state(run_dir, state)
+            self.commit_repo_changes(repo_root, "record approved run")
+
+            (task_root / MODULE.REVIEW_FILENAME).write_text(
+                "# Review\n\n## Findings\n\n- Investigate why the fallback path still drops the new invariant on retry.\n- Reopen because the requirements now include a new fallback invariant that the old approval never checked.\n",
+                encoding="utf-8",
+            )
+            self.commit_repo_changes(repo_root, "update review after approval")
+
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                reason_kind="requirements_changed_after_approval",
+                reason="The current review requirements changed after the original approval.",
+            )
+            with mock.patch.object(MODULE, "run_id_value", return_value="run-2"), mock.patch.object(
+                MODULE, "read_codex_session_index", return_value=[]
+            ), mock.patch.object(
+                MODULE, "create_tmux_sessions", return_value=None
+            ), mock.patch.object(
+                MODULE, "wait_for_tmux_sessions_ready", return_value=None
+            ), mock.patch.object(
+                MODULE, "supervisor_loop_from", return_value=None
+            ), contextlib.redirect_stdout(io.StringIO()):
+                result = MODULE.reopen_run(args)
+
+            self.assertEqual(result, 0)
+            new_run_dir = task_root / "runs" / "run-2"
+            new_state = MODULE.load_json(new_run_dir / "state.json")
+            self.assertEqual(new_state["reopen"]["reason_kind"], "requirements_changed_after_approval")
+            self.assertEqual(new_state["reopen"]["reopened_from"]["run_id"], "run-1")
+            self.assertEqual(new_state["reopen"]["reopened_from"]["turn"], "0001")
+            self.assertTrue(new_state["reopen"]["doc_comparison"]["docs_changed_since_approval"])
+            self.assertIn("review.md", new_state["reopen"]["doc_comparison"]["changed_existing_docs"])
+            self.assertNotIn("task", new_state["workspace_profile"])
+            reopen_artifact = MODULE.load_json(new_run_dir / MODULE.REOPEN_METADATA_FILENAME)
+            self.assertEqual(reopen_artifact["reopened_from"]["run_id"], "run-1")
+            reopen_index_lines = MODULE.reopen_index_path_for(repo_root).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(reopen_index_lines), 1)
+            reopen_index_entry = json.loads(reopen_index_lines[0])
+            self.assertEqual(reopen_index_entry["new_run_id"], "run-2")
+            self.assertEqual(reopen_index_entry["reason_kind"], "requirements_changed_after_approval")
+            old_status = MODULE.load_json(turn_one / "reviewer" / "status.json")
+            self.assertEqual(old_status["verdict"], "approved")
+
+    def test_reopen_run_rejects_nonapproved_runs_and_points_to_continue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix bug.\n\n## Context\n\n- narrow scope\n\n## Success Signal\n\nA concrete regression is fixed.\n",
+                encoding="utf-8",
+            )
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            MODULE.write_text(turn_one / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_one / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+            )
+            state["status"] = "blocked"
+            MODULE.save_run_state(run_dir, state)
+            self.commit_repo_changes(repo_root, "record unfinished run")
+
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                reason_kind="false_approved",
+                reason="Approval was incorrect.",
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.reopen_run(args)
+            self.assertIn("not approved", str(ctx.exception))
+            self.assertIn("continue demo-task --run-id run-1", str(ctx.exception))
+
+    def test_determine_continue_target_for_approved_run_mentions_reopen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            MODULE.write_text(turn_one / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_one / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.write_text(turn_one / "reviewer" / "message.md", "reviewer message")
+            MODULE.save_json(
+                turn_one / "reviewer" / "status.json",
+                {
+                    "verdict": "approved",
+                    "summary": "all clear",
+                    "blocking_issues": [],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "pass",
+                        "regression_risk": "pass",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "pass",
+                        "maintainability": "pass",
+                    },
+                },
+            )
+
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.determine_continue_target(run_dir, {"review_bridge": {"mode": "internal"}})
+            self.assertIn("use `reopen`", str(ctx.exception))
+
     def test_create_tmux_sessions_skips_reviewer_for_github_review_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run"
@@ -1725,7 +1949,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("spec:", rendered)
             self.assertIn("contract:", rendered)
 
-    def test_build_parser_exposes_write_start_role_shared_fork_and_github_review_args(self) -> None:
+    def test_build_parser_exposes_write_start_role_shared_fork_github_and_reopen_args(self) -> None:
         parser = MODULE.build_parser()
         write_args = parser.parse_args(["write", "task", "demo-task", "--body", "Fix it"])
         start_args = parser.parse_args(
@@ -1744,20 +1968,37 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 "main",
             ]
         )
+        reopen_args = parser.parse_args(
+            [
+                "reopen",
+                "demo-task",
+                "--reason-kind",
+                "false_approved",
+                "--reason",
+                "Approval was wrong.",
+            ]
+        )
         self.assertEqual(write_args.command, "write")
         self.assertEqual(start_args.fork_session_id, "id")
         self.assertEqual(start_args.start_role, "reviewer")
         self.assertEqual(start_args.review_mode, "github_pr_codex")
         self.assertEqual(start_args.github_pr, "42")
         self.assertEqual(start_args.github_base, "main")
+        self.assertEqual(reopen_args.command, "reopen")
+        self.assertEqual(reopen_args.reason_kind, "false_approved")
+        self.assertEqual(reopen_args.reason, "Approval was wrong.")
 
     def test_consumer_docs_reference_canonical_cli_and_document_model(self) -> None:
         repo_root = MODULE_PATH.parents[1]
         readme = (repo_root / "README.md").read_text(encoding="utf-8")
         architecture = (repo_root / "ARCHITECTURE.md").read_text(encoding="utf-8")
         instructs = (repo_root / "INSTRUCTS.md").read_text(encoding="utf-8")
+        skill = (repo_root / "skills" / "codex-council" / "SKILL.md").read_text(encoding="utf-8")
+        run_lifecycle = (repo_root / "skills" / "codex-council" / "references" / "run-lifecycle.md").read_text(encoding="utf-8")
+        failure_recovery = (repo_root / "skills" / "codex-council" / "references" / "failure-recovery.md").read_text(encoding="utf-8")
+        routing = (repo_root / "skills" / "codex-council" / "references" / "routing.md").read_text(encoding="utf-8")
 
-        for command in ("init", "write", "start", "continue", "status"):
+        for command in ("init", "write", "start", "continue", "reopen", "status"):
             self.assertIn(f"`{command}`", readme)
             self.assertIn(f"`{command}`", instructs)
 
@@ -1779,6 +2020,15 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertIn("tmux", architecture)
         self.assertIn("editing the canonical files directly", readme)
         self.assertIn("fill the canonical files directly", instructs)
+        self.assertIn("false_approved", readme)
+        self.assertIn("requirements_changed_after_approval", readme)
+        self.assertIn("false_approved", instructs)
+        self.assertIn("requirements_changed_after_approval", instructs)
+        self.assertIn("`reopen`", skill)
+        self.assertIn("false_approved", run_lifecycle)
+        self.assertIn("requirements_changed_after_approval", run_lifecycle)
+        self.assertIn("`reopen`", failure_recovery)
+        self.assertIn("`reopen`", routing)
 
     def test_codex_council_skill_reference_pack_is_present_and_linked(self) -> None:
         repo_root = MODULE_PATH.parents[1]

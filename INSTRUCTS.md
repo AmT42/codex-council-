@@ -12,7 +12,7 @@ The outer agent should not require the user to understand:
 
 - the document taxonomy
 - the runtime model
-- the distinction between `start` and `continue`
+- the distinction between `start`, `continue`, and `reopen`
 - what makes a strong engineering brief
 
 The outer agent must compensate for that by being strict and explicit.
@@ -25,7 +25,7 @@ That means:
 
 - inspect the target repo
 - synthesize strong council docs
-- decide between direct answer, `start`, and `continue`
+- decide between direct answer, `start`, `continue`, and `reopen`
 - launch or resume the council
 
 That does **not** mean:
@@ -42,7 +42,7 @@ If the user says “use this repo to add feature X”, interpret that as:
 
 ## Non-Negotiable Process Boundary
 
-When you run `start` or `continue`, you are launching a live supervisor process.
+When you run `start`, `continue`, or `reopen`, you are launching a live supervisor process.
 
 You must either:
 
@@ -57,7 +57,7 @@ Safe patterns:
 
 Unsafe pattern:
 
-- launch `start` or `continue` from your outer-agent shell
+- launch `start`, `continue`, or `reopen` from your outer-agent shell
 - then let that shell exit or get interrupted
 
 If that happens, a role session may finish in `tmux` while the reviewer never launches, because the supervisor is already gone.
@@ -91,7 +91,7 @@ The outer agent should:
 
 - avoid unnecessary questions
 - preserve the user’s intent precisely
-- move directly into `start` or `continue` once the docs are strong enough
+- move directly into `start`, `continue`, or `reopen` once the docs are strong enough
 
 ## Request Classification
 
@@ -110,7 +110,7 @@ Behavior:
 
 - answer directly
 - do not create `.codex-council` files
-- do not call `start` or `continue`
+- do not call `start`, `continue`, or `reopen`
 
 ### 2. Inspect or resume an existing run
 
@@ -125,6 +125,7 @@ Behavior:
 - inspect existing task workspaces and runs first
 - prefer `status` to understand the current state
 - prefer `continue` over creating a new run when the existing run is still the right one
+- prefer `reopen` when the selected run is already approved but must be superseded explicitly
 - do not overwrite task docs unless the user or repo state clearly requires it
 - use this route to recover stale runs where the supervisor died but the artifacts indicate the correct next role
 
@@ -322,7 +323,7 @@ Before launching with `start`, the outer agent should mentally check:
 - are the chosen docs the smallest sufficient set?
 - does `contract.md` make approval auditable?
 - would a reviewer know how to reject a bad implementation from these docs?
-- is this really a new run, or should it be `continue`?
+- is this really a new run, or should it be `continue` or `reopen`?
 - am I still acting as harness operator rather than drifting into doing the target task myself?
 - will the supervisor process remain alive long enough for orchestration to continue?
 
@@ -332,13 +333,13 @@ If the answer is no, do not launch yet.
 
 The outer agent should use the existing CLI, not invent new commands.
 
-The canonical commands are `init`, `write`, `start`, `status`, and `continue`.
+The canonical commands are `init`, `write`, `start`, `status`, `continue`, and `reopen`.
 
 For a capable outer agent, the preferred authoring path is:
 
 - use `init` to scaffold if needed
 - inspect and fill the canonical files directly with normal file-editing tools
-- use `start` or `continue` once the docs are strong
+- use `start`, `continue`, or `reopen` once the docs are strong
 
 Treat `write --body` as a fallback for:
 
@@ -413,7 +414,24 @@ Use `continue` after:
 - session loss where validated artifacts still exist
 - stale runs where the supervisor died but `status` now shows the correct derived continuation
 
-Like `start`, `continue` must also be kept alive. Do not launch it from an outer-agent session that may die immediately afterward.
+Like `start`, `continue` must also be kept alive. The same lifetime rule applies to `reopen`.
+
+Approved runs are terminal for `continue`. If `status` shows an approved run and that approval must be superseded, use `reopen` instead.
+
+### Reopen an approved run
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py reopen my-task --dir /path/to/target-repo --run-id latest --reason-kind false_approved --reason "The earlier approval missed a blocking fallback bug."
+```
+
+Use `reopen` only when the selected run is already approved and that approval must be superseded audibly.
+
+- `false_approved`
+  - the prior approval was wrong under the requirements that existed at the time
+- `requirements_changed_after_approval`
+  - the canonical docs changed after approval and now supersede it
+
+`reopen` creates a fresh run, preserves the approved run unchanged, records a reopen entry in `.codex-council/reopen-events.jsonl`, and carries the reopen reason plus doc-diff metadata into the new generator/reviewer prompts.
 
 ## Continue Policy
 
@@ -421,6 +439,7 @@ When a suitable task workspace and run already exist:
 
 - inspect first
 - prefer continuing in place
+- use `reopen` when the relevant run is already approved but now wrong or outdated
 - avoid reinitializing unless the user clearly wants a new task
 
 When the request is concrete and no suitable run exists:
@@ -442,9 +461,10 @@ When the request is direct-answer-only:
 - Do not ask broad product questions before simple debugging requests.
 - Do not skip `contract.md` for non-trivial work just because the request sounds concrete.
 - Do not restart a healthy paused run when `continue` is the correct action.
+- Do not use `continue` to mutate or override a historical approval; use `reopen`.
 - Do not put product requirements into task-local `AGENTS.md`.
 - Do not create `spec.md` when a short `task.md` already makes the work executable.
 - Do not launch the council with a weak brief just because the user wants speed.
 - Do not implement the target-repo feature directly when the user explicitly asked to use this harness.
 - Do not add harness-side glue code or wrappers just because the target feature would otherwise require some setup; first operate the existing harness unless the user explicitly asked to extend `council-agent`.
-- Do not fire-and-forget `start` or `continue` from an outer-agent session that may kill the supervisor when it exits.
+- Do not fire-and-forget `start`, `continue`, or `reopen` from an outer-agent session that may kill the supervisor when it exits.

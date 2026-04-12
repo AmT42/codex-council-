@@ -24,7 +24,7 @@ User
         -> codex_tui_supervisor.py
           -> generator / reviewer role sessions
             -> turn artifacts
-              -> status / continue / approval
+              -> status / continue / reopen / approval
 ```
 
 ### User
@@ -45,7 +45,7 @@ Its responsibilities:
 
 - classify the request
 - inspect the target repo and current `.codex-council` state
-- decide whether to answer directly, start a run, or continue a run
+- decide whether to answer directly, start a run, continue a run, or reopen an approved run
 - synthesize the right canonical documents
 - ask only the minimum blocking questions
 
@@ -90,6 +90,7 @@ It is responsible for:
 
 - workspace scaffolding
 - document validation before `start`
+- explicit `reopen` lifecycle handling for approved runs
 - role-session launch and reuse
 - prompt artifact generation
 - artifact validation
@@ -115,6 +116,7 @@ Core files:
 
 - `turn.json`
 - `context_manifest.json`
+- `reopen.json` when the run was created via `reopen`
 - `<role>/prompt.md`
 - `<role>/message.md`
 - `<role>/status.json`
@@ -135,6 +137,8 @@ The system has multiple kinds of state, but they do not all have equal authority
 
 - `state.json`
   - operational cache, useful but not authoritative when artifacts disagree
+- `.codex-council/reopen-events.jsonl`
+  - append-only reopen audit store for approved-run supersessions
 - live session state
   - useful for continuation, not a substitute for validated artifacts
 
@@ -195,6 +199,14 @@ This avoids resuming the wrong role or wrong turn.
 
 It also makes recovery possible when the supervisor died and `state.json` is stale but the role artifacts already show what should happen next.
 
+Approved runs are terminal for `continue`.
+
+If the approval was wrong or the canonical requirements changed afterward, the runtime must require an explicit `reopen` that:
+
+- preserves the old approved run unchanged
+- creates a fresh linked run from the current canonical docs
+- records reopen metadata and doc-change context durably
+
 ### 5. Approval discipline
 
 Approval is structured, not narrative.
@@ -236,7 +248,7 @@ It must not become a dumping ground for task-specific product requirements.
 - canonical file names
 - role separation
 - artifact-driven transitions
-- CLI shape
+- CLI shape, including explicit `reopen`
 - review dimension model
 
 ### Customizable
@@ -256,6 +268,7 @@ The harness is especially designed to surface these failures instead of silently
 - generator artifacts are missing or invalid
 - reviewer repeats vague blockers without stronger evidence
 - a paused run is resumed from the wrong state
+- a false approval or outdated approval is silently reused instead of being superseded explicitly
 
 The correct stop state for documentation ambiguity is `needs_human`, not continued guessing.
 
@@ -281,7 +294,7 @@ Breaking that boundary is a product failure, even if the direct implementation w
 
 ## Process-Lifetime Rule
 
-When an outer agent launches `start` or `continue`, it must preserve the lifetime of the supervisor process.
+When an outer agent launches `start`, `continue`, or `reopen`, it must preserve the lifetime of the supervisor process.
 
 Valid patterns:
 

@@ -10,7 +10,7 @@ The correct route matters because it determines:
 - whether you should inspect an existing run
 - which canonical docs to write
 - whether to ask questions
-- whether to use `start` or `continue`
+- whether to use `start`, `continue`, or `reopen`
 
 ## Mode 1: Direct answer only
 
@@ -25,7 +25,7 @@ Action:
 
 - answer directly
 - do not scaffold `.codex-council`
-- do not run `start` or `continue`
+- do not run `start`, `continue`, or `reopen`
 
 ## Mode 2: Inspect or resume an existing run
 
@@ -40,6 +40,7 @@ Action:
 - inspect current workspace and run state first
 - prefer `status`
 - prefer `continue` when the existing run is still the right one
+- prefer `reopen` when the selected run is already approved but must be superseded explicitly
 - avoid overwriting docs unless the repo state clearly requires it
 
 ## Mode 3: Concrete execution request
@@ -101,7 +102,7 @@ Before launch, summarize the route to the user in one short block:
 - chosen mode
 - docs being written
 - whether questions were skipped or asked
-- whether you are about to `start` or `continue`
+- whether you are about to `start`, `continue`, or `reopen`
 
 ## Default hierarchy
 

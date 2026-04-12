@@ -8,7 +8,7 @@ When the user asks you to **use this harness/repo/skill/script** for a task, you
 
 - inspect the target repo
 - create or update `task.md`, `review.md`, `spec.md`, and `contract.md` as needed
-- choose between direct answer, `start`, and `continue`
+- choose between direct answer, `start`, `continue`, and `reopen`
 - launch or resume the council
 
 ## What you must not do
@@ -49,4 +49,4 @@ Correct response:
 - inspect the target repo
 - synthesize the right docs
 - write `task.md`, `spec.md`, and `contract.md` as needed
-- call `init` / `write` / `start` or `status` / `continue`
+- call `init` / `write` / `start` or `status` / `continue` / `reopen`

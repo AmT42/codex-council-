@@ -2,7 +2,7 @@
 
 ## Core rule
 
-`start` and `continue` launch a live supervisor process.
+`start`, `continue`, and `reopen` launch a live supervisor process.
 
 That process must remain alive while the council is advancing turns.
 
@@ -22,7 +22,7 @@ If the supervisor dies:
 
 ## Safe patterns
 
-- wait for the `start` or `continue` command
+- wait for the `start`, `continue`, or `reopen` command
 - run it inside a dedicated terminal that stays open
 - run it inside a dedicated `tmux` session
 - run it as a truly detached background job
@@ -44,5 +44,5 @@ If you suspect this happened:
 
 1. run `status`
 2. inspect `derived_continuation`
-3. run `continue` if the next role is now derivable from the artifacts
+3. run `continue` if the next role is now derivable from the artifacts, or `reopen` if the selected run is already approved but must be superseded
 4. keep the new supervisor process alive this time
