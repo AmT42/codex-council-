@@ -830,6 +830,67 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertEqual(sleeps, [600])
             self.assertEqual(state["review_bridge"]["github"]["review_wait"]["poll_count"], 1)
 
+    def test_wait_for_new_github_codex_review_comment_rejects_post_deadline_comment_on_late_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            request_created_at = "2026-04-12T01:00:00Z"
+            resume_epoch = MODULE.parse_utc_timestamp("2026-04-12T01:31:00Z")
+            assert resume_epoch is not None
+            now = [resume_epoch]
+            sleeps: list[float] = []
+
+            def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+                now[0] += seconds
+
+            state = {
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "last_consumed_review_comment_id": None,
+                        "last_request_comment_created_at": request_created_at,
+                        "last_request_comment_id": 101,
+                        "pr_number": 9,
+                        "repo": "repo",
+                        "repo_owner": "acme",
+                        "review_wait": {
+                            "deadline_at": "2026-04-12T01:30:00Z",
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": "2026-04-12T01:25:00Z",
+                            "poll_count": 4,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": request_created_at,
+                        },
+                    },
+                },
+            }
+            late_comment = {
+                "id": 202,
+                "created_at": "2026-04-12T01:30:30Z",
+                "body": "Codex Review: Too late.",
+            }
+            with mock.patch.object(MODULE.time, "time", side_effect=lambda: now[0]), mock.patch.object(
+                MODULE.time,
+                "sleep",
+                side_effect=fake_sleep,
+            ), mock.patch.object(
+                MODULE,
+                "list_github_pr_issue_comments",
+                return_value=[late_comment],
+            ):
+                with self.assertRaises(MODULE.SupervisorRuntimeError) as ctx:
+                    MODULE.wait_for_new_github_codex_review_comment(
+                        run_dir,
+                        state,
+                        1,
+                        timeout_seconds=1800,
+                        reuse_existing_request=True,
+                    )
+            self.assertEqual(ctx.exception.phase, "github_review_timeout")
+            self.assertEqual(sleeps, [])
+            self.assertEqual(state["review_bridge"]["github"]["review_wait"]["poll_count"], 5)
+
     def test_run_github_codex_review_phase_stops_on_terminal_no_blocker_comment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run"

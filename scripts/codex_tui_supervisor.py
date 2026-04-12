@@ -3175,16 +3175,20 @@ def select_latest_unconsumed_github_codex_review_comment(
     request_comment_id: int | None,
     request_comment_created_at: str | None,
     last_consumed_comment_id: int | None,
+    latest_allowed_created_at: str | None = None,
 ) -> dict | None:
     candidates: list[dict] = []
+    latest_allowed_created_at_epoch = parse_utc_timestamp(latest_allowed_created_at)
     for comment in comments:
         comment_id = comment.get("id")
         body = comment.get("body")
         created_at = comment.get("created_at")
+        created_at_epoch = parse_utc_timestamp(created_at if isinstance(created_at, str) else None)
         if (
             not isinstance(comment_id, int)
             or not isinstance(body, str)
             or not isinstance(created_at, str)
+            or created_at_epoch is None
         ):
             continue
         if request_comment_id is not None and comment_id <= request_comment_id:
@@ -3192,6 +3196,11 @@ def select_latest_unconsumed_github_codex_review_comment(
         if last_consumed_comment_id is not None and comment_id == last_consumed_comment_id:
             continue
         if request_comment_created_at and created_at < request_comment_created_at:
+            continue
+        if (
+            latest_allowed_created_at_epoch is not None
+            and created_at_epoch > latest_allowed_created_at_epoch
+        ):
             continue
         if not body.lstrip().startswith(GITHUB_CODEX_REVIEW_PREFIX):
             continue
@@ -3317,6 +3326,7 @@ def wait_for_new_github_codex_review_comment(
             request_comment_id=request_comment_id,
             request_comment_created_at=request_comment_created_at,
             last_consumed_comment_id=github_state.get("last_consumed_review_comment_id"),
+            latest_allowed_created_at=wait_state.get("deadline_at"),
         )
         if comment is not None:
             github_state["last_consumed_review_comment_body_sha256"] = hash_text(
