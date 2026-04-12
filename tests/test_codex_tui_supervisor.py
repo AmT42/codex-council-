@@ -14,6 +14,7 @@ from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "codex_tui_supervisor.py"
+FIXTURES_ROOT = MODULE_PATH.parents[1] / "tests" / "fixtures"
 SPEC = importlib.util.spec_from_file_location("codex_tui_supervisor", MODULE_PATH)
 assert SPEC is not None
 MODULE = importlib.util.module_from_spec(SPEC)
@@ -186,6 +187,91 @@ class CodexTuiSupervisorTests(unittest.TestCase):
 
             (task_root / MODULE.CONTRACT_FILENAME).write_text(MODULE.read_template("scaffold", MODULE.CONTRACT_FILENAME), encoding="utf-8")
             self.assertTrue(MODULE.lint_contract_workspace_readiness(task_root)[0])
+
+    def test_golden_brief_quality_examples_pass_lints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            brief_root = FIXTURES_ROOT / "brief_quality"
+            (task_root / MODULE.TASK_FILENAME).write_text((brief_root / "good_task.md").read_text(encoding="utf-8"), encoding="utf-8")
+            (task_root / MODULE.REVIEW_FILENAME).write_text((brief_root / "good_review.md").read_text(encoding="utf-8"), encoding="utf-8")
+            (task_root / MODULE.SPEC_FILENAME).write_text((brief_root / "good_spec.md").read_text(encoding="utf-8"), encoding="utf-8")
+            (task_root / MODULE.CONTRACT_FILENAME).write_text((brief_root / "good_contract.md").read_text(encoding="utf-8"), encoding="utf-8")
+
+            self.assertEqual(MODULE.lint_task_workspace_readiness(task_root)[0], [])
+            self.assertEqual(MODULE.lint_review_workspace_readiness(task_root / MODULE.REVIEW_FILENAME)[0], [])
+            self.assertEqual(MODULE.lint_spec_workspace_readiness(task_root)[0], [])
+            self.assertEqual(MODULE.lint_contract_workspace_readiness(task_root)[0], [])
+
+    def test_lint_task_rejects_generic_success_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nDebug why sync duplicates rows after retry.\n\n## Context\n\n- The issue appears in the background sync worker.\n\n## Success Signal\n\nWorks.\n",
+                encoding="utf-8",
+            )
+            errors, _ = MODULE.lint_task_workspace_readiness(task_root)
+            self.assertTrue(any("success signal is too generic" in item for item in errors))
+
+    def test_lint_review_rejects_generic_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            review_path = Path(tmp_dir) / "review.md"
+            review_path.write_text("# Review\n\n## Findings\n\n- Fix this\n\n## Context\n\n- logs pending\n", encoding="utf-8")
+            errors, _ = MODULE.lint_review_workspace_readiness(review_path)
+            self.assertTrue(any("too generic" in item for item in errors))
+
+    def test_lint_spec_rejects_unfilled_core_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n## Goal\n\nBuild dashboard\n\n## User Outcome\n\nUsers can use it.\n\n## In Scope\n\n- dashboard\n\n## Out of Scope\n\n- none\n\n## Constraints\n\n- keep API\n\n## Existing Context\n\nThere is an existing billing page.\n\n## Desired Behavior\n\nWorks.\n\n## Technical Boundaries\n\n- keep routes stable\n\n## Validation Expectations\n\nTests.\n\n## Open Questions\n\n- none\n",
+                encoding="utf-8",
+            )
+            errors, _ = MODULE.lint_spec_workspace_readiness(task_root)
+            self.assertTrue(any("`## Desired Behavior`" in item for item in errors))
+
+    def test_lint_contract_rejects_vague_items_and_warns_without_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] Production-ready experience\n- [ ] Better UX overall\n",
+                encoding="utf-8",
+            )
+            errors, warnings = MODULE.lint_contract_workspace_readiness(task_root)
+            self.assertTrue(any("too vague or aspirational" in item for item in errors))
+            self.assertTrue(any("verification item" in item for item in warnings))
+
+    def test_validate_start_rejects_broad_task_without_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text=None)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nBuild a billing dashboard for finance operators.\n\n## Context\n\n- The work spans summary metrics, retry state, and recent invoice failures.\n- Preserve the existing route and API boundaries.\n\n## Success Signal\n\nFinance operators can inspect billing health from one dashboard and the relevant verification passes.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] Finance operators can inspect billing health from one dashboard.\n- [ ] Relevant automated verification for the changed behavior is present and passing.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as exc:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("requires spec.md", str(exc.exception))
+
+    def test_validate_start_rejects_spec_without_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text=None)
+            brief_root = FIXTURES_ROOT / "brief_quality"
+            (task_root / MODULE.TASK_FILENAME).write_text((brief_root / "good_task.md").read_text(encoding="utf-8"), encoding="utf-8")
+            (task_root / MODULE.SPEC_FILENAME).write_text((brief_root / "good_spec.md").read_text(encoding="utf-8"), encoding="utf-8")
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as exc:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("spec.md should be paired with contract.md", str(exc.exception))
 
     def test_write_document_command_writes_requested_doc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -406,7 +492,10 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             repo_root = Path(tmp_dir) / "repo"
             self.init_git_repo(repo_root)
             task_root = self.scaffold_base_workspace(repo_root)
-            (task_root / MODULE.TASK_FILENAME).write_text("# Task\n\n## Request\n\nFix bug\n\n## Context\n\nctx\n\n## Success Signal\n\nworks\n", encoding="utf-8")
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix the parser bug that breaks the fallback path.\n\n## Context\n\n- The parser should preserve existing API behavior.\n- The broken path appears in fallback handling rather than normal parsing.\n\n## Success Signal\n\nThe fallback path behaves correctly again and the relevant verification passes.\n",
+                encoding="utf-8",
+            )
             self.commit_repo_changes(repo_root, "add task")
             args = argparse.Namespace(
                 task_name="demo-task",
@@ -1097,7 +1186,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.init_git_repo(repo_root)
             task_root = self.scaffold_base_workspace(repo_root)
             (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nFix bug\n\n## Context\n\nctx\n\n## Success Signal\n\nworks\n",
+                "# Task\n\n## Request\n\nFix the fallback path that leaves the parser in a partial state.\n\n## Context\n\n- The failure is in the parser fallback path, not the happy path.\n- Preserve the public API while fixing the partial-state behavior.\n\n## Success Signal\n\nThe fallback path no longer leaves partial state behind and the relevant verification passes.\n",
                 encoding="utf-8",
             )
             run_dir = task_root / "runs" / "run-1"
@@ -1154,7 +1243,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.init_git_repo(repo_root)
             task_root = self.scaffold_base_workspace(repo_root)
             (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nFix bug\n\n## Context\n\nctx\n\n## Success Signal\n\nworks\n",
+                "# Task\n\n## Request\n\nFix the fallback path that leaves the parser in a partial state.\n\n## Context\n\n- The failure is in the parser fallback path, not the happy path.\n- Preserve the public API while fixing the partial-state behavior.\n\n## Success Signal\n\nThe fallback path no longer leaves partial state behind and the relevant verification passes.\n",
                 encoding="utf-8",
             )
             run_dir = task_root / "runs" / "run-1"
@@ -1242,7 +1331,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.init_git_repo(repo_root)
             task_root = self.scaffold_base_workspace(repo_root)
             (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nFix bug\n\n## Context\n\nctx\n\n## Success Signal\n\nworks\n",
+                "# Task\n\n## Request\n\nFix the fallback path that leaves the parser in a partial state.\n\n## Context\n\n- The failure is in the parser fallback path, not the happy path.\n- Preserve the public API while fixing the partial-state behavior.\n\n## Success Signal\n\nThe fallback path no longer leaves partial state behind and the relevant verification passes.\n",
                 encoding="utf-8",
             )
             self.commit_repo_changes(repo_root, "add task")
@@ -1357,6 +1446,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
     def test_consumer_docs_reference_canonical_cli_and_document_model(self) -> None:
         repo_root = MODULE_PATH.parents[1]
         readme = (repo_root / "README.md").read_text(encoding="utf-8")
+        architecture = (repo_root / "ARCHITECTURE.md").read_text(encoding="utf-8")
         instructs = (repo_root / "INSTRUCTS.md").read_text(encoding="utf-8")
 
         for command in ("init", "write", "start", "continue", "status"):
@@ -1370,6 +1460,9 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertIn("`AGENTS.md`", readme)
         self.assertIn("`AGENTS.md`", instructs)
         self.assertIn("maintainer guidance", instructs)
+        self.assertIn("outer coding agent", readme)
+        self.assertIn("source of truth", architecture.lower())
+        self.assertIn("artifact-driven", architecture)
 
     def test_codex_council_skill_reference_pack_is_present_and_linked(self) -> None:
         repo_root = MODULE_PATH.parents[1]
@@ -1380,29 +1473,38 @@ class CodexTuiSupervisorTests(unittest.TestCase):
 
         expected_refs = (
             "references/routing.md",
+            "references/novice-normalization.md",
             "references/task-doc.md",
             "references/review-doc.md",
             "references/spec-doc.md",
             "references/contract-doc.md",
             "references/run-lifecycle.md",
-            "references/examples.md",
+            "references/failure-recovery.md",
+            "references/user-sophistication-examples.md",
+            "references/task-type-examples.md",
         )
         for relative_ref in expected_refs:
             self.assertTrue((skill_root / relative_ref).exists())
             self.assertIn(relative_ref, skill_text)
 
-    def test_scaffold_templates_emphasize_task_default_spec_escalation_and_contract_default(self) -> None:
+    def test_scaffold_templates_and_role_instructions_emphasize_brief_quality(self) -> None:
         repo_root = MODULE_PATH.parents[1]
         task_template = (repo_root / "templates" / "scaffold" / "task.md").read_text(encoding="utf-8")
+        review_template = (repo_root / "templates" / "scaffold" / "review.md").read_text(encoding="utf-8")
         spec_template = (repo_root / "templates" / "scaffold" / "spec.md").read_text(encoding="utf-8")
         contract_template = (repo_root / "templates" / "scaffold" / "contract.md").read_text(encoding="utf-8")
+        generator_instructions = (repo_root / "templates" / "scaffold" / "generator.instructions.md").read_text(encoding="utf-8")
+        reviewer_instructions = (repo_root / "templates" / "scaffold" / "reviewer.instructions.md").read_text(encoding="utf-8")
 
         self.assertIn("default starting point for most execution requests", task_template)
+        self.assertIn("pair this file with `contract.md`", review_template)
         self.assertIn("pair this file with `contract.md`", task_template)
         self.assertIn("deeper structure than `task.md`", spec_template)
         self.assertIn("keep `contract.md` alongside this file", spec_template)
         self.assertIn("default acceptance and approval checklist", contract_template)
         self.assertIn("Skip it only for ultra-trivial tasks", contract_template)
+        self.assertIn("do not compensate by inventing missing requirements", generator_instructions)
+        self.assertIn("vague or aspirational `contract.md` items", reviewer_instructions)
 
 
 if __name__ == "__main__":

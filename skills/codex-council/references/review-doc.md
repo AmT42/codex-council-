@@ -25,6 +25,22 @@ Under `## Context`:
 - add logs, repro steps, stack traces, links, or code references
 - include only supporting detail that makes the findings easier to validate
 
+## Quality bar
+
+A good `review.md` should give the generator enough signal to triage findings as `agree`, `disagree`, or `uncertain`.
+
+Weak findings:
+
+- “fix this”
+- “still broken”
+- “make it robust”
+
+Strong findings:
+
+- describe the behavior mismatch
+- mention likely surfaces
+- point at the repro or evidence
+
 ## Good defaults
 
 - Phrase findings as issues to investigate or fix, not unquestionable truth.

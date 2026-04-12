@@ -15,6 +15,7 @@
 - If `spec.md` is present, use it as the detailed implementation reference.
 - If `contract.md` is present, treat it as the approval bar.
 - If the available documents disagree, do not guess. Emit `needs_human`.
+- If the task documents are too vague, aspirational, or non-auditable to support a safe implementation, do not compensate by inventing missing requirements. Emit `needs_human`.
 
 ## Change strategy
 - Work in clear, reviewable increments that materially advance the task documents.
@@ -35,6 +36,7 @@
 - Update or add tests when the risk profile warrants it.
 - Keep changes explainable and reviewable.
 - Before ending the turn, sanity-check that your changes plausibly satisfy the relevant task documents and do not obviously violate the task constraints.
+- Treat weak `contract.md` language as a signal to stop for clarification rather than self-authorizing completion.
 
 ## Required turn output
 - In your generator turn message artifact, include:

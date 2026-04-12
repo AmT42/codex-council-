@@ -8,6 +8,8 @@ Use it when the work starts from:
 - external comments
 - a debugging handoff
 
+For most non-trivial findings-driven work, pair this file with `contract.md` so approval stays auditable.
+
 ## Findings
 
 - Describe the concrete issue, finding, or blocker to fix.

@@ -24,6 +24,16 @@ Fill:
 - `## Success Signal`
   - what should be true when the work is done
 
+## Quality bar
+
+A good `task.md` should let the generator start confidently without inventing missing product intent.
+
+It should:
+
+- name the actual behavior, not just a vibe
+- identify relevant surfaces or constraints when known
+- say what success means in observable terms
+
 ## Good defaults
 
 - Mention specific failing behavior, not vague aspirations.
@@ -33,10 +43,11 @@ Fill:
 
 ## Escalate to `spec.md` when
 
-- the task now spans multiple subsystems
+- the task spans multiple subsystems
 - in/out scope boundaries matter
 - the expected behavior needs structured elaboration
 - non-obvious validation expectations need to be captured
+- the request contains broad feature language instead of a narrow implementation target
 
 ## Example seed
 

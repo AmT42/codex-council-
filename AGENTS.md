@@ -4,6 +4,15 @@ This repository is the implementation of the `codex-council` harness itself.
 
 If you are working in this repo, you are usually changing the harness, not the target project being reviewed or implemented.
 
+This file is maintainer-facing guidance for agents modifying or customizing this harness repository.
+
+If you need the consumer-facing operating surface for an outer agent using the harness, use:
+
+- `README.md`
+- `ARCHITECTURE.md`
+- `INSTRUCTS.md`
+- `skills/codex-council/`
+
 ## What This Repo Is
 
 - This repo runs a two-role Codex council:

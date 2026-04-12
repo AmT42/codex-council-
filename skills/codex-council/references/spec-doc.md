@@ -29,6 +29,17 @@ Fill the existing sections with concrete decisions:
 - `## Validation Expectations`
 - `## Open Questions`
 
+## Quality bar
+
+The spec should answer enough questions that the generator does not need to invent architecture or scope boundaries.
+
+At minimum, it should make clear:
+
+- what is being built or changed
+- what is explicitly in and out of scope
+- what constraints matter
+- what validation the reviewer should expect
+
 ## Question policy
 
 Ask blocking questions before launch.

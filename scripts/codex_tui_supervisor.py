@@ -69,6 +69,23 @@ REVIEW_PLACEHOLDER_MARKERS = (
     "Describe the concrete issue, finding, or blocker to fix.",
     "Optional extra context",
 )
+TASK_PLACEHOLDER_MARKERS = (
+    "Describe the bug, ticket, or requested change in a few concrete sentences.",
+    "Add just the context needed to act safely:",
+    "Describe what should be true when this task is done.",
+)
+SPEC_PLACEHOLDER_MARKERS = (
+    "Describe the main thing that should be built or changed.",
+    "Describe what a user, operator, or stakeholder should be able to do or observe when the work is complete.",
+    "List the behavior, systems, or surfaces that are part of this request.",
+    "List things that should not be changed in this task, even if they seem related.",
+    "List important limits or requirements.",
+    "Describe the current product or technical context the council should know.",
+    "Describe the required behavior in concrete terms.",
+    "Describe known technical boundaries, touched areas, interfaces, or architectural preferences.",
+    "Describe how the work should be validated.",
+    "List anything that is still undecided or ambiguous.",
+)
 TASK_REQUIRED_HEADINGS = (
     "# Task",
     "## Request",
@@ -89,6 +106,58 @@ SPEC_REQUIRED_HEADINGS = (
     "## Open Questions",
 )
 TASK_VAGUE_WORDS = ("production-ready", "production ready", "scalable", "viral", "enterprise", "best-in-class")
+GENERIC_SUCCESS_SIGNAL_PHRASES = (
+    "works",
+    "it works",
+    "done",
+    "fixed",
+    "is fixed",
+    "should work",
+    "works correctly",
+)
+GENERIC_REVIEW_FINDING_PHRASES = (
+    "fix this",
+    "fix bug",
+    "bug",
+    "issue",
+    "problem",
+    "still broken",
+    "make it robust",
+)
+CONTRACT_VAGUE_PHRASES = TASK_VAGUE_WORDS + (
+    "good ux",
+    "solid",
+    "robust",
+    "better",
+    "clean up",
+)
+VERIFICATION_HINT_WORDS = (
+    "test",
+    "tests",
+    "verify",
+    "verified",
+    "verification",
+    "validate",
+    "validation",
+    "repro",
+    "passing",
+    "manual",
+    "screenshot",
+    "typecheck",
+    "lint",
+)
+BROAD_TASK_HINT_WORDS = (
+    "build",
+    "feature",
+    "dashboard",
+    "workflow",
+    "system",
+    "platform",
+    "redesign",
+    "overhaul",
+    "onboarding",
+    "pipeline",
+)
 ARTIFACT_REPAIR_ATTEMPTS = 1
 SESSION_RECOVERY_ATTEMPTS = 1
 RAW_OUTPUT_CAPTURE_TIMEOUT_SECONDS = 30.0
@@ -797,6 +866,63 @@ def review_items(review_text: str) -> list[str]:
     ]
 
 
+def normalize_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def meaningful_word_count(value: str) -> int:
+    return len(re.findall(r"[A-Za-z0-9_/-]+", value))
+
+
+def contains_any_phrase(value: str, phrases: tuple[str, ...]) -> bool:
+    normalized = normalize_text(value)
+    return any(normalize_text(phrase) in normalized for phrase in phrases)
+
+
+def extract_markdown_section(text: str, heading: str) -> str:
+    lines = text.splitlines()
+    capture = False
+    collected: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == heading:
+            capture = True
+            collected = []
+            continue
+        if capture and stripped.startswith("## "):
+            break
+        if capture:
+            collected.append(line)
+    return "\n".join(collected).strip()
+
+
+def strip_checklist_prefix(line: str) -> str:
+    return re.sub(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s*", "", line).strip()
+
+
+def strip_bullet_prefix(line: str) -> str:
+    return re.sub(r"^\s*[-*]\s*", "", line).strip()
+
+
+def section_contains_placeholder(section_text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in section_text for marker in markers)
+
+
+def task_brief_requires_spec(task_text: str) -> bool:
+    request_text = extract_markdown_section(task_text, "## Request")
+    context_text = extract_markdown_section(task_text, "## Context")
+    success_text = extract_markdown_section(task_text, "## Success Signal")
+    normalized_request = normalize_text(request_text)
+    broad = any(normalize_text(word) in normalized_request for word in BROAD_TASK_HINT_WORDS)
+    if not broad:
+        return False
+    return (
+        meaningful_word_count(request_text) < 16
+        or meaningful_word_count(context_text) < 8
+        or meaningful_word_count(success_text) < 8
+    )
+
+
 def lint_task_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]]:
     task_text = (task_root / TASK_FILENAME).read_text(encoding="utf-8")
     errors: list[str] = []
@@ -806,6 +932,25 @@ def lint_task_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]
     for heading in TASK_REQUIRED_HEADINGS:
         if heading not in task_text:
             errors.append(f"{TASK_FILENAME} is missing required heading: {heading}")
+    request_text = extract_markdown_section(task_text, "## Request")
+    context_text = extract_markdown_section(task_text, "## Context")
+    success_text = extract_markdown_section(task_text, "## Success Signal")
+    if not request_text or section_contains_placeholder(request_text, TASK_PLACEHOLDER_MARKERS):
+        errors.append(f"{TASK_FILENAME} needs a concrete `## Request` section")
+    elif meaningful_word_count(request_text) < 4:
+        errors.append(f"{TASK_FILENAME} request is too short to be a useful engineering brief")
+    if not context_text or section_contains_placeholder(context_text, TASK_PLACEHOLDER_MARKERS):
+        errors.append(f"{TASK_FILENAME} needs concrete repo or problem context in `## Context`")
+    elif meaningful_word_count(context_text) < 2:
+        errors.append(f"{TASK_FILENAME} context is too thin to act safely")
+    if not success_text or section_contains_placeholder(success_text, TASK_PLACEHOLDER_MARKERS):
+        errors.append(f"{TASK_FILENAME} needs an observable `## Success Signal`")
+    if success_text and contains_any_phrase(success_text, GENERIC_SUCCESS_SIGNAL_PHRASES) and meaningful_word_count(success_text) < 10:
+        errors.append(
+            f"{TASK_FILENAME} success signal is too generic; describe observable completion instead of phrases like `works` or `done`"
+        )
+    elif success_text and meaningful_word_count(success_text) < 4:
+        errors.append(f"{TASK_FILENAME} success signal is too short to be auditable")
     lowered_task = task_text.lower()
     for vague_word in TASK_VAGUE_WORDS:
         if vague_word in lowered_task:
@@ -825,8 +970,17 @@ def lint_review_workspace_readiness(review_path: Path) -> tuple[list[str], list[
         errors.append(f"{review_path.name} must begin with `# Review`")
     if any(marker in review_text for marker in REVIEW_PLACEHOLDER_MARKERS):
         errors.append(f"{review_path.name} still contains scaffold placeholder text")
-    if not review_items(review_text):
+    items = review_items(review_text)
+    stripped_items = [strip_bullet_prefix(item) for item in items]
+    if not items:
         errors.append(f"{review_path.name} must contain at least one bullet item")
+    elif all(meaningful_word_count(item) < 4 for item in stripped_items):
+        errors.append(f"{review_path.name} findings are too short to guide generator triage")
+    for item in stripped_items:
+        if contains_any_phrase(item, GENERIC_REVIEW_FINDING_PHRASES) and meaningful_word_count(item) < 8:
+            errors.append(f"{review_path.name} contains a finding that is too generic to be actionable: `{item}`")
+        elif meaningful_word_count(item) < 3:
+            errors.append(f"{review_path.name} contains a finding that is too short to be actionable: `{item}`")
     return errors, warnings
 
 
@@ -839,6 +993,21 @@ def lint_spec_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]
     for heading in SPEC_REQUIRED_HEADINGS:
         if heading not in spec_text:
             errors.append(f"{SPEC_FILENAME} is missing required heading: {heading}")
+    if any(marker in spec_text for marker in SPEC_PLACEHOLDER_MARKERS):
+        errors.append(f"{SPEC_FILENAME} still contains scaffold placeholder text")
+    for heading, minimum_words in (
+        ("## Goal", 4),
+        ("## User Outcome", 4),
+        ("## Desired Behavior", 6),
+        ("## Validation Expectations", 4),
+    ):
+        section_text = extract_markdown_section(spec_text, heading)
+        if not section_text or meaningful_word_count(section_text) < minimum_words:
+            errors.append(f"{SPEC_FILENAME} needs a more complete `{heading}` section")
+    for heading in ("## In Scope", "## Out of Scope", "## Constraints", "## Technical Boundaries"):
+        section_text = extract_markdown_section(spec_text, heading)
+        if meaningful_word_count(section_text) < 2:
+            warnings.append(f"{SPEC_FILENAME} should make `{heading}` more explicit for safe execution")
     lowered_spec = spec_text.lower()
     for vague_word in TASK_VAGUE_WORDS:
         if vague_word in lowered_spec:
@@ -856,8 +1025,23 @@ def lint_contract_workspace_readiness(task_root: Path) -> tuple[list[str], list[
         errors.append(f"{CONTRACT_FILENAME} still contains scaffold placeholder text")
     if "# Definition of Done" not in contract_text:
         errors.append(f"{CONTRACT_FILENAME} must begin with `# Definition of Done`")
-    if not contract_checklist_items(contract_text):
+    checklist_items = contract_checklist_items(contract_text)
+    normalized_items = [strip_checklist_prefix(item) for item in checklist_items]
+    if not checklist_items:
         errors.append(f"{CONTRACT_FILENAME} must contain at least one checklist item")
+    elif len(checklist_items) < 2:
+        warnings.append(f"{CONTRACT_FILENAME} usually needs more than one checklist item to be auditable")
+    for item in normalized_items:
+        if meaningful_word_count(item) < 4:
+            errors.append(f"{CONTRACT_FILENAME} item is too short to be auditable: `{item}`")
+        if contains_any_phrase(item, CONTRACT_VAGUE_PHRASES):
+            errors.append(f"{CONTRACT_FILENAME} item is too vague or aspirational: `{item}`")
+    if normalized_items and not any(contains_any_phrase(item, VERIFICATION_HINT_WORDS) for item in normalized_items):
+        warnings.append(f"{CONTRACT_FILENAME} should usually include at least one explicit verification item")
+    if normalized_items and not any(not contains_any_phrase(item, VERIFICATION_HINT_WORDS) for item in normalized_items):
+        warnings.append(
+            f"{CONTRACT_FILENAME} should usually include at least one behavior or integrity item in addition to verification"
+        )
     return errors, warnings
 
 
@@ -2433,7 +2617,9 @@ def has_any_fork_parent(generator_fork_id: str | None, reviewer_fork_id: str | N
 def validate_task_workspace_for_start(task_root: Path, inspection: dict) -> None:
     errors: list[str] = []
     warnings: list[str] = []
+    task_text = ""
     if inspection["doc_paths"]["task"] is not None:
+        task_text = (task_root / TASK_FILENAME).read_text(encoding="utf-8")
         task_errors, task_warnings = lint_task_workspace_readiness(task_root)
         errors.extend(task_errors)
         warnings.extend(task_warnings)
@@ -2449,6 +2635,16 @@ def validate_task_workspace_for_start(task_root: Path, inspection: dict) -> None
         contract_errors, contract_warnings = lint_contract_workspace_readiness(task_root)
         errors.extend(contract_errors)
         warnings.extend(contract_warnings)
+    if inspection["doc_paths"]["spec"] is not None and inspection["doc_paths"]["contract"] is None:
+        errors.append(f"{SPEC_FILENAME} should be paired with {CONTRACT_FILENAME} so approval stays auditable")
+    elif inspection["doc_paths"]["contract"] is None and inspection["present_docs"]:
+        warnings.append(
+            f"starting without {CONTRACT_FILENAME} removes the explicit approval bar; add it unless this task is truly trivial"
+        )
+    if task_text and inspection["doc_paths"]["spec"] is None and task_brief_requires_spec(task_text):
+        errors.append(
+            f"{TASK_FILENAME} looks broad enough and requires {SPEC_FILENAME}; add a spec or narrow the task brief before start"
+        )
     if errors:
         formatted = "\n".join(f"- {item}" for item in errors)
         raise SystemExit(

@@ -40,6 +40,16 @@ Bad contract items:
 
 Those phrases are acceptable only after decomposition into something concrete.
 
+## Quality bar
+
+A strong contract usually contains:
+
+- at least one behavior outcome
+- at least one regression or integrity guardrail when relevant
+- at least one verification item
+
+If the contract cannot tell the reviewer why approval is justified, it is too weak.
+
 ## Recommended shape
 
 Aim for roughly 3 to 6 checklist items.

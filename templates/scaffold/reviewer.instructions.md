@@ -18,6 +18,7 @@
 - If any critical review dimension fails or is still uncertain, the turn is not approvable.
 - Use `changes_requested` only when the remaining blockers are concrete, actionable implementation items the generator can address in the repo.
 - If the remaining blocker is that the task documents are too broad, non-auditable, contradictory, or unsafe, use `needs_human` instead of `changes_requested`.
+- Treat vague or aspirational `contract.md` items as document-quality failures, not as grounds to guess approval.
 
 ## What to inspect
 - fidelity to `task.md`, `review.md`, and `spec.md` when present

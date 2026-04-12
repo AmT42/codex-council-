@@ -2,24 +2,89 @@
 
 Codex Council is a Codex-first harness for long-running software work.
 
-It is designed to be operated by an outer coding agent that can inspect a target repository, choose the right task documents, and then launch or resume a generator/reviewer council inside that repository.
+It is built for a world where the user often talks to an **outer coding agent** first, not directly to the harness. That outer agent may be working with:
 
-The current runtime lives in [`scripts/codex_tui_supervisor.py`](./scripts/codex_tui_supervisor.py). The recommended outer-agent entrypoint is the [`codex-council` skill](./skills/codex-council/SKILL.md). The agent operating manual lives in [`INSTRUCTS.md`](./INSTRUCTS.md).
+- an expert user who already knows what they want
+- a novice user who describes the problem poorly
+- a reviewer or operator who needs to resume an existing run safely
+
+The goal of this repo is not just to run two Codex sessions. The goal is to give the outer agent enough structure, rules, and artifacts to reliably turn messy human input into a strong engineering brief, then execute that brief through a generator/reviewer council that can be resumed and audited.
+
+The current runtime lives in [`scripts/codex_tui_supervisor.py`](./scripts/codex_tui_supervisor.py). The recommended outer-agent entrypoint is the [`codex-council` skill](./skills/codex-council/SKILL.md). The main agent operating manual is [`INSTRUCTS.md`](./INSTRUCTS.md). The system reference is [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 This repo follows the same broad harness ideas discussed in Anthropic's [Harness design for long-running application development](https://www.anthropic.com/engineering/harness-design-long-running-apps) and OpenAI's [Harness engineering](https://openai.com/fr-FR/index/harness-engineering/): structured artifacts, explicit evaluator roles, context handoffs, and repo-embedded operating knowledge.
 
-## What It Does
+## The Problem It Solves
+
+AI coding assistants fail in predictable ways when they are treated as a single generic brain:
+
+- vague input becomes vague code
+- planning, implementation, and review blur together
+- approval is guessed from prose instead of checked against explicit criteria
+- users who lack good engineering vocabulary produce weak briefs
+- long-running work loses context or resumes incorrectly
+
+Codex Council is designed to counter those failure modes.
+
+It does that by combining:
+
+- canonical task documents inside the target repo
+- a generator/reviewer runtime with structured artifacts
+- an outer-agent skill that decides how to frame the work before launch
+- an approval layer centered on `contract.md`
+- artifact-driven `continue` rather than guessing from stale state
+
+## Product Model
+
+There are two different agent surfaces in this repo.
+
+### 1. Consumer-facing outer-agent surface
+
+This is for the agent that is *using* the harness on behalf of a user.
+
+Use:
+
+- [`skills/codex-council/SKILL.md`](./skills/codex-council/SKILL.md)
+- [`INSTRUCTS.md`](./INSTRUCTS.md)
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md)
+
+This surface teaches the outer agent:
+
+- when to answer directly
+- when to inspect and resume
+- when to scaffold `task.md`, `review.md`, `spec.md`, and `contract.md`
+- when to ask clarifying questions
+- when not to ask them
+- how to turn weak user input into strong council input
+
+### 2. Maintainer/customizer surface
+
+This is for an agent modifying `council-agent` itself.
+
+Use:
+
+- repo-root [`AGENTS.md`](./AGENTS.md)
+
+That file is for harness maintenance and customization, not for operating the harness against a target repo.
+
+## What The Harness Does
 
 Codex Council runs a two-role loop inside a target repo:
 
 - `generator`
   - implements or fixes the requested work
 - `reviewer`
-  - evaluates correctness, regressions, fidelity to intent, and test adequacy
+  - evaluates correctness, regressions, fidelity to intent, risk, and test adequacy
 
 The control plane is file-based. The council reads canonical task documents from the target repo and writes turn-scoped artifacts under `.codex-council/<task>/runs/<run_id>/`.
 
-This is not a one-shot prompt wrapper. It is a harness for multi-turn, artifact-driven implementation and review.
+This is not a one-shot prompt wrapper. It is a harness for:
+
+- briefing
+- implementation
+- review
+- pause/resume
+- approval
 
 ## Recommended Entry Point
 
@@ -27,14 +92,9 @@ If an outer Codex agent has access to this repo, point it at:
 
 - [`skills/codex-council/SKILL.md`](./skills/codex-council/SKILL.md)
 - [`INSTRUCTS.md`](./INSTRUCTS.md)
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md)
 
-That skill is the intended user-facing interface for v1. It teaches the outer agent:
-
-- when to answer directly without running the harness
-- when to scaffold `task.md`, `review.md`, `spec.md`, and `contract.md`
-- when to ask blocking questions
-- when to `start`
-- when to prefer `status` + `continue`
+The `codex-council` skill is the intended user-facing interface for v1. It is a **single front door** backed by a large reference pack. The skill should decide how to route the request instead of forcing the user to understand the internal document model.
 
 If you want Codex to discover the skill as an installed skill, copy or symlink `skills/codex-council` into `$CODEX_HOME/skills/` or `~/.codex/skills/`.
 
@@ -78,46 +138,138 @@ Recommended defaults for outer-agent routing:
 - meta question about the harness
   - answer directly, do not scaffold docs
 
+## Five Operating Modes
+
+The outer agent should classify each request into one primary mode before taking action.
+
+### 1. Direct answer only
+
+Use when the user is asking about the harness itself.
+
+- answer directly
+- do not scaffold `.codex-council`
+- do not call `start` or `continue`
+
+### 2. Inspect or resume an existing run
+
+Use when the user wants to understand or resume a current council run.
+
+- inspect first
+- prefer `status`
+- prefer `continue` over reinitializing
+
+### 3. Concrete execution request
+
+Use when the user gives a specific debug or implementation request that is already actionable.
+
+- do not ask clarifying questions if the request is concrete enough
+- default to `task.md` + `contract.md`
+- start immediately once the docs are ready
+
+### 4. Findings-driven fix
+
+Use when the user provides review comments, logs, repro notes, or debugging findings.
+
+- default to `review.md` + `contract.md`
+- add `task.md` only if it materially clarifies the implementation target
+
+### 5. Broad feature or spec work
+
+Use when the work spans multiple surfaces or would be unsafe to execute from a short task brief.
+
+- ask only minimum blocking questions
+- default to `task.md` + `spec.md` + `contract.md`
+
+## For Novices vs Experts
+
+This harness must work for both.
+
+### Expert user
+
+An expert may say:
+
+> Fix the fallback path in the sync worker so retries no longer duplicate rows.
+
+The outer agent should:
+
+- avoid unnecessary questions
+- synthesize a strong `task.md`
+- add `contract.md`
+- launch quickly
+
+### Intermediate user
+
+An intermediate user may say:
+
+> The sync feature is buggy and sometimes duplicates rows after retries.
+
+The outer agent should:
+
+- inspect the repo for likely sync surfaces
+- turn the vague report into a more concrete `task.md`
+- make the success criteria explicit in `contract.md`
+- ask a question only if there are several plausible flows or missing product constraints
+
+### Novice user
+
+A novice may say:
+
+> My import thing is broken. It does weird stuff. Can you make it solid?
+
+The outer agent should **not** pass that directly into the council.
+
+It should:
+
+- infer likely surfaces from the repo
+- convert the request into concrete problem statements
+- add risks and likely validation expectations
+- decide whether a short task brief is enough or whether the work needs `spec.md`
+- create an auditable `contract.md`
+- only then start the harness
+
+The system is only robust if the outer agent can normalize weak input into strong documents.
+
 ## Quickstart
 
 ### Outer-agent workflow
 
 1. The outer agent reads [`skills/codex-council/SKILL.md`](./skills/codex-council/SKILL.md).
 2. It classifies the user request.
-3. It creates or updates the minimal required task documents.
-4. It starts or continues the harness with the existing CLI.
+3. It discovers facts from the target repo.
+4. It writes the minimal document set needed for safe execution.
+5. It starts or continues the harness with the existing CLI.
 
 ### Manual fallback
 
 From a target repository:
 
 ```bash
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task --dir /path/to/target-repo
 ```
 
 Then write the docs you need:
 
 ```bash
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write task my-task --body "Debug why sync duplicates rows."
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write contract my-task --body "The duplication bug is reproduced and fixed."
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write task my-task --dir /path/to/target-repo --body "Debug why sync duplicates rows."
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write contract my-task --dir /path/to/target-repo --body "The retry path no longer duplicates rows and relevant verification passes."
 ```
 
 Start the council:
 
 ```bash
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo
 ```
 
 Inspect or resume later:
 
 ```bash
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --dir /path/to/target-repo
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task --dir /path/to/target-repo
 ```
 
 ## CLI Overview
 
-The current public CLI stays unchanged:
+The public CLI stays intentionally small:
 
 - `init`
   - scaffold `.codex-council` and a task workspace
@@ -142,6 +294,7 @@ The TUI supervisor:
 - advances turns only when the expected artifact pairs exist and validate
 - prefers artifact-driven `continue` over stale run metadata
 - can bootstrap from forked session context when local task docs are missing
+- validates task documents before `start`
 
 `continue` is the intended path after:
 
@@ -150,15 +303,33 @@ The TUI supervisor:
 - a `changes_requested` reviewer verdict
 - a stopped session whose validated artifacts still exist
 
-## Which Doc Should I Use?
+## Robustness Philosophy
 
-- Use `task.md` for most concrete execution requests.
-- Use `review.md` when the user gives findings, logs, repro notes, or review comments.
-- Add `spec.md` only when a plain task brief would still leave meaningful implementation ambiguity.
-- Default to `contract.md` for non-trivial work so the reviewer has an auditable approval bar.
-- Keep task-local `AGENTS.md` stable and behavioral.
+This harness is robust only if all three layers are strong:
 
-Detailed routing, synthesis rules, examples, and anti-patterns live in [`INSTRUCTS.md`](./INSTRUCTS.md) and the skill reference pack under [`skills/codex-council/references/`](./skills/codex-council/references/).
+- **outer-agent framing**
+  - weak user input becomes strong task docs
+- **runtime control plane**
+  - artifact-driven transitions and pause/resume
+- **approval discipline**
+  - `contract.md` and reviewer critical dimensions gate completion
+
+If one layer is weak, the whole system regresses toward generic prompt chaining.
+
+## Stable vs Customizable
+
+Stable:
+
+- canonical document names
+- CLI shape
+- artifact-driven council flow
+- role separation between generator and reviewer
+
+Customizable:
+
+- task-local council documents in the target repo
+- role instruction content
+- how teams tailor the skill or reference pack to their workflow
 
 ## Repository Layout
 
@@ -193,11 +364,13 @@ tests/
   test_codex_tui_supervisor.py
 ```
 
-## Maintainer Note
-
-Repo-root [`AGENTS.md`](./AGENTS.md) is maintainer guidance for agents modifying this harness.
-
-Consumer-facing guidance for agents using the harness lives in:
+## Where To Read Next
 
 - [`INSTRUCTS.md`](./INSTRUCTS.md)
+  - outer-agent operating manual
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md)
+  - system model and source-of-truth rules
 - [`skills/codex-council/SKILL.md`](./skills/codex-council/SKILL.md)
+  - front door for outer agents
+- [`AGENTS.md`](./AGENTS.md)
+  - maintainer/customizer guidance for this harness repo

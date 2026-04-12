@@ -2,24 +2,55 @@
 
 This file is the operating manual for an outer agent using `council-agent` as a harness.
 
-It is not maintainer guidance for editing this repository itself. For maintainer work, use repo-root `AGENTS.md`. For harness operation, use this file and the [`codex-council` skill](./skills/codex-council/SKILL.md).
+It is not the maintainer guide for editing this repository itself. For maintainer guidance or harness customization, use repo-root `AGENTS.md`. For harness operation, use this file, [`ARCHITECTURE.md`](./ARCHITECTURE.md), and the [`codex-council` skill](./skills/codex-council/SKILL.md).
 
-## What This Repo Can Do
+## Operating Principle
 
-An outer agent can use this repo to:
+The user should be able to speak naturally to the outer agent.
 
-- answer direct questions about how the harness works
-- scaffold canonical task documents inside a target repo
-- start a new generator/reviewer run
-- inspect current run state with `status`
-- resume the correct role and turn with `continue`
-- preserve explicit review feedback and approval criteria through structured artifacts
+The outer agent should not require the user to understand:
 
-The outer agent should hide most of the internal document model from the end user. The user should usually describe the work in plain language; the outer agent chooses the right documents and commands.
+- the document taxonomy
+- the runtime model
+- the distinction between `start` and `continue`
+- what makes a strong engineering brief
 
-## Routing Table
+The outer agent must compensate for that by being strict and explicit.
 
-Classify every request into one of these modes before taking action.
+## Intended Audiences
+
+### Novice user
+
+The novice:
+
+- may not know the right engineering vocabulary
+- may describe symptoms instead of the real task
+- may omit constraints and success conditions
+
+The outer agent must:
+
+- inspect the repo for missing context
+- synthesize strong canonical docs
+- ask only the minimum blocking questions
+- refuse to launch the council with weak documents
+
+### Expert user
+
+The expert:
+
+- may already know what they want
+- may provide exact review findings or constraints
+- may want speed more than conversation
+
+The outer agent should:
+
+- avoid unnecessary questions
+- preserve the user’s intent precisely
+- move directly into `start` or `continue` once the docs are strong enough
+
+## Request Classification
+
+Classify every request into one of five modes before taking action.
 
 ### 1. Direct answer only
 
@@ -42,13 +73,13 @@ Use this for:
 
 - “What’s the state of my run?”
 - “Continue the paused council run”
-- “Resume after I updated the contract”
+- “Resume after I edited the spec”
 
 Behavior:
 
 - inspect existing task workspaces and runs first
 - prefer `status` to understand the current state
-- prefer `continue` over creating a new run when the task and run already exist
+- prefer `continue` over creating a new run when the existing run is still the right one
 - do not overwrite task docs unless the user or repo state clearly requires it
 
 ### 3. Concrete execution request
@@ -93,6 +124,52 @@ Behavior:
 - ask only the minimum blocking questions needed to make the work executable
 - default document set: `task.md` + `spec.md` + `contract.md`
 - once the blocking questions are answered, run `start`
+
+## Novice Input Normalization
+
+This is the most important outer-agent behavior.
+
+When the user gives weak input, do not pass it through unchanged. Normalize it into a strong brief.
+
+### Extract these fields before launch
+
+- user intent
+- likely affected surface
+- observable failure or requested behavior
+- likely risks or regressions
+- minimum validation needed
+- whether the work is broad enough to require `spec.md`
+
+### Examples
+
+Weak input:
+
+> The import thing is broken and weird.
+
+The outer agent should transform that into something like:
+
+- concrete failing behavior
+- candidate surfaces discovered in the repo
+- success signal
+- risk guardrails
+- verification expectations in `contract.md`
+
+Weak input:
+
+> Build a better dashboard.
+
+The outer agent should recognize that:
+
+- this is too broad for `task.md` alone
+- a spec is needed
+- a contract is needed
+- blocking questions are justified
+
+### Do not do this
+
+- do not start with scaffold placeholder text
+- do not let vague words survive unchanged into the council docs
+- do not treat a one-line aspiration as an executable engineering brief
 
 ## Question Policy
 
@@ -188,9 +265,23 @@ Treat the injected task-local `AGENTS.md` as stable council behavior.
 
 Do not put task-specific requirements, scope, or acceptance criteria there.
 
+## Pre-Launch Quality Gate
+
+Before launching with `start`, the outer agent should mentally check:
+
+- is the request concrete enough for safe execution?
+- are the chosen docs the smallest sufficient set?
+- does `contract.md` make approval auditable?
+- would a reviewer know how to reject a bad implementation from these docs?
+- is this really a new run, or should it be `continue`?
+
+If the answer is no, do not launch yet.
+
 ## Command Recipes
 
 The outer agent should use the existing CLI, not invent new commands.
+
+The canonical commands are `init`, `write`, `start`, `status`, and `continue`.
 
 ### Create a workspace
 
@@ -242,7 +333,7 @@ Use `continue` after:
 - human edits to canonical task docs
 - session loss where validated artifacts still exist
 
-## Run-State Policy
+## Continue Policy
 
 When a suitable task workspace and run already exist:
 
@@ -262,33 +353,6 @@ When the request is direct-answer-only:
 - do not write docs
 - do not start
 
-## Worked Defaults
-
-- “Debug why sync duplicates rows”
-  - route: concrete execution request
-  - docs: `task.md` + `contract.md`
-  - questions: none unless the repo state makes the target ambiguous
-  - action: `init` if needed, then `write`, then `start`
-
-- “Address these PR review comments”
-  - route: findings-driven fix
-  - docs: `review.md` + `contract.md`
-  - action: `init` if needed, then `write`, then `start`
-
-- “Build feature X”
-  - route: broad feature/spec work
-  - docs: `task.md` + `spec.md` + `contract.md`
-  - questions: only the minimum blocking questions
-  - action: after questions, `write`, then `start`
-
-- “What’s the state of my run?”
-  - route: inspect/resume
-  - action: `status`, then optionally `continue`
-
-- “How does this repo work?”
-  - route: direct answer only
-  - action: explain, do not scaffold
-
 ## Anti-Patterns
 
 - Do not use repo-root `AGENTS.md` as the consumer manual.
@@ -298,3 +362,4 @@ When the request is direct-answer-only:
 - Do not restart a healthy paused run when `continue` is the correct action.
 - Do not put product requirements into task-local `AGENTS.md`.
 - Do not create `spec.md` when a short `task.md` already makes the work executable.
+- Do not launch the council with a weak brief just because the user wants speed.

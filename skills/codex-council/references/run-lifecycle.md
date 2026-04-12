@@ -36,6 +36,8 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write spec my-tas
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write contract my-task --dir /path/to/target-repo --body "..."
 ```
 
+Write the smallest sufficient document set, not every doc by reflex.
+
 ## Start
 
 Use `start` after the chosen docs are ready:
@@ -43,6 +45,8 @@ Use `start` after the chosen docs are ready:
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo
 ```
+
+Before `start`, ensure the docs are strong enough to survive runtime validation.
 
 Default to the current auto role routing.
 
@@ -53,6 +57,8 @@ Inspect before resuming or rewriting:
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --dir /path/to/target-repo
 ```
+
+Use `status` whenever you are unsure whether to resume, rewrite docs, or create a new run.
 
 ## Continue
 
@@ -72,3 +78,4 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task 
 - Expect `start` to reject a dirty target repo in the normal path.
 - If the request is direct-answer-only, do not call any lifecycle command.
 - If the existing run is healthy and suitable, prefer continuing it instead of overwriting the workspace.
+- If the docs are too weak, improve the docs before launch instead of hoping the council compensates for them.

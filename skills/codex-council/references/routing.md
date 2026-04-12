@@ -1,10 +1,18 @@
 # Routing
 
-## Request modes
+## Primary rule
 
-Classify the user request into exactly one primary mode before you write files or run commands.
+Classify the request into exactly one primary operating mode before you write files or run commands.
 
-### Direct answer only
+The correct route matters because it determines:
+
+- whether you should answer directly
+- whether you should inspect an existing run
+- which canonical docs to write
+- whether to ask questions
+- whether to use `start` or `continue`
+
+## Mode 1: Direct answer only
 
 Use when the user is asking about:
 
@@ -19,7 +27,7 @@ Action:
 - do not scaffold `.codex-council`
 - do not run `start` or `continue`
 
-### Inspect or resume an existing run
+## Mode 2: Inspect or resume an existing run
 
 Use when the user is asking for:
 
@@ -32,8 +40,9 @@ Action:
 - inspect current workspace and run state first
 - prefer `status`
 - prefer `continue` when the existing run is still the right one
+- avoid overwriting docs unless the repo state clearly requires it
 
-### Concrete execution request
+## Mode 3: Concrete execution request
 
 Use when the user gives a specific change that can be acted on safely.
 
@@ -52,7 +61,7 @@ Question policy:
 
 - ask nothing unless a missing detail would materially change the implementation target
 
-### Findings-driven fix
+## Mode 4: Findings-driven fix
 
 Use when the user provides:
 
@@ -71,7 +80,7 @@ Optional:
 
 - add `task.md` only when a short brief materially clarifies what the generator should do
 
-### Broad feature or spec work
+## Mode 5: Broad feature or spec work
 
 Use when the request spans multiple surfaces or would be unsafe to execute from a short task brief alone.
 

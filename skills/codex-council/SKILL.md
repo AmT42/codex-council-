@@ -1,20 +1,34 @@
 ---
 name: codex-council
-description: Operate the Codex Council harness from an outer Codex agent. Use when a user wants help choosing between task.md, review.md, spec.md, and contract.md, starting or continuing a council run, inspecting run state, or understanding how to use this repo as a long-running generator/reviewer harness.
+description: Operate the Codex Council harness from an outer Codex agent. Use when a user wants help turning vague or precise software requests into strong task.md, review.md, spec.md, and contract.md documents, then starting, inspecting, or continuing a generator/reviewer council run in a target repository.
 ---
 
 # Codex Council
 
-This skill is the outer-agent interface for `council-agent`.
+This skill is the front door for using `council-agent` as a long-running harness.
 
-Use it when the user wants you to operate this repo as a harness against some target repository. Do not use it when you are modifying `council-agent` itself; for maintainer work, follow repo-root `AGENTS.md`.
+Use it when the user wants you to operate this repo against some target repository. Do not use it when you are modifying `council-agent` itself; for maintainer work, follow repo-root `AGENTS.md`.
 
-## First read
+## Purpose
 
-Read these files first:
+Your job is not only to launch commands. Your job is to transform user intent into a strong council brief.
 
-- [`INSTRUCTS.md`](../../INSTRUCTS.md)
+That includes:
+
+- classifying the request
+- discovering missing repo facts
+- normalizing novice input into strong documents
+- choosing the smallest sufficient document set
+- deciding between direct answer, `start`, and `continue`
+
+## Read order
+
+Read these first:
+
+- [`../../INSTRUCTS.md`](../../INSTRUCTS.md)
+- [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)
 - [`references/routing.md`](./references/routing.md)
+- [`references/novice-normalization.md`](./references/novice-normalization.md)
 
 Then load only the references needed for the chosen route:
 
@@ -23,7 +37,9 @@ Then load only the references needed for the chosen route:
 - [`references/spec-doc.md`](./references/spec-doc.md)
 - [`references/contract-doc.md`](./references/contract-doc.md)
 - [`references/run-lifecycle.md`](./references/run-lifecycle.md)
-- [`references/examples.md`](./references/examples.md)
+- [`references/failure-recovery.md`](./references/failure-recovery.md)
+- [`references/user-sophistication-examples.md`](./references/user-sophistication-examples.md)
+- [`references/task-type-examples.md`](./references/task-type-examples.md)
 
 ## Core rules
 
@@ -33,6 +49,7 @@ Then load only the references needed for the chosen route:
 - Prefer the smallest sufficient document set.
 - Default to `contract.md` for non-trivial work.
 - Prefer `status` + `continue` over restarting a healthy paused run.
+- Do not pass vague user wording directly into the council docs.
 - Summarize the chosen route to the user before launching the harness.
 
 ## Required routing
@@ -46,6 +63,20 @@ Choose one mode:
 5. Broad feature or spec work
 
 Use [`references/routing.md`](./references/routing.md) for the exact mapping from request shape to docs and commands.
+
+## Novice normalization
+
+If the user gives weak or imprecise input, do not launch immediately.
+
+Instead:
+
+- inspect the repo
+- infer likely affected surfaces
+- extract the real engineering problem
+- write stronger docs than the user could have written directly
+- escalate to `spec.md` when needed
+
+Use [`references/novice-normalization.md`](./references/novice-normalization.md) before handling vague or under-specified requests.
 
 ## Command surface
 
@@ -74,6 +105,18 @@ Use the corresponding document references before writing:
 - [`references/spec-doc.md`](./references/spec-doc.md)
 - [`references/contract-doc.md`](./references/contract-doc.md)
 
+## Recovery and edge cases
+
+Use [`references/failure-recovery.md`](./references/failure-recovery.md) when:
+
+- the current run looks ambiguous
+- the docs are too weak for launch
+- `continue` is likely but not obviously correct
+- a human paused the run and edited task docs
+
 ## Worked examples
 
-Before handling unfamiliar requests, read [`references/examples.md`](./references/examples.md).
+Before handling unfamiliar requests, read:
+
+- [`references/user-sophistication-examples.md`](./references/user-sophistication-examples.md)
+- [`references/task-type-examples.md`](./references/task-type-examples.md)
