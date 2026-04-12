@@ -185,6 +185,7 @@ GITHUB_CODEX_REVIEW_PREFIX = "Codex Review:"
 GITHUB_CODEX_APPROVED_PREFIX = "Codex Review: Didn't find any major issues. Keep it up!"
 GITHUB_CODEX_INITIAL_WAIT_SECONDS = 600
 GITHUB_CODEX_POLL_INTERVAL_SECONDS = 300
+DEFAULT_GITHUB_PR_BASE_BRANCH = "staging"
 CODEX_TRUST_PROMPT_TEXT = "Do you trust the contents of this directory?"
 CODEX_TRUST_CONTINUE_TEXT = "Press enter to continue"
 CODEX_FOOTER_RE = re.compile(r"^\s*\S.*\s+·\s+(?:~|/).+$")
@@ -3089,6 +3090,7 @@ def _normalize_github_pr_payload(data: dict) -> dict:
     base_ref_name = data.get("baseRefName")
     head_ref_oid = data.get("headRefOid")
     title = data.get("title")
+    created_at = data.get("createdAt")
     if (
         not isinstance(number, int)
         or not isinstance(url, str)
@@ -3109,11 +3111,44 @@ def _normalize_github_pr_payload(data: dict) -> dict:
     return {
         "number": number,
         "url": url.strip(),
+        "created_at": created_at.strip() if isinstance(created_at, str) and created_at.strip() else None,
         "head_ref_name": head_ref_name.strip(),
         "base_ref_name": base_ref_name.strip(),
         "head_ref_oid": head_ref_oid.strip(),
         "title": title.strip() if isinstance(title, str) and title.strip() else None,
     }
+
+
+def new_github_review_wait_state() -> dict:
+    return {
+        "deadline_at": None,
+        "initial_wait_seconds": GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+        "last_polled_at": None,
+        "poll_count": 0,
+        "poll_interval_seconds": GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+        "started_at": None,
+    }
+
+
+def clear_github_review_tracking(github_state: dict) -> None:
+    github_state["current_head_started_at"] = None
+    github_state["last_consumed_review_comment_body_sha256"] = None
+    github_state["last_consumed_review_comment_created_at"] = None
+    github_state["last_consumed_review_comment_id"] = None
+    github_state["last_consumed_review_turn"] = None
+    github_state["last_request_comment_created_at"] = None
+    github_state["last_request_comment_id"] = None
+    github_state["last_request_turn"] = None
+    github_state["review_wait"] = new_github_review_wait_state()
+
+
+def sync_github_review_head_tracking(github_state: dict, head_sha: str | None) -> bool:
+    previous_head_sha = github_state.get("pr_head_sha")
+    github_state["pr_head_sha"] = head_sha
+    if previous_head_sha == head_sha:
+        return False
+    clear_github_review_tracking(github_state)
+    return True
 
 
 def resolve_github_pr_reference(repo_root: Path, pr_ref: str) -> dict:
@@ -3124,7 +3159,7 @@ def resolve_github_pr_reference(repo_root: Path, pr_ref: str) -> dict:
             "view",
             pr_ref,
             "--json",
-            "baseRefName,headRefName,headRefOid,number,title,url",
+            "baseRefName,createdAt,headRefName,headRefOid,number,title,url",
         ],
         phase="github_pr_resolve",
     )
@@ -3144,7 +3179,7 @@ def find_existing_github_pr_for_branch(repo_root: Path, branch: str) -> dict | N
             "--limit",
             "10",
             "--json",
-            "baseRefName,headRefName,headRefOid,number,title,updatedAt,url",
+            "baseRefName,createdAt,headRefName,headRefOid,number,title,updatedAt,url",
         ],
         phase="github_pr_lookup",
     )
@@ -3352,9 +3387,10 @@ def build_review_bridge_state(
     pr_number = None
     pr_url = None
     pr_head_sha = None
+    pr_created_at = None
     branch_source = "auto"
     branch = github_branch_value or git_state["current_branch"]
-    base_branch = github_base_value or repo_meta["default_branch"]
+    base_branch = github_base_value or DEFAULT_GITHUB_PR_BASE_BRANCH
 
     if github_pr_value:
         parsed_pr = parse_github_pr_ref(github_pr_value)
@@ -3376,6 +3412,7 @@ def build_review_bridge_state(
         pr_number = pr_info["number"]
         pr_url = pr_info["url"]
         pr_head_sha = pr_info["head_ref_oid"]
+        pr_created_at = pr_info.get("created_at")
     else:
         branch_source = "explicit" if github_branch_value else "auto"
         existing_pr = find_existing_github_pr_for_branch(repo_root, branch)
@@ -3384,6 +3421,7 @@ def build_review_bridge_state(
             pr_url = existing_pr["url"]
             base_branch = existing_pr["base_ref_name"]
             pr_head_sha = existing_pr["head_ref_oid"]
+            pr_created_at = existing_pr.get("created_at")
 
     return {
         "mode": "github_pr_codex",
@@ -3391,6 +3429,7 @@ def build_review_bridge_state(
             "base_branch": base_branch,
             "branch": branch,
             "branch_source": branch_source,
+            "current_head_started_at": None,
             "last_consumed_review_comment_body_sha256": None,
             "last_consumed_review_comment_created_at": None,
             "last_consumed_review_comment_id": None,
@@ -3401,19 +3440,13 @@ def build_review_bridge_state(
             "last_request_turn": None,
             "pr_head_sha": pr_head_sha,
             "pr_number": pr_number,
+            "pr_created_at": pr_created_at,
             "pr_url": pr_url,
             "repo_name_with_owner": repo_meta["name_with_owner"],
             "repo_owner": repo_meta["owner"],
             "repo": repo_meta["repo"],
             "repo_url": repo_meta["url"],
-            "review_wait": {
-                "deadline_at": None,
-                "initial_wait_seconds": GITHUB_CODEX_INITIAL_WAIT_SECONDS,
-                "last_polled_at": None,
-                "poll_count": 0,
-                "poll_interval_seconds": GITHUB_CODEX_POLL_INTERVAL_SECONDS,
-                "started_at": None,
-            },
+            "review_wait": new_github_review_wait_state(),
         },
     }
 
@@ -3504,10 +3537,11 @@ def ensure_github_pr_ready(
                 "pr_number": pr_info["number"],
             },
         )
+    sync_github_review_head_tracking(github_state, pr_info["head_ref_oid"])
     github_state["base_branch"] = pr_info["base_ref_name"]
     github_state["branch"] = pr_info["head_ref_name"]
-    github_state["pr_head_sha"] = pr_info["head_ref_oid"]
     github_state["pr_number"] = pr_info["number"]
+    github_state["pr_created_at"] = pr_info.get("created_at")
     github_state["pr_url"] = pr_info["url"]
     save_run_state(run_dir, state)
     append_run_event(
@@ -3525,22 +3559,8 @@ def ensure_github_pr_ready(
 
 
 def build_github_codex_request_comment(state: dict, turn_number: int, commit_sha: str) -> str:
-    github_state = state["review_bridge"]["github"]
-    return textwrap.dedent(
-        f"""\
-        @codex review
-
-        Please review the latest PR state for blocking correctness issues, regressions, failure modes, and missing tests.
-
-        - Task: {state['task_name']}
-        - Run: {state['run_id']}
-        - Turn: {turn_name(turn_number)}
-        - Branch: {github_state['branch']}
-        - Commit: {commit_sha}
-
-        Reply with a new PR comment that starts with `{GITHUB_CODEX_REVIEW_PREFIX}`.
-        """
-    ).rstrip()
+    del state, turn_number, commit_sha
+    return "@codex"
 
 
 def post_github_pr_review_request_comment(
@@ -3586,14 +3606,7 @@ def post_github_pr_review_request_comment(
     github_state["last_request_comment_id"] = comment_id
     github_state["last_request_comment_created_at"] = created_at.strip()
     github_state["last_request_turn"] = turn_name(turn_number)
-    github_state["review_wait"] = {
-        "deadline_at": None,
-        "initial_wait_seconds": GITHUB_CODEX_INITIAL_WAIT_SECONDS,
-        "last_polled_at": None,
-        "poll_count": 0,
-        "poll_interval_seconds": GITHUB_CODEX_POLL_INTERVAL_SECONDS,
-        "started_at": None,
-    }
+    github_state["review_wait"] = new_github_review_wait_state()
     save_run_state(run_dir, state)
     append_run_event(
         run_dir,
@@ -3639,6 +3652,246 @@ def list_github_pr_issue_comments(
         elif isinstance(page, dict):
             comments.append(page)
     return comments
+
+
+def list_github_pr_timeline_events(
+    repo_root: Path,
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+) -> list[dict]:
+    response = gh_json(
+        repo_root,
+        [
+            "api",
+            "--paginate",
+            "--slurp",
+            f"repos/{owner}/{repo}/issues/{pr_number}/timeline?per_page=100",
+        ],
+        phase="github_review_timeline",
+    )
+    pages = response if isinstance(response, list) else [response]
+    events: list[dict] = []
+    for page in pages:
+        if isinstance(page, list):
+            events.extend(item for item in page if isinstance(item, dict))
+        elif isinstance(page, dict):
+            events.append(page)
+    return events
+
+
+def is_exact_github_codex_request_comment(body: str) -> bool:
+    return body == "@codex"
+
+
+def is_github_codex_review_comment(body: str) -> bool:
+    return body.lstrip().startswith(GITHUB_CODEX_REVIEW_PREFIX)
+
+
+def normalize_github_issue_comment(comment: dict) -> dict | None:
+    comment_id = comment.get("id")
+    body = comment.get("body")
+    created_at = comment.get("created_at")
+    created_at_epoch = parse_utc_timestamp(created_at if isinstance(created_at, str) else None)
+    if (
+        not isinstance(comment_id, int)
+        or not isinstance(body, str)
+        or not isinstance(created_at, str)
+        or created_at_epoch is None
+    ):
+        return None
+    return {
+        "body": body,
+        "created_at": created_at,
+        "created_at_epoch": created_at_epoch,
+        "id": comment_id,
+    }
+
+
+def current_github_pr_head_started_at(
+    events: list[dict],
+    *,
+    current_head_sha: str,
+    pr_created_at: str | None,
+) -> str | None:
+    if not current_head_sha:
+        return pr_created_at
+    latest_epoch = parse_utc_timestamp(pr_created_at)
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_name = event.get("event")
+        created_at = event.get("created_at")
+        created_at_epoch = parse_utc_timestamp(created_at if isinstance(created_at, str) else None)
+        if (
+            event_name not in {"committed", "head_ref_force_pushed", "head_ref_restored"}
+            or created_at_epoch is None
+        ):
+            continue
+        candidate_shas = [
+            value
+            for value in (
+                event.get("after"),
+                event.get("after_commit_id"),
+                event.get("commit_id"),
+                event.get("sha"),
+            )
+            if isinstance(value, str) and value.strip()
+        ]
+        if current_head_sha not in candidate_shas:
+            continue
+        latest_epoch = (
+            created_at_epoch
+            if latest_epoch is None
+            else max(latest_epoch, created_at_epoch)
+        )
+    return ts_from_epoch(latest_epoch) if latest_epoch is not None else None
+
+
+def classify_github_pr_review_state_for_current_head(
+    comments: list[dict],
+    *,
+    current_head_started_at: str | None,
+    last_consumed_comment_id: int | None,
+) -> dict:
+    current_head_started_at_epoch = parse_utc_timestamp(current_head_started_at)
+    scoped_comments: list[dict] = []
+    for raw_comment in comments:
+        comment = normalize_github_issue_comment(raw_comment)
+        if comment is None:
+            continue
+        if (
+            current_head_started_at_epoch is not None
+            and comment["created_at_epoch"] < current_head_started_at_epoch
+        ):
+            continue
+        scoped_comments.append(comment)
+    scoped_comments.sort(key=lambda item: (item["created_at"], item["id"]))
+
+    latest_request = None
+    latest_reply = None
+    for comment in scoped_comments:
+        body = comment["body"]
+        if is_exact_github_codex_request_comment(body):
+            latest_request = comment
+            latest_reply = None
+            continue
+        if latest_request is not None and is_github_codex_review_comment(body):
+            latest_reply = comment
+
+    if latest_request is None:
+        return {
+            "current_head_started_at": current_head_started_at,
+            "reply_comment": None,
+            "request_comment": None,
+            "state": "needs_request_comment",
+        }
+    if latest_reply is None:
+        return {
+            "current_head_started_at": current_head_started_at,
+            "reply_comment": None,
+            "request_comment": latest_request,
+            "state": "waiting_for_codex_reply",
+        }
+    if last_consumed_comment_id is not None and latest_reply["id"] == last_consumed_comment_id:
+        return {
+            "current_head_started_at": current_head_started_at,
+            "reply_comment": None,
+            "request_comment": None,
+            "state": "needs_request_comment",
+        }
+    return {
+        "current_head_started_at": current_head_started_at,
+        "reply_comment": latest_reply,
+        "request_comment": latest_request,
+        "state": "codex_reply_ready_to_ingest",
+    }
+
+
+def adopt_github_review_request_comment(github_state: dict, turn_number: int, request_comment: dict | None) -> None:
+    if request_comment is None:
+        github_state["last_request_comment_created_at"] = None
+        github_state["last_request_comment_id"] = None
+        github_state["last_request_turn"] = None
+        github_state["review_wait"] = new_github_review_wait_state()
+        return
+    github_state["last_request_comment_created_at"] = request_comment["created_at"]
+    github_state["last_request_comment_id"] = request_comment["id"]
+    github_state["last_request_turn"] = turn_name(turn_number)
+    github_state["review_wait"] = new_github_review_wait_state()
+
+
+def record_consumed_github_codex_review_comment(
+    run_dir: Path,
+    state: dict,
+    turn_number: int,
+    comment: dict,
+) -> None:
+    github_state = state["review_bridge"]["github"]
+    github_state["last_consumed_review_comment_body_sha256"] = hash_text(comment["body"])
+    github_state["last_consumed_review_comment_created_at"] = comment["created_at"]
+    github_state["last_consumed_review_comment_id"] = comment["id"]
+    github_state["last_consumed_review_turn"] = turn_name(turn_number)
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "github_review_comment_received",
+        turn_number=turn_number,
+        role="reviewer",
+        details={
+            "comment_id": comment["id"],
+            "pr_number": github_state.get("pr_number"),
+        },
+    )
+
+
+def inspect_github_pr_review_state_for_current_head(
+    run_dir: Path,
+    state: dict,
+    turn_number: int,
+    *,
+    current_head_sha: str,
+) -> dict:
+    repo_root = Path(state["repo_root"])
+    github_state = state["review_bridge"]["github"]
+    pr_number = github_state.get("pr_number")
+    if not isinstance(pr_number, int):
+        raise SupervisorRuntimeError(
+            "github_review_inspect",
+            "cannot inspect GitHub review state without a PR number",
+            role="reviewer",
+        )
+    comments = list_github_pr_issue_comments(
+        repo_root,
+        owner=github_state["repo_owner"],
+        repo=github_state["repo"],
+        pr_number=pr_number,
+    )
+    timeline_events = list_github_pr_timeline_events(
+        repo_root,
+        owner=github_state["repo_owner"],
+        repo=github_state["repo"],
+        pr_number=pr_number,
+    )
+    current_head_started_at = current_github_pr_head_started_at(
+        timeline_events,
+        current_head_sha=current_head_sha,
+        pr_created_at=github_state.get("pr_created_at"),
+    )
+    github_state["current_head_started_at"] = current_head_started_at
+    review_state = classify_github_pr_review_state_for_current_head(
+        comments,
+        current_head_started_at=current_head_started_at,
+        last_consumed_comment_id=github_state.get("last_consumed_review_comment_id"),
+    )
+    adopt_github_review_request_comment(
+        github_state,
+        turn_number,
+        review_state["request_comment"],
+    )
+    save_run_state(run_dir, state)
+    return review_state
 
 
 def extract_github_review_blocking_issues(comment_body: str) -> list[str]:
@@ -3696,7 +3949,7 @@ def select_latest_unconsumed_github_codex_review_comment(
             and created_at_epoch > latest_allowed_created_at_epoch
         ):
             continue
-        if not body.lstrip().startswith(GITHUB_CODEX_REVIEW_PREFIX):
+        if not is_github_codex_review_comment(body):
             continue
         candidates.append(comment)
     if not candidates:
@@ -3823,23 +4076,7 @@ def wait_for_new_github_codex_review_comment(
             latest_allowed_created_at=wait_state.get("deadline_at"),
         )
         if comment is not None:
-            github_state["last_consumed_review_comment_body_sha256"] = hash_text(
-                comment["body"]
-            )
-            github_state["last_consumed_review_comment_created_at"] = comment["created_at"]
-            github_state["last_consumed_review_comment_id"] = comment["id"]
-            github_state["last_consumed_review_turn"] = turn_name(turn_number)
-            save_run_state(run_dir, state)
-            append_run_event(
-                run_dir,
-                "github_review_comment_received",
-                turn_number=turn_number,
-                role="reviewer",
-                details={
-                    "comment_id": comment["id"],
-                    "pr_number": pr_number,
-                },
-            )
+            record_consumed_github_codex_review_comment(run_dir, state, turn_number, comment)
             return comment
 
 
@@ -3880,6 +4117,7 @@ def build_github_reviewer_message(
     request_comment: dict | None = None,
     status: dict,
     error: SupervisorRuntimeError | None = None,
+    waited_for_reply: bool = False,
 ) -> str:
     github_state = state["review_bridge"]["github"]
     pr_label = github_state["pr_url"] or f"#{github_state.get('pr_number')}"
@@ -3921,9 +4159,12 @@ def build_github_reviewer_message(
             lines.append(
                 f"- Posted an `@codex` review request comment on PR #{github_state['pr_number']}."
             )
-        lines.append(
-            f"- Waited {GITHUB_CODEX_INITIAL_WAIT_SECONDS // 60} minutes, then polled every {GITHUB_CODEX_POLL_INTERVAL_SECONDS // 60} minutes for a new Codex review comment."
-        )
+        if waited_for_reply:
+            lines.append(
+                f"- Waited {GITHUB_CODEX_INITIAL_WAIT_SECONDS // 60} minutes, then polled every {GITHUB_CODEX_POLL_INTERVAL_SECONDS // 60} minutes for a new Codex review comment."
+            )
+    elif comment is not None:
+        lines.append("- Imported an already-present Codex review comment for the current pushed head without posting a new request.")
     if error is not None:
         lines.append("- Surfaced the GitHub review bridge failure explicitly as a blocked reviewer artifact.")
     else:
@@ -3943,11 +4184,16 @@ def build_github_review_bridge_prompt(
     turn_number: int,
     *,
     continue_context_block: str = "",
-    reuse_existing_request: bool,
+    bridge_state: str,
 ) -> str:
     github_state = state["review_bridge"]["github"]
     pr_label = github_state["pr_url"] or f"#{github_state.get('pr_number')}"
-    request_mode = "resume the existing review wait" if reuse_existing_request else "post a new `@codex` review request comment"
+    if bridge_state == "needs_request_comment":
+        action = "post a new `@codex` review request comment"
+    elif bridge_state == "waiting_for_codex_reply":
+        action = "resume waiting on the existing `@codex` request comment"
+    else:
+        action = "import the existing Codex reply for the current pushed head"
     lines = [
         "GitHub Codex PR review bridge",
         "",
@@ -3955,7 +4201,7 @@ def build_github_review_bridge_prompt(
         f"PR: {pr_label}",
         f"Branch: {github_state['branch']}",
         f"Base branch: {github_state['base_branch']}",
-        f"Action: {request_mode}",
+        f"Action: {action}",
     ]
     if continue_context_block:
         lines.extend(["", continue_context_block])
@@ -4308,65 +4554,90 @@ def run_github_codex_review_phase(
     continue_context_block: str = "",
 ) -> dict:
     github_state = state["review_bridge"]["github"]
-    reuse_existing_request = (
-        github_state.get("last_request_turn") == turn_name(turn_number)
-        and isinstance(github_state.get("last_request_comment_id"), int)
-    )
-    reviewer_prompt = build_github_review_bridge_prompt(
-        state,
-        turn_number,
-        continue_context_block=continue_context_block,
-        reuse_existing_request=reuse_existing_request,
-    )
-    write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
-    state["current_turn"] = turn_number
-    state["pending_turn"] = None
-    state["pending_role"] = None
-    state["transition_source_verdict"] = None
-    state["status"] = "waiting_reviewer"
-    state["roles"]["reviewer"]["last_wait_phase"] = "github_review_bridge"
-    save_run_state(run_dir, state)
-    save_turn_metadata(
-        current_turn_dir,
-        turn_number,
-        "reviewer_bridge_started",
-        role="reviewer",
-        details={"mode": "github_pr_codex", "reused_request": reuse_existing_request},
-    )
-    append_run_event(
-        run_dir,
-        "reviewer_bridge_started",
-        turn_number=turn_number,
-        role="reviewer",
-        details={"mode": "github_pr_codex", "reused_request": reuse_existing_request},
-    )
-
     request_comment = None
     reviewed_commit_sha = github_state.get("last_observed_head_sha")
+    waited_for_reply = False
     try:
         pr_info = ensure_github_pr_ready(run_dir, state, task_root, turn_number)
         reviewed_commit_sha = pr_info["head_ref_oid"]
-        if reuse_existing_request:
-            request_comment = {
-                "body": None,
-                "created_at": github_state["last_request_comment_created_at"],
-                "html_url": None,
-                "id": github_state["last_request_comment_id"],
-            }
-        else:
+        current_review_state = inspect_github_pr_review_state_for_current_head(
+            run_dir,
+            state,
+            turn_number,
+            current_head_sha=reviewed_commit_sha,
+        )
+        review_state = current_review_state["state"]
+        reuse_existing_request = review_state != "needs_request_comment"
+        reviewer_prompt = build_github_review_bridge_prompt(
+            state,
+            turn_number,
+            continue_context_block=continue_context_block,
+            bridge_state=review_state,
+        )
+        write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
+        state["current_turn"] = turn_number
+        state["pending_turn"] = None
+        state["pending_role"] = None
+        state["transition_source_verdict"] = None
+        state["status"] = "waiting_reviewer"
+        state["roles"]["reviewer"]["last_wait_phase"] = "github_review_bridge"
+        save_run_state(run_dir, state)
+        save_turn_metadata(
+            current_turn_dir,
+            turn_number,
+            "reviewer_bridge_started",
+            role="reviewer",
+            details={"mode": "github_pr_codex", "reused_request": reuse_existing_request},
+        )
+        append_run_event(
+            run_dir,
+            "reviewer_bridge_started",
+            turn_number=turn_number,
+            role="reviewer",
+            details={"mode": "github_pr_codex", "reused_request": reuse_existing_request},
+        )
+
+        if review_state == "needs_request_comment":
             request_comment = post_github_pr_review_request_comment(
                 run_dir,
                 state,
                 turn_number,
                 reviewed_commit_sha,
             )
-        comment = wait_for_new_github_codex_review_comment(
-            run_dir,
-            state,
-            turn_number,
-            timeout_seconds=float(state["council_config"]["council"]["turn_timeout_seconds"]),
-            reuse_existing_request=reuse_existing_request,
-        )
+            waited_for_reply = True
+            comment = wait_for_new_github_codex_review_comment(
+                run_dir,
+                state,
+                turn_number,
+                timeout_seconds=float(state["council_config"]["council"]["turn_timeout_seconds"]),
+                reuse_existing_request=False,
+            )
+        elif review_state == "waiting_for_codex_reply":
+            existing_request_comment = current_review_state["request_comment"]
+            request_comment = {
+                "body": None,
+                "created_at": existing_request_comment["created_at"],
+                "html_url": None,
+                "id": existing_request_comment["id"],
+            }
+            waited_for_reply = True
+            comment = wait_for_new_github_codex_review_comment(
+                run_dir,
+                state,
+                turn_number,
+                timeout_seconds=float(state["council_config"]["council"]["turn_timeout_seconds"]),
+                reuse_existing_request=True,
+            )
+        else:
+            existing_request_comment = current_review_state["request_comment"]
+            request_comment = {
+                "body": None,
+                "created_at": existing_request_comment["created_at"],
+                "html_url": None,
+                "id": existing_request_comment["id"],
+            }
+            comment = current_review_state["reply_comment"]
+            record_consumed_github_codex_review_comment(run_dir, state, turn_number, comment)
         reviewer_status = validate_reviewer_status(
             github_reviewer_status_from_comment(comment["body"], reviewed_commit_sha)
         )
@@ -4376,6 +4647,7 @@ def run_github_codex_review_phase(
             comment=comment,
             request_comment=request_comment,
             status=reviewer_status,
+            waited_for_reply=waited_for_reply,
         )
         write_final_message_artifact(current_turn_dir, "reviewer", reviewer_message)
         save_json(role_status_path(current_turn_dir, "reviewer"), reviewer_status)
@@ -4407,6 +4679,7 @@ def run_github_codex_review_phase(
             request_comment=request_comment,
             status=reviewer_status,
             error=error,
+            waited_for_reply=waited_for_reply,
         )
         write_final_message_artifact(current_turn_dir, "reviewer", reviewer_message)
         save_json(role_status_path(current_turn_dir, "reviewer"), reviewer_status)
@@ -5614,6 +5887,7 @@ def clone_review_bridge_state_for_new_run(previous_state: dict) -> dict:
             "base_branch": previous["base_branch"],
             "branch": previous["branch"],
             "branch_source": previous.get("branch_source", "auto"),
+            "current_head_started_at": None,
             "last_consumed_review_comment_body_sha256": None,
             "last_consumed_review_comment_created_at": None,
             "last_consumed_review_comment_id": None,
@@ -5624,19 +5898,13 @@ def clone_review_bridge_state_for_new_run(previous_state: dict) -> dict:
             "last_request_turn": None,
             "pr_head_sha": previous.get("pr_head_sha"),
             "pr_number": previous.get("pr_number"),
+            "pr_created_at": previous.get("pr_created_at"),
             "pr_url": previous.get("pr_url"),
             "repo_name_with_owner": previous["repo_name_with_owner"],
             "repo_owner": previous["repo_owner"],
             "repo": previous["repo"],
             "repo_url": previous["repo_url"],
-            "review_wait": {
-                "deadline_at": None,
-                "initial_wait_seconds": GITHUB_CODEX_INITIAL_WAIT_SECONDS,
-                "last_polled_at": None,
-                "poll_count": 0,
-                "poll_interval_seconds": GITHUB_CODEX_POLL_INTERVAL_SECONDS,
-                "started_at": None,
-            },
+            "review_wait": new_github_review_wait_state(),
         },
     }
 

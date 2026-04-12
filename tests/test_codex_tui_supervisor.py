@@ -770,6 +770,37 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertEqual(state["github"]["branch"], "feature/pr")
         self.assertEqual(state["github"]["base_branch"], "main")
 
+    def test_build_review_bridge_state_defaults_new_pr_base_branch_to_staging(self) -> None:
+        args = argparse.Namespace(
+            review_mode="github_pr_codex",
+            github_pr=None,
+            github_branch=None,
+            github_base=None,
+            start_role="auto",
+        )
+        with mock.patch.object(
+            MODULE,
+            "load_github_repo_metadata",
+            return_value={
+                "default_branch": "main",
+                "name_with_owner": "acme/repo",
+                "owner": "acme",
+                "repo": "repo",
+                "url": "https://github.com/acme/repo",
+            },
+        ), mock.patch.object(
+            MODULE,
+            "find_existing_github_pr_for_branch",
+            return_value=None,
+        ):
+            state = MODULE.build_review_bridge_state(
+                Path("/repo"),
+                Path("/repo/.codex-council/demo-task"),
+                {"current_branch": "feature/pr"},
+                args,
+            )
+        self.assertEqual(state["github"]["base_branch"], "staging")
+
     def test_ensure_github_pr_ready_creates_pr_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run"
@@ -857,13 +888,100 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             ):
                 request_comment = MODULE.post_github_pr_review_request_comment(run_dir, state, 2, "deadbeef")
             self.assertEqual(request_comment["id"], 101)
-            self.assertTrue(request_comment["body"].startswith("@codex review"))
+            self.assertEqual(request_comment["body"], "@codex")
             self.assertEqual(state["review_bridge"]["github"]["last_request_comment_id"], 101)
             self.assertEqual(state["review_bridge"]["github"]["last_request_turn"], "0002")
 
+    def test_current_github_pr_head_started_at_uses_latest_matching_timeline_event(self) -> None:
+        started_at = MODULE.current_github_pr_head_started_at(
+            [
+                {
+                    "event": "committed",
+                    "created_at": "2026-04-12T00:05:00Z",
+                    "commit_id": "oldhead",
+                },
+                {
+                    "event": "committed",
+                    "created_at": "2026-04-12T00:10:00Z",
+                    "commit_id": "newhead",
+                },
+                {
+                    "event": "head_ref_force_pushed",
+                    "created_at": "2026-04-12T00:15:00Z",
+                    "after": "newhead",
+                },
+            ],
+            current_head_sha="newhead",
+            pr_created_at="2026-04-12T00:00:00Z",
+        )
+        self.assertEqual(started_at, "2026-04-12T00:15:00Z")
+
+    def test_classify_github_pr_review_state_for_current_head_reuses_unanswered_literal_request(self) -> None:
+        review_state = MODULE.classify_github_pr_review_state_for_current_head(
+            [
+                {
+                    "id": 9,
+                    "created_at": "2026-04-12T00:00:00Z",
+                    "body": "@codex",
+                },
+            ],
+            current_head_started_at="2026-04-12T00:00:00Z",
+            last_consumed_comment_id=None,
+        )
+        self.assertEqual(review_state["state"], "waiting_for_codex_reply")
+        assert review_state["request_comment"] is not None
+        self.assertEqual(review_state["request_comment"]["id"], 9)
+
+    def test_classify_github_pr_review_state_for_current_head_returns_reply_ready(self) -> None:
+        review_state = MODULE.classify_github_pr_review_state_for_current_head(
+            [
+                {
+                    "id": 9,
+                    "created_at": "2026-04-12T00:00:00Z",
+                    "body": "@codex",
+                },
+                {
+                    "id": 10,
+                    "created_at": "2026-04-12T00:10:00Z",
+                    "body": "Codex Review: Ready to import.",
+                },
+            ],
+            current_head_started_at="2026-04-12T00:00:00Z",
+            last_consumed_comment_id=None,
+        )
+        self.assertEqual(review_state["state"], "codex_reply_ready_to_ingest")
+        assert review_state["reply_comment"] is not None
+        self.assertEqual(review_state["reply_comment"]["id"], 10)
+
+    def test_classify_github_pr_review_state_for_current_head_ignores_old_head_comments(self) -> None:
+        review_state = MODULE.classify_github_pr_review_state_for_current_head(
+            [
+                {
+                    "id": 8,
+                    "created_at": "2026-04-12T00:00:00Z",
+                    "body": "@codex",
+                },
+                {
+                    "id": 9,
+                    "created_at": "2026-04-12T00:05:00Z",
+                    "body": "Codex Review: Old head reply.",
+                },
+                {
+                    "id": 10,
+                    "created_at": "2026-04-12T00:20:00Z",
+                    "body": "@codex",
+                },
+            ],
+            current_head_started_at="2026-04-12T00:20:00Z",
+            last_consumed_comment_id=None,
+        )
+        self.assertEqual(review_state["state"], "waiting_for_codex_reply")
+        assert review_state["request_comment"] is not None
+        self.assertEqual(review_state["request_comment"]["id"], 10)
+
     def test_select_latest_unconsumed_github_codex_review_comment_ignores_consumed_comments(self) -> None:
         comments = [
-            {"id": 10, "created_at": "2026-04-12T00:00:00Z", "body": "@codex review"},
+            {"id": 10, "created_at": "2026-04-12T00:00:00Z", "body": "@codex"},
             {"id": 11, "created_at": "2026-04-12T00:10:00Z", "body": "Codex Review: First review"},
             {"id": 12, "created_at": "2026-04-12T00:20:00Z", "body": "Codex Review: Latest review"},
         ]
@@ -1217,12 +1335,21 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 },
             ), mock.patch.object(
                 MODULE,
+                "inspect_github_pr_review_state_for_current_head",
+                return_value={
+                    "state": "needs_request_comment",
+                    "current_head_started_at": "2026-04-12T01:00:00Z",
+                    "request_comment": None,
+                    "reply_comment": None,
+                },
+            ), mock.patch.object(
+                MODULE,
                 "post_github_pr_review_request_comment",
                 return_value={
                     "id": 101,
                     "created_at": "2026-04-12T01:00:00Z",
                     "html_url": None,
-                    "body": "@codex review",
+                    "body": "@codex",
                 },
             ), mock.patch.object(
                 MODULE,
@@ -1289,12 +1416,21 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 },
             ), mock.patch.object(
                 MODULE,
+                "inspect_github_pr_review_state_for_current_head",
+                return_value={
+                    "state": "needs_request_comment",
+                    "current_head_started_at": "2026-04-12T01:00:00Z",
+                    "request_comment": None,
+                    "reply_comment": None,
+                },
+            ), mock.patch.object(
+                MODULE,
                 "post_github_pr_review_request_comment",
                 return_value={
                     "id": 101,
                     "created_at": "2026-04-12T01:00:00Z",
                     "html_url": None,
-                    "body": "@codex review",
+                    "body": "@codex",
                 },
             ), mock.patch.object(
                 MODULE,
@@ -1306,6 +1442,91 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("timed out waiting for Codex", reviewer_status["summary"])
             reviewer_message = (turn_dir / "reviewer" / "message.md").read_text(encoding="utf-8")
             self.assertIn("GitHub review bridge failed", reviewer_message)
+
+    def test_run_github_codex_review_phase_imports_existing_current_head_reply_without_waiting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            turn_dir = run_dir / "turns" / "0001"
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            state = {
+                "council_config": {"council": {"turn_timeout_seconds": 1800}},
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "base_branch": "main",
+                        "branch": "feature/demo",
+                        "current_head_started_at": "2026-04-12T01:00:00Z",
+                        "last_consumed_review_comment_body_sha256": None,
+                        "last_consumed_review_comment_created_at": None,
+                        "last_consumed_review_comment_id": None,
+                        "last_consumed_review_turn": None,
+                        "last_request_comment_created_at": None,
+                        "last_request_comment_id": None,
+                        "last_request_turn": None,
+                        "last_observed_head_sha": "deadbeef",
+                        "pr_created_at": "2026-04-12T00:00:00Z",
+                        "pr_head_sha": "deadbeef",
+                        "pr_number": 9,
+                        "pr_url": "https://github.com/acme/repo/pull/9",
+                        "repo": "repo",
+                        "repo_owner": "acme",
+                        "review_wait": {
+                            "deadline_at": None,
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": None,
+                            "poll_count": 0,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": None,
+                        },
+                    },
+                },
+                "roles": {"reviewer": {"last_wait_phase": None}},
+                "status": "booting",
+            }
+            with mock.patch.object(
+                MODULE,
+                "ensure_github_pr_ready",
+                return_value={
+                    "number": 9,
+                    "url": "https://github.com/acme/repo/pull/9",
+                    "head_ref_name": "feature/demo",
+                    "base_ref_name": "main",
+                    "head_ref_oid": "deadbeef",
+                    "title": "Fix bug",
+                },
+            ), mock.patch.object(
+                MODULE,
+                "inspect_github_pr_review_state_for_current_head",
+                return_value={
+                    "state": "codex_reply_ready_to_ingest",
+                    "current_head_started_at": "2026-04-12T01:00:00Z",
+                    "request_comment": {
+                        "id": 101,
+                        "created_at": "2026-04-12T01:00:00Z",
+                        "body": "@codex",
+                    },
+                    "reply_comment": {
+                        "id": 202,
+                        "created_at": "2026-04-12T01:04:00Z",
+                        "body": "Codex Review: Ready to import.",
+                    },
+                },
+            ), mock.patch.object(
+                MODULE,
+                "post_github_pr_review_request_comment",
+            ) as post_request, mock.patch.object(
+                MODULE,
+                "wait_for_new_github_codex_review_comment",
+            ) as wait_for_comment:
+                reviewer_status = MODULE.run_github_codex_review_phase(run_dir, state, task_root, 1, turn_dir)
+            self.assertEqual(reviewer_status["verdict"], "changes_requested")
+            post_request.assert_not_called()
+            wait_for_comment.assert_not_called()
+            reviewer_message = (turn_dir / "reviewer" / "message.md").read_text(encoding="utf-8")
+            self.assertIn("Imported Codex review comment ID: `202`", reviewer_message)
+            self.assertNotIn("Waited 10 minutes", reviewer_message)
 
     def test_determine_continue_target_reuses_same_turn_for_github_review_bridge_blocked_reviewer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
