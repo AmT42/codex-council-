@@ -34,6 +34,24 @@ It does that by combining:
 - an approval layer centered on `contract.md`
 - artifact-driven `continue` rather than guessing from stale state
 
+## Operator Boundary
+
+When a user asks an outer agent to **use this repo or harness** for some task, the outer agent is acting as a **harness operator**, not as the direct implementer of the target feature.
+
+That means:
+
+- the outer agent should scaffold or update the canonical council docs
+- then `start` or `continue` the harness
+- and let the generator/reviewer council do the actual target-repo implementation work
+
+It must **not**:
+
+- implement the target-repo feature directly instead of using the harness
+- silently bypass the council because the feature sounds easy
+- extend `council-agent` itself with glue code, wrappers, native integrations, or app-specific helpers unless the user explicitly asked to modify the harness repository
+
+If the user asks for a native integration or a new product feature for `council-agent` itself, that is maintainer work on this repo. Otherwise, the outer agent should treat `council-agent` as the tool it operates, not the place where the target feature gets built.
+
 ## Product Model
 
 There are two different agent surfaces in this repo.
@@ -236,10 +254,18 @@ The system is only robust if the outer agent can normalize weak input into stron
 1. The outer agent reads [`skills/codex-council/SKILL.md`](./skills/codex-council/SKILL.md).
 2. It classifies the user request.
 3. It discovers facts from the target repo.
-4. It writes the minimal document set needed for safe execution.
+4. It fills the minimal canonical document set needed for safe execution, usually by editing the files directly with its normal file tools.
 5. It starts or continues the harness with the existing CLI.
 
 ### Manual fallback
+
+The `write --body` flow below is a manual or lightweight automation fallback.
+
+For a capable outer agent, the recommended path is:
+
+- run `init` if the workspace does not exist
+- fill `task.md`, `review.md`, `spec.md`, and `contract.md` directly with normal file-editing tools
+- then run `start` or `continue`
 
 From a target repository:
 
@@ -282,7 +308,7 @@ The public CLI stays intentionally small:
 - `continue`
   - resume the latest valid run in place
 
-The outer-agent skill should orchestrate those commands rather than inventing a parallel interface.
+The outer-agent skill should orchestrate those commands rather than inventing a parallel interface. For strong agents, that usually means using `init`, then editing the canonical files directly, then calling `start` or `continue`. `write` remains available as a convenience command, not the primary authoring path for agents.
 
 ## Runtime Notes
 
@@ -302,6 +328,32 @@ The TUI supervisor:
 - a `needs_human` pause
 - a `changes_requested` reviewer verdict
 - a stopped session whose validated artifacts still exist
+
+## Supervisor Lifetime
+
+`start` and `continue` launch a live supervisor process. They are not fire-and-forget hints.
+
+Important:
+
+- the generator and reviewer `tmux` sessions may keep running even if the supervisor dies
+- but the council will stop advancing turns without the supervisor
+- this can leave a run stale until someone inspects `status` and resumes with `continue`
+
+So an outer agent must do one of these:
+
+- wait for `start` or `continue` to keep running
+- or launch the supervisor in a truly persistent environment
+
+Safe persistent environments:
+
+- a dedicated terminal that stays open
+- a dedicated `tmux` session
+- a properly detached background job such as `nohup` or similar
+
+Unsafe pattern:
+
+- launch `python3 ... codex_tui_supervisor.py start ...` from an outer-agent session
+- then let that session exit or get interrupted
 
 ## Robustness Philosophy
 

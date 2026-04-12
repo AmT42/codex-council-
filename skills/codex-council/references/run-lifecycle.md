@@ -12,6 +12,8 @@ Use the existing CLI:
 
 Do not invent parallel wrapper commands in the outer-agent workflow.
 
+For canonical document authoring, a capable outer agent should usually edit the files directly rather than treating `write --body` as the primary API.
+
 ## Create or reuse a workspace
 
 If the task workspace does not exist:
@@ -25,7 +27,15 @@ If it already exists:
 - inspect the existing docs and runs first
 - avoid reinitializing unless the user clearly wants a new task
 
-## Write only the needed docs
+## Fill only the needed docs
+
+Preferred for outer agents:
+
+- edit `task.md`, `review.md`, `spec.md`, and `contract.md` directly
+- use your normal file-editing tools
+- keep the smallest sufficient document set
+
+## Optional CLI fallback
 
 Examples:
 
@@ -36,7 +46,7 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write spec my-tas
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write contract my-task --dir /path/to/target-repo --body "..."
 ```
 
-Write the smallest sufficient document set, not every doc by reflex.
+Treat these `write --body` examples as a fallback for manual use or simple automation.
 
 ## Start
 
@@ -49,6 +59,12 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --d
 Before `start`, ensure the docs are strong enough to survive runtime validation.
 
 Default to the current auto role routing.
+
+Process rule:
+
+- either wait for `start`
+- or run it in a truly persistent environment
+- never fire-and-forget from an outer-agent session that may exit
 
 ## Status
 
@@ -73,9 +89,15 @@ Prefer `continue` over a new run when:
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task --dir /path/to/target-repo
 ```
 
+Process rule:
+
+- `continue` is also a live supervisor process
+- it needs the same lifetime guarantees as `start`
+
 ## Safety notes
 
 - Expect `start` to reject a dirty target repo in the normal path.
 - If the request is direct-answer-only, do not call any lifecycle command.
 - If the existing run is healthy and suitable, prefer continuing it instead of overwriting the workspace.
 - If the docs are too weak, improve the docs before launch instead of hoping the council compensates for them.
+- If the supervisor dies, the role sessions may survive but the council will not keep advancing until `continue` is run.

@@ -17,6 +17,51 @@ The outer agent should not require the user to understand:
 
 The outer agent must compensate for that by being strict and explicit.
 
+## Non-Negotiable Role Boundary
+
+If the user asks you to **use this harness/repo/script/skill** for a task, your primary job is to operate the harness correctly.
+
+That means:
+
+- inspect the target repo
+- synthesize strong council docs
+- decide between direct answer, `start`, and `continue`
+- launch or resume the council
+
+That does **not** mean:
+
+- directly implementing the target-repo feature yourself instead of using the council
+- adding helper code to `council-agent` because the target task would be easier that way
+- inventing new wrapper applications, Finder extensions, desktop glue, or native integrations unless the user explicitly asked to build those as features of `council-agent`
+
+If the user says “use this repo to add feature X”, interpret that as:
+
+- feature X belongs in the target repo
+- `council-agent` is the tool you must operate
+- your first move is to prepare the council run, not to code the feature directly
+
+## Non-Negotiable Process Boundary
+
+When you run `start` or `continue`, you are launching a live supervisor process.
+
+You must either:
+
+- wait for it to keep running
+- or run it in a truly persistent environment
+
+Safe patterns:
+
+- a terminal that remains open
+- a dedicated `tmux` session
+- a properly detached background job such as `nohup`
+
+Unsafe pattern:
+
+- launch `start` or `continue` from your outer-agent shell
+- then let that shell exit or get interrupted
+
+If that happens, a role session may finish in `tmux` while the reviewer never launches, because the supervisor is already gone.
+
 ## Intended Audiences
 
 ### Novice user
@@ -81,6 +126,7 @@ Behavior:
 - prefer `status` to understand the current state
 - prefer `continue` over creating a new run when the existing run is still the right one
 - do not overwrite task docs unless the user or repo state clearly requires it
+- use this route to recover stale runs where the supervisor died but the artifacts indicate the correct next role
 
 ### 3. Concrete execution request
 
@@ -96,6 +142,7 @@ Behavior:
 - default document set: `task.md` + `contract.md`
 - `spec.md` is usually unnecessary here
 - after writing the needed docs, run `start`
+- do not directly implement the target feature yourself when the harness is the requested tool
 
 ### 4. Findings-driven fix
 
@@ -110,6 +157,7 @@ Behavior:
 - default document set: `review.md` + `contract.md`
 - add `task.md` only if a short brief materially improves generator intent
 - run `start` once the docs are ready
+- do not bypass the council by fixing the findings yourself unless the user explicitly switched tasks and asked you to modify the target repo directly
 
 ### 5. Broad feature or spec work
 
@@ -124,6 +172,7 @@ Behavior:
 - ask only the minimum blocking questions needed to make the work executable
 - default document set: `task.md` + `spec.md` + `contract.md`
 - once the blocking questions are answered, run `start`
+- do not turn missing harness ergonomics into an excuse to build new harness-side glue unless that is the actual requested feature
 
 ## Novice Input Normalization
 
@@ -274,6 +323,8 @@ Before launching with `start`, the outer agent should mentally check:
 - does `contract.md` make approval auditable?
 - would a reviewer know how to reject a bad implementation from these docs?
 - is this really a new run, or should it be `continue`?
+- am I still acting as harness operator rather than drifting into doing the target task myself?
+- will the supervisor process remain alive long enough for orchestration to continue?
 
 If the answer is no, do not launch yet.
 
@@ -282,6 +333,18 @@ If the answer is no, do not launch yet.
 The outer agent should use the existing CLI, not invent new commands.
 
 The canonical commands are `init`, `write`, `start`, `status`, and `continue`.
+
+For a capable outer agent, the preferred authoring path is:
+
+- use `init` to scaffold if needed
+- inspect and fill the canonical files directly with normal file-editing tools
+- use `start` or `continue` once the docs are strong
+
+Treat `write --body` as a fallback for:
+
+- humans using the CLI manually
+- very small scripted setup flows
+- situations where direct file editing is inconvenient
 
 ### Create a workspace
 
@@ -293,7 +356,17 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init my-task --di
 
 Use a concise task name that safely fits the existing task-name pattern.
 
-### Write docs
+### Fill docs directly
+
+Preferred for outer agents:
+
+- edit `task.md`, `review.md`, `spec.md`, and `contract.md` directly
+- keep the smallest sufficient document set
+- use your normal file-writing and editing tools
+
+### Optional CLI fallback
+
+If direct file editing is inconvenient, the CLI can still seed or replace documents:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write task my-task --dir /path/to/target-repo --body "..."
@@ -302,7 +375,7 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write spec my-tas
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write contract my-task --dir /path/to/target-repo --body "..."
 ```
 
-Only write the minimal required document set for the chosen route.
+Only fill the minimal required document set for the chosen route.
 
 ### Start a run
 
@@ -311,6 +384,12 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --d
 ```
 
 Prefer the default auto role selection unless a special case requires otherwise.
+
+Process rule:
+
+- either wait for this command
+- or run it in a persistent environment
+- do not fire-and-forget from an outer-agent session that may exit
 
 ### Inspect a run
 
@@ -332,6 +411,9 @@ Use `continue` after:
 - a `needs_human` pause
 - human edits to canonical task docs
 - session loss where validated artifacts still exist
+- stale runs where the supervisor died but `status` now shows the correct derived continuation
+
+Like `start`, `continue` must also be kept alive. Do not launch it from an outer-agent session that may die immediately afterward.
 
 ## Continue Policy
 
@@ -363,3 +445,6 @@ When the request is direct-answer-only:
 - Do not put product requirements into task-local `AGENTS.md`.
 - Do not create `spec.md` when a short `task.md` already makes the work executable.
 - Do not launch the council with a weak brief just because the user wants speed.
+- Do not implement the target-repo feature directly when the user explicitly asked to use this harness.
+- Do not add harness-side glue code or wrappers just because the target feature would otherwise require some setup; first operate the existing harness unless the user explicitly asked to extend `council-agent`.
+- Do not fire-and-forget `start` or `continue` from an outer-agent session that may kill the supervisor when it exits.

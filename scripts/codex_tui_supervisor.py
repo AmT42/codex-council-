@@ -164,10 +164,23 @@ RAW_OUTPUT_CAPTURE_TIMEOUT_SECONDS = 30.0
 TERMINAL_SUMMARY_BEGIN = "COUNCIL_TERMINAL_SUMMARY_BEGIN"
 TERMINAL_SUMMARY_END = "COUNCIL_TERMINAL_SUMMARY_END"
 TRANSITIONING_TURN_STATUS = "transitioning_turn"
+TURN_METADATA_AUDIT_KEYS = (
+    "continuation_reason",
+    "continuation_source",
+    "continued_at",
+    "selected_role",
+    "selected_turn",
+)
 GITHUB_CODEX_REVIEW_PREFIX = "Codex Review:"
 GITHUB_CODEX_APPROVED_PREFIX = "Codex Review: Didn't find any major issues. Keep it up!"
 GITHUB_CODEX_INITIAL_WAIT_SECONDS = 600
 GITHUB_CODEX_POLL_INTERVAL_SECONDS = 300
+CODEX_TRUST_PROMPT_TEXT = "Do you trust the contents of this directory?"
+CODEX_TRUST_CONTINUE_TEXT = "Press enter to continue"
+CODEX_FOOTER_RE = re.compile(r"^\s*\S.*\s+·\s+(?:~|/).+$")
+TMUX_BOOT_GRACE_SECONDS = 2.0
+TMUX_PROMPT_DISPATCH_ATTEMPTS = 2
+TMUX_PROMPT_DISPATCH_CONFIRM_SECONDS = 0.2
 
 
 class SupervisorRuntimeError(RuntimeError):
@@ -182,6 +195,12 @@ class SupervisorRuntimeError(RuntimeError):
         super().__init__(message)
         self.phase = phase
         self.role = role
+        self.details = details or {}
+
+
+class ContinuationResolutionError(RuntimeError):
+    def __init__(self, message: str, *, details: dict | None = None) -> None:
+        super().__init__(message)
         self.details = details or {}
 
 
@@ -675,14 +694,26 @@ def latest_run_dir(task_root: Path) -> Path:
     return candidates[-1]
 
 
-def latest_turn_dir(run_dir: Path) -> Path:
+def list_turn_dirs(run_dir: Path) -> list[Path]:
     turns_root = run_dir / "turns"
     if not turns_root.exists():
         raise SystemExit(f"missing turns directory: {turns_root}")
-    candidates = sorted(path for path in turns_root.iterdir() if path.is_dir())
+    candidates = []
+    for path in turns_root.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            turn_number = int(path.name)
+        except ValueError:
+            continue
+        candidates.append((turn_number, path))
     if not candidates:
         raise SystemExit(f"no turns found for run: {run_dir}")
-    return candidates[-1]
+    return [path for _, path in sorted(candidates)]
+
+
+def latest_turn_dir(run_dir: Path) -> Path:
+    return list_turn_dirs(run_dir)[-1]
 
 
 def events_path_for(run_dir: Path) -> Path:
@@ -1303,12 +1334,61 @@ def extract_terminal_summary_block(pane_text: str) -> str | None:
     return None
 
 
+def last_non_empty_pane_line(pane_text: str) -> str:
+    for line in reversed(pane_text.splitlines()):
+        if line.strip():
+            return line.rstrip()
+    return ""
+
+
+def pane_prompt_lines(pane_text: str) -> list[str]:
+    return [
+        line.rstrip()
+        for line in pane_text.splitlines()
+        if line.strip() and line.lstrip().startswith("›")
+    ]
+
+
+def pane_has_codex_footer(pane_text: str) -> bool:
+    return bool(CODEX_FOOTER_RE.match(last_non_empty_pane_line(pane_text)))
+
+
+def pane_looks_interactive(pane_text: str) -> bool:
+    if pane_has_trust_prompt(pane_text):
+        return False
+    prompt_lines = pane_prompt_lines(pane_text)
+    if not prompt_lines:
+        return False
+    return pane_has_codex_footer(pane_text) or "OpenAI Codex" in pane_text
+
+
+def classify_tmux_pane(pane_text: str) -> str:
+    if pane_has_trust_prompt(pane_text):
+        return "trust_prompt"
+    last_line = last_non_empty_pane_line(pane_text)
+    if not last_line:
+        return "not_ready"
+    if CODEX_TRUST_CONTINUE_TEXT in pane_text:
+        return "unknown_interstitial"
+    prompt_lines = pane_prompt_lines(pane_text)
+    if last_line.lstrip().startswith("›"):
+        return "ready"
+    if prompt_lines and pane_has_codex_footer(pane_text):
+        return "ready"
+    if prompt_lines:
+        return "busy"
+    return "not_ready"
+
+
 def pane_shows_prompt(pane_text: str) -> bool:
-    lines = [line.rstrip() for line in pane_text.splitlines() if line.strip()]
-    for line in lines[-20:]:
-        if line.lstrip().startswith("›"):
-            return True
-    return False
+    return classify_tmux_pane(pane_text) == "ready"
+
+
+def pane_has_trust_prompt(pane_text: str) -> bool:
+    return (
+        CODEX_TRUST_PROMPT_TEXT in pane_text
+        and CODEX_TRUST_CONTINUE_TEXT in pane_text
+    )
 
 
 def pane_has_context_overflow(pane_text: str) -> bool:
@@ -1317,6 +1397,10 @@ def pane_has_context_overflow(pane_text: str) -> bool:
         "ran out of room in the model's context window" in lowered
         or "start a new thread or clear earlier history before retrying" in lowered
     )
+
+
+def pane_fingerprint(pane_text: str) -> str:
+    return hashlib.sha256(pane_text.encode("utf-8")).hexdigest()
 
 
 def restart_role_session(
@@ -1342,6 +1426,8 @@ def wait_for_tmux_prompt(
 ) -> None:
     deadline = time.time() + timeout_seconds
     last_pane = ""
+    if phase.endswith("_tmux_boot"):
+        time.sleep(min(TMUX_BOOT_GRACE_SECONDS, timeout_seconds))
     while time.time() < deadline:
         if not tmux_session_exists(tmux_name):
             raise SupervisorRuntimeError(
@@ -1350,9 +1436,29 @@ def wait_for_tmux_prompt(
                 role=role,
             )
         last_pane = tmux_capture_pane(tmux_name)
-        if pane_shows_prompt(last_pane):
+        pane_state = classify_tmux_pane(last_pane)
+        if pane_state == "trust_prompt":
+            try:
+                run_subprocess(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+            except subprocess.CalledProcessError as exc:
+                raise SupervisorRuntimeError(
+                    phase,
+                    f"failed to dismiss trust prompt in tmux session {tmux_name}: {exc.stderr.strip() or exc}",
+                    role=role,
+                    details={
+                        "command": exc.cmd,
+                        "stderr": exc.stderr,
+                        "stdout": exc.stdout,
+                        "tmux_session": tmux_name,
+                    },
+                ) from exc
+            time.sleep(TMUX_PASTE_SETTLE_SECONDS)
+            continue
+        if pane_state == "ready":
             return
         time.sleep(TMUX_PANE_POLL_SECONDS)
+    if phase.endswith(("_tmux_boot", "_prompt_ready")) and pane_looks_interactive(last_pane):
+        return
     raise SupervisorRuntimeError(
         phase,
         f"timed out waiting for Codex prompt in tmux session {tmux_name}",
@@ -1364,28 +1470,53 @@ def wait_for_tmux_prompt(
 def tmux_send_prompt(tmux_name: str, prompt: str, *, phase: str, role: str) -> None:
     buffer_name = f"codex-council-{uuid.uuid4().hex}"
     try:
-        try:
-            run_subprocess(
-                ["tmux", "load-buffer", "-b", buffer_name, "-"],
-                input_text=prompt,
-            )
-            run_subprocess(
-                ["tmux", "paste-buffer", "-d", "-b", buffer_name, "-t", tmux_name]
-            )
-            time.sleep(TMUX_PASTE_SETTLE_SECONDS)
-            run_subprocess(["tmux", "send-keys", "-t", tmux_name, "Enter"])
-        except subprocess.CalledProcessError as exc:
+        before_pane = tmux_capture_pane(tmux_name)
+        if classify_tmux_pane(before_pane) != "ready":
             raise SupervisorRuntimeError(
                 phase,
-                f"failed to send prompt to tmux session {tmux_name}: {exc.stderr.strip() or exc}",
+                f"tmux session {tmux_name} was not ready to receive a prompt",
                 role=role,
-                details={
-                    "command": exc.cmd,
-                    "stderr": exc.stderr,
-                    "stdout": exc.stdout,
-                    "tmux_session": tmux_name,
-                },
-            ) from exc
+                details={"pane_excerpt": before_pane[-4000:], "tmux_session": tmux_name},
+            )
+        before_fingerprint = pane_fingerprint(before_pane)
+        for _ in range(TMUX_PROMPT_DISPATCH_ATTEMPTS):
+            try:
+                run_subprocess(
+                    ["tmux", "load-buffer", "-b", buffer_name, "-"],
+                    input_text=prompt,
+                )
+                run_subprocess(
+                    ["tmux", "paste-buffer", "-d", "-b", buffer_name, "-t", tmux_name]
+                )
+                time.sleep(TMUX_PASTE_SETTLE_SECONDS)
+                run_subprocess(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+            except subprocess.CalledProcessError as exc:
+                raise SupervisorRuntimeError(
+                    phase,
+                    f"failed to send prompt to tmux session {tmux_name}: {exc.stderr.strip() or exc}",
+                    role=role,
+                    details={
+                        "command": exc.cmd,
+                        "stderr": exc.stderr,
+                        "stdout": exc.stdout,
+                        "tmux_session": tmux_name,
+                    },
+                ) from exc
+            time.sleep(TMUX_PROMPT_DISPATCH_CONFIRM_SECONDS)
+            after_pane = tmux_capture_pane(tmux_name)
+            after_state = classify_tmux_pane(after_pane)
+            if pane_fingerprint(after_pane) != before_fingerprint or after_state != "ready":
+                return
+        raise SupervisorRuntimeError(
+            phase,
+            f"prompt send to tmux session {tmux_name} did not change pane state",
+            role=role,
+            details={
+                "attempts": TMUX_PROMPT_DISPATCH_ATTEMPTS,
+                "pane_excerpt": before_pane[-4000:],
+                "tmux_session": tmux_name,
+            },
+        )
     finally:
         subprocess.run(
             ["tmux", "delete-buffer", "-b", buffer_name],
@@ -1504,16 +1635,25 @@ def save_turn_metadata(
     role: str | None = None,
     details: dict | None = None,
 ) -> None:
-    payload = {
-        "turn": turn_name(turn_number),
-        "phase": phase,
-        "updated_at": now_ts(),
-    }
+    payload = {}
+    path = turn_metadata_path(turn_dir)
+    if path.exists():
+        existing = load_json(path)
+        for key in TURN_METADATA_AUDIT_KEYS:
+            if key in existing:
+                payload[key] = existing[key]
+    payload.update(
+        {
+            "turn": turn_name(turn_number),
+            "phase": phase,
+            "updated_at": now_ts(),
+        }
+    )
     if role:
         payload["role"] = role
     if details:
         payload["details"] = details
-    save_json(turn_metadata_path(turn_dir), payload)
+    save_json(path, payload)
 
 
 def load_turn_metadata(turn_dir: Path) -> dict:
@@ -1529,9 +1669,12 @@ def annotate_turn_continuation(
     continuation_source: str,
     selected_role: str,
     selected_turn: int,
+    reason: str | None = None,
 ) -> None:
     metadata = load_turn_metadata(turn_dir) if turn_metadata_path(turn_dir).exists() else {}
     metadata["continuation_source"] = continuation_source
+    if reason:
+        metadata["continuation_reason"] = reason
     metadata["selected_role"] = selected_role
     metadata["selected_turn"] = turn_name(selected_turn)
     metadata["continued_at"] = now_ts()
@@ -1674,10 +1817,11 @@ def wait_for_role_artifacts(
                         },
                     )
         pane_text = tmux_capture_pane(tmux_name)
+        pane_state = classify_tmux_pane(pane_text)
         if (
             session_recovery_attempts < SESSION_RECOVERY_ATTEMPTS
-            and pane_shows_prompt(pane_text)
             and pane_has_context_overflow(pane_text)
+            and pane_state in {"ready", "busy"}
         ):
             session_recovery_attempts += 1
             repair_prompt = role_prompt_path(current_turn_dir, role).read_text(encoding="utf-8")
@@ -2341,6 +2485,7 @@ def begin_turn_transition(
     from_role: str,
     to_role: str,
     source_verdict: str,
+    reason: str | None = None,
 ) -> Path:
     next_turn_dir = prepare_turn(run_dir, to_turn, task_root)
     annotate_turn_continuation(
@@ -2348,6 +2493,7 @@ def begin_turn_transition(
         continuation_source=source_verdict,
         selected_role=to_role,
         selected_turn=to_turn,
+        reason=reason or f"{from_role} produced `{source_verdict}`; continue with {to_role} on turn {turn_name(to_turn)}.",
     )
     state["status"] = TRANSITIONING_TURN_STATUS
     state["current_turn"] = from_turn
@@ -3840,10 +3986,10 @@ def run_generator_phase(
                 "to_turn": turn_name(turn_number),
             },
         )
-    save_turn_metadata(current_turn_dir, turn_number, "generator_prompt_sent", role="generator")
+    save_turn_metadata(current_turn_dir, turn_number, "generator_prompt_prepared", role="generator")
     append_run_event(
         run_dir,
-        "generator_prompt_sent",
+        "generator_prompt_prepared",
         turn_number=turn_number,
         role="generator",
     )
@@ -3858,6 +4004,13 @@ def run_generator_phase(
         state["roles"]["generator"]["tmux_session"],
         generator_prompt,
         phase="generator_turn",
+        role="generator",
+    )
+    save_turn_metadata(current_turn_dir, turn_number, "generator_prompt_sent", role="generator")
+    append_run_event(
+        run_dir,
+        "generator_prompt_sent",
+        turn_number=turn_number,
         role="generator",
     )
     generator_artifact_path, _, generator_status = wait_for_role_artifacts(
@@ -3922,10 +4075,10 @@ def run_reviewer_phase(
     state["status"] = "waiting_reviewer"
     state["roles"]["reviewer"]["last_wait_phase"] = "reviewer_prompt_ready"
     save_run_state(run_dir, state)
-    save_turn_metadata(current_turn_dir, turn_number, "reviewer_prompt_sent", role="reviewer")
+    save_turn_metadata(current_turn_dir, turn_number, "reviewer_prompt_prepared", role="reviewer")
     append_run_event(
         run_dir,
-        "reviewer_prompt_sent",
+        "reviewer_prompt_prepared",
         turn_number=turn_number,
         role="reviewer",
     )
@@ -3940,6 +4093,13 @@ def run_reviewer_phase(
         state["roles"]["reviewer"]["tmux_session"],
         reviewer_prompt,
         phase="reviewer_turn",
+        role="reviewer",
+    )
+    save_turn_metadata(current_turn_dir, turn_number, "reviewer_prompt_sent", role="reviewer")
+    append_run_event(
+        run_dir,
+        "reviewer_prompt_sent",
+        turn_number=turn_number,
         role="reviewer",
     )
     reviewer_artifact_path, _, reviewer_status = wait_for_role_artifacts(
@@ -4566,7 +4726,31 @@ def show_status(args: argparse.Namespace) -> int:
     state_path = run_dir / "state.json"
     if not state_path.exists():
         raise SystemExit(f"missing run state: {state_path}")
-    print(json.dumps(load_json(state_path), indent=2, sort_keys=True))
+    state = load_json(state_path)
+    continuation = inspect_continuation_plan(run_dir, state)
+    payload = dict(state)
+    derived_payload = {
+        "mode": continuation["mode"],
+        "reason": continuation["reason"],
+    }
+    if continuation["mode"] in {"continue", "terminal"}:
+        derived_payload["continuation_state"] = continuation["continuation_state"]
+        derived_payload["turn"] = turn_name(continuation["turn_number"])
+        derived_payload["turn_dir"] = str(continuation["turn_dir"])
+        derived_payload["ignored_turns"] = continuation["ignored_turns"]
+    if continuation["mode"] == "continue":
+        derived_payload["role"] = continuation["role"]
+        derived_payload["create_new_turn"] = continuation["create_new_turn"]
+        derived_payload["reuse_existing_turn_for_first"] = continuation["reuse_existing_turn_for_first"]
+        derived_payload["prior_status"] = continuation["prior_status"]
+        if continuation["source_turn_number"] is not None:
+            derived_payload["source_turn"] = turn_name(continuation["source_turn_number"])
+        if continuation["reference_turn_dir"] is not None:
+            derived_payload["reference_turn_dir"] = str(continuation["reference_turn_dir"])
+    elif continuation["mode"] == "error":
+        derived_payload["details"] = continuation["details"]
+    payload["derived_continuation"] = derived_payload
+    print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
 
@@ -4583,6 +4767,13 @@ ArtifactContinuationState = Literal[
     "reviewer_blocked",
     "reviewer_approved",
 ]
+
+
+def fallback_continue_role(state: dict) -> str:
+    pending_role = state.get("pending_role")
+    if pending_role in ROLE_NAMES:
+        return pending_role
+    return "reviewer" if state.get("status") == "waiting_reviewer" else "generator"
 
 
 def inspect_role_artifacts(turn_dir: Path, role: str, validator) -> dict:
@@ -4619,67 +4810,427 @@ def inspect_role_artifacts(turn_dir: Path, role: str, validator) -> dict:
     }
 
 
-def classify_continuation_state(run_dir: Path) -> tuple[Path, ArtifactContinuationState, dict]:
-    latest_turn = latest_turn_dir(run_dir)
-    generator = inspect_role_artifacts(latest_turn, "generator", validate_generator_status)
-    if generator["state"] == "pending":
-        return latest_turn, "generator_pending", generator
+def inspect_role_runtime(turn_dir: Path, role: str, validator) -> dict:
+    inspected = inspect_role_artifacts(turn_dir, role, validator)
+    inspected["prompt_exists"] = role_prompt_path(turn_dir, role).exists()
+    inspected["activity_exists"] = bool(
+        inspected["prompt_exists"] or inspected["message_exists"] or inspected["status_exists"]
+    )
+    return inspected
+
+
+def classify_turn_continuation_state(turn: dict) -> str:
+    generator = turn["generator"]
+    reviewer = turn["reviewer"]
+
+    if not generator["activity_exists"] and not reviewer["activity_exists"]:
+        return "not_started"
+
+    if reviewer["activity_exists"] and generator["state"] != "valid":
+        return "ambiguous"
+
     if generator["state"] == "invalid":
-        return latest_turn, "generator_invalid", generator
+        return "generator_invalid"
+    if generator["state"] == "pending":
+        return "generator_pending"
 
     generator_result = generator["validated_status"]["result"]
     if generator_result == "needs_human":
-        return latest_turn, "generator_needs_human", generator
+        return "ambiguous" if reviewer["activity_exists"] else "generator_needs_human"
     if generator_result == "blocked":
-        return latest_turn, "generator_blocked", generator
+        return "ambiguous" if reviewer["activity_exists"] else "generator_blocked"
 
-    reviewer = inspect_role_artifacts(latest_turn, "reviewer", validate_reviewer_status)
-    if reviewer["state"] == "pending":
-        return latest_turn, "reviewer_pending", reviewer
     if reviewer["state"] == "invalid":
-        return latest_turn, "reviewer_invalid", reviewer
+        return "reviewer_invalid"
+    if reviewer["state"] == "pending":
+        return "reviewer_pending" if reviewer["activity_exists"] else "generator_complete_waiting_reviewer"
 
     reviewer_verdict = reviewer["validated_status"]["verdict"]
     if reviewer_verdict == "approved":
-        return latest_turn, "reviewer_approved", reviewer
+        return "reviewer_approved"
     if reviewer_verdict == "changes_requested":
-        return latest_turn, "reviewer_changes_requested", reviewer
+        return "reviewer_changes_requested"
     if reviewer_verdict == "needs_human":
-        return latest_turn, "reviewer_needs_human", reviewer
-    return latest_turn, "reviewer_blocked", reviewer
+        return "reviewer_needs_human"
+    return "reviewer_blocked"
+
+
+def inspect_turn_for_continuation(turn_dir: Path) -> dict:
+    metadata = load_turn_metadata(turn_dir) if turn_metadata_path(turn_dir).exists() else {}
+    generator = inspect_role_runtime(turn_dir, "generator", validate_generator_status)
+    reviewer = inspect_role_runtime(turn_dir, "reviewer", validate_reviewer_status)
+    inspection = {
+        "turn_dir": turn_dir,
+        "turn_number": int(turn_dir.name),
+        "metadata": metadata,
+        "generator": generator,
+        "reviewer": reviewer,
+    }
+    inspection["continuation_state"] = classify_turn_continuation_state(inspection)
+    inspection["has_runtime_activity"] = bool(
+        generator["activity_exists"] or reviewer["activity_exists"]
+    )
+    inspection["is_empty_initialized"] = bool(metadata) and not inspection["has_runtime_activity"]
+    return inspection
+
+
+def continuation_plan(
+    *,
+    turn_dir: Path,
+    turn_number: int,
+    role: str,
+    create_new_turn: bool,
+    reuse_existing_turn_for_first: bool,
+    prior_status: str,
+    continuation_state: str,
+    reason: str,
+    reference_turn_dir: Path | None,
+    source_turn_number: int | None,
+    ignored_turns: list[str],
+) -> dict:
+    return {
+        "mode": "continue",
+        "turn_dir": turn_dir,
+        "turn_number": turn_number,
+        "role": role,
+        "create_new_turn": create_new_turn,
+        "reuse_existing_turn_for_first": reuse_existing_turn_for_first,
+        "prior_status": prior_status,
+        "continuation_state": continuation_state,
+        "reason": reason,
+        "reference_turn_dir": reference_turn_dir,
+        "source_turn_number": source_turn_number,
+        "ignored_turns": ignored_turns,
+    }
+
+
+def terminal_continuation_plan(
+    *,
+    turn_dir: Path,
+    turn_number: int,
+    continuation_state: str,
+    reason: str,
+    ignored_turns: list[str],
+) -> dict:
+    return {
+        "mode": "terminal",
+        "turn_dir": turn_dir,
+        "turn_number": turn_number,
+        "continuation_state": continuation_state,
+        "reason": reason,
+        "ignored_turns": ignored_turns,
+    }
+
+
+def next_turn_expectation(turn: dict, continuation_state: str, review_mode: str) -> dict | None:
+    turn_number = turn["turn_number"]
+    if continuation_state == "reviewer_changes_requested":
+        role = "generator"
+    elif continuation_state in {"generator_needs_human", "generator_blocked"}:
+        role = "generator"
+    elif continuation_state in {"reviewer_needs_human", "reviewer_blocked"}:
+        if continuation_state == "reviewer_blocked" and review_mode == "github_pr_codex":
+            return None
+        role = "reviewer"
+    else:
+        return None
+    return {
+        "target_turn_number": turn_number + 1,
+        "source_turn_number": turn_number,
+        "source_status": continuation_state,
+        "role": role,
+        "reason": (
+            f"turn {turn_name(turn_number)} ended with `{continuation_state}`, "
+            f"so {role} should continue on turn {turn_name(turn_number + 1)}."
+        ),
+    }
+
+
+def turn_matches_expected_transition(turn: dict, expected_transition: dict) -> bool:
+    metadata = turn["metadata"]
+    selected_turn = metadata.get("selected_turn")
+    return (
+        metadata.get("continuation_source") == expected_transition["source_status"]
+        and metadata.get("selected_role") == expected_transition["role"]
+        and (
+            selected_turn is None
+            or selected_turn == turn_name(expected_transition["target_turn_number"])
+        )
+    )
+
+
+def collect_ignored_future_turns(turns: list[dict], index: int) -> tuple[list[str], list[dict]]:
+    ignored = []
+    conflicts = []
+    for later_turn in turns[index + 1 :]:
+        if later_turn["continuation_state"] == "not_started":
+            ignored.append(turn_name(later_turn["turn_number"]))
+            continue
+        conflicts.append(
+            {
+                "turn": turn_name(later_turn["turn_number"]),
+                "state": later_turn["continuation_state"],
+            }
+        )
+    return ignored, conflicts
+
+
+def resolve_turn_continuation(
+    run_dir: Path,
+    turns: list[dict],
+    state: dict,
+    *,
+    index: int,
+    expected_transition: dict | None = None,
+) -> dict:
+    turn = turns[index]
+    continuation_state = turn["continuation_state"]
+    turn_label = turn_name(turn["turn_number"])
+
+    if expected_transition is not None and turn["turn_number"] != expected_transition["target_turn_number"]:
+        raise ContinuationResolutionError(
+            f"expected turn {turn_name(expected_transition['target_turn_number'])} after `{expected_transition['source_status']}`, "
+            f"but found {turn_label} instead",
+            details={
+                "expected_turn": turn_name(expected_transition["target_turn_number"]),
+                "found_turn": turn_label,
+            },
+        )
+
+    if continuation_state == "ambiguous":
+        raise ContinuationResolutionError(
+            f"turn {turn_label} mixes reviewer activity with incomplete generator state",
+            details={"turn": turn_label},
+        )
+
+    if continuation_state == "not_started":
+        if expected_transition is not None:
+            if not turn_matches_expected_transition(turn, expected_transition):
+                raise ContinuationResolutionError(
+                    f"turn {turn_label} exists but does not clearly match the expected transition from `{expected_transition['source_status']}`",
+                    details={
+                        "turn": turn_label,
+                        "metadata": turn["metadata"],
+                        "expected_source_status": expected_transition["source_status"],
+                        "expected_role": expected_transition["role"],
+                    },
+                )
+            ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+            if conflicts:
+                raise ContinuationResolutionError(
+                    f"turn {turn_label} is the expected next turn, but later turns already contain conflicting activity",
+                    details={"turn": turn_label, "conflicts": conflicts},
+                )
+            return continuation_plan(
+                turn_dir=turn["turn_dir"],
+                turn_number=turn["turn_number"],
+                role=expected_transition["role"],
+                create_new_turn=False,
+                reuse_existing_turn_for_first=bool(turn["metadata"]),
+                prior_status=expected_transition["source_status"],
+                continuation_state=continuation_state,
+                reason=expected_transition["reason"] + " The target turn exists but has not started yet.",
+                reference_turn_dir=turn["turn_dir"],
+                source_turn_number=expected_transition["source_turn_number"],
+                ignored_turns=ignored_turns,
+            )
+        if index == 0:
+            ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+            if conflicts:
+                raise ContinuationResolutionError(
+                    f"turn {turn_label} has no role activity, but later turns already contain conflicting activity",
+                    details={"turn": turn_label, "conflicts": conflicts},
+                )
+            selected_role = turn["metadata"].get("selected_role")
+            role = selected_role if selected_role in ROLE_NAMES else fallback_continue_role(state)
+            return continuation_plan(
+                turn_dir=turn["turn_dir"],
+                turn_number=turn["turn_number"],
+                role=role,
+                create_new_turn=False,
+                reuse_existing_turn_for_first=bool(turn["metadata"]),
+                prior_status="no_artifacts_present",
+                continuation_state=continuation_state,
+                reason=f"turn {turn_label} exists but no prompt or role artifacts were written yet.",
+                reference_turn_dir=None,
+                source_turn_number=None,
+                ignored_turns=ignored_turns,
+            )
+        raise ContinuationResolutionError(
+            f"turn {turn_label} has no role activity and no validated earlier turn explains it",
+            details={"turn": turn_label, "metadata": turn["metadata"]},
+        )
+
+    if continuation_state in {"generator_pending", "generator_invalid"}:
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"turn {turn_label} still needs generator work, but later turns already contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts},
+            )
+        return continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            role="generator",
+            create_new_turn=False,
+            reuse_existing_turn_for_first=True,
+            prior_status=continuation_state,
+            continuation_state=continuation_state,
+            reason=f"turn {turn_label} still has incomplete or invalid generator artifacts.",
+            reference_turn_dir=turn["turn_dir"],
+            source_turn_number=turn["turn_number"],
+            ignored_turns=ignored_turns,
+        )
+
+    if continuation_state in {
+        "generator_complete_waiting_reviewer",
+        "reviewer_pending",
+        "reviewer_invalid",
+    }:
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"turn {turn_label} still needs reviewer work, but later turns already contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts},
+            )
+        reason = (
+            f"generator finished on turn {turn_label}, but reviewer has not started yet."
+            if continuation_state == "generator_complete_waiting_reviewer"
+            else f"turn {turn_label} still has incomplete or invalid reviewer artifacts."
+        )
+        return continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            role="reviewer",
+            create_new_turn=False,
+            reuse_existing_turn_for_first=True,
+            prior_status=continuation_state,
+            continuation_state=continuation_state,
+            reason=reason,
+            reference_turn_dir=turn["turn_dir"],
+            source_turn_number=turn["turn_number"],
+            ignored_turns=ignored_turns,
+        )
+
+    if continuation_state == "reviewer_approved":
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"turn {turn_label} is already approved, but later turns contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts},
+            )
+        return terminal_continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            continuation_state=continuation_state,
+            reason=f"turn {turn_label} is approved; this run should not continue.",
+            ignored_turns=ignored_turns,
+        )
+
+    if continuation_state == "reviewer_blocked" and review_bridge_mode(state) == "github_pr_codex":
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"turn {turn_label} still needs the GitHub reviewer bridge, but later turns contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts},
+            )
+        return continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            role="reviewer",
+            create_new_turn=False,
+            reuse_existing_turn_for_first=True,
+            prior_status=continuation_state,
+            continuation_state=continuation_state,
+            reason=f"turn {turn_label} is blocked in the GitHub reviewer bridge; resume reviewer on the same turn.",
+            reference_turn_dir=turn["turn_dir"],
+            source_turn_number=turn["turn_number"],
+            ignored_turns=ignored_turns,
+        )
+
+    next_transition = next_turn_expectation(
+        turn,
+        continuation_state,
+        review_bridge_mode(state),
+    )
+    if next_transition is None:
+        raise ContinuationResolutionError(
+            f"unsupported continuation state on turn {turn_label}: {continuation_state}",
+            details={"turn": turn_label, "state": continuation_state},
+        )
+    if index + 1 >= len(turns):
+        return continuation_plan(
+            turn_dir=turn_dir_for(run_dir, next_transition["target_turn_number"]),
+            turn_number=next_transition["target_turn_number"],
+            role=next_transition["role"],
+            create_new_turn=True,
+            reuse_existing_turn_for_first=False,
+            prior_status=continuation_state,
+            continuation_state=continuation_state,
+            reason=next_transition["reason"],
+            reference_turn_dir=turn["turn_dir"],
+            source_turn_number=turn["turn_number"],
+            ignored_turns=[],
+        )
+    return resolve_turn_continuation(
+        run_dir,
+        turns,
+        state,
+        index=index + 1,
+        expected_transition=next_transition,
+    )
+
+
+def resolve_continuation_plan(run_dir: Path, state: dict) -> dict:
+    turns_root = run_dir / "turns"
+    if not turns_root.exists() or not any(path.is_dir() for path in turns_root.iterdir()):
+        turn_number = int(state.get("current_turn", 1))
+        role = fallback_continue_role(state)
+        return continuation_plan(
+            turn_dir=turn_dir_for(run_dir, turn_number),
+            turn_number=turn_number,
+            role=role,
+            create_new_turn=False,
+            reuse_existing_turn_for_first=False,
+            prior_status="no_turns_present",
+            continuation_state="not_started",
+            reason=f"run has no turn directories yet; resume from turn {turn_name(turn_number)}.",
+            reference_turn_dir=None,
+            source_turn_number=None,
+            ignored_turns=[],
+        )
+    turns = [inspect_turn_for_continuation(turn_dir) for turn_dir in list_turn_dirs(run_dir)]
+    return resolve_turn_continuation(run_dir, turns, state, index=0)
+
+
+def inspect_continuation_plan(run_dir: Path, state: dict) -> dict:
+    try:
+        return resolve_continuation_plan(run_dir, state)
+    except ContinuationResolutionError as exc:
+        return {"mode": "error", "reason": str(exc), "details": exc.details}
+
+
+def classify_continuation_state(run_dir: Path) -> tuple[Path, ArtifactContinuationState, dict]:
+    plan = resolve_continuation_plan(run_dir, {"review_bridge": {"mode": "internal"}})
+    if plan["mode"] == "terminal":
+        return plan["turn_dir"], "reviewer_approved", {"reason": plan["reason"]}
+    return plan["turn_dir"], plan["prior_status"], {"reason": plan["reason"]}
 
 
 def determine_continue_target(run_dir: Path, state: dict) -> tuple[Path, int, str, bool, str]:
-    turns_root = run_dir / "turns"
-    if not turns_root.exists() or not any(turns_root.iterdir()):
-        fallback_role = "generator" if state.get("status") != "waiting_reviewer" else "reviewer"
-        return run_dir / "turns" / turn_name(state.get("current_turn", 1)), int(state.get("current_turn", 1)), fallback_role, True, "no_turns_present"
-
-    latest_turn, continuation_state, details = classify_continuation_state(run_dir)
-
-    if continuation_state == "generator_pending":
-        return latest_turn, int(latest_turn.name), "generator", False, continuation_state
-    if continuation_state == "generator_invalid":
-        return latest_turn, int(latest_turn.name), "generator", False, continuation_state
-    if continuation_state == "reviewer_pending":
-        return latest_turn, int(latest_turn.name), "reviewer", False, continuation_state
-    if continuation_state == "reviewer_invalid":
-        return latest_turn, int(latest_turn.name), "reviewer", False, continuation_state
-    if continuation_state == "reviewer_approved":
+    try:
+        plan = resolve_continuation_plan(run_dir, state)
+    except ContinuationResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
+    if plan["mode"] == "terminal":
         raise SystemExit("cannot continue an approved run")
-    if continuation_state == "reviewer_changes_requested":
-        return latest_turn, int(latest_turn.name) + 1, "generator", True, continuation_state
-    if continuation_state == "reviewer_needs_human":
-        return latest_turn, int(latest_turn.name) + 1, "reviewer", True, continuation_state
-    if continuation_state == "reviewer_blocked":
-        if review_bridge_mode(state) == "github_pr_codex":
-            return latest_turn, int(latest_turn.name), "reviewer", False, continuation_state
-        return latest_turn, int(latest_turn.name) + 1, "reviewer", True, continuation_state
-    if continuation_state == "generator_needs_human":
-        return latest_turn, int(latest_turn.name) + 1, "generator", True, continuation_state
-    if continuation_state == "generator_blocked":
-        return latest_turn, int(latest_turn.name) + 1, "generator", True, continuation_state
-    raise SystemExit(f"unsupported continuation state: {details}")
+    return (
+        plan["turn_dir"],
+        plan["turn_number"],
+        plan["role"],
+        plan["create_new_turn"],
+        plan["prior_status"],
+    )
 
 
 def continue_run(args: argparse.Namespace) -> int:
@@ -4698,11 +5249,20 @@ def continue_run(args: argparse.Namespace) -> int:
     state = load_json(run_dir / "state.json")
     inspection = inspect_task_workspace(task_root)
     state["workspace_profile"] = inspection["profile"]
-    latest_turn, turn_number, role, create_new_turn, prior_status = determine_continue_target(run_dir, state)
-    previous_turn_dir = latest_turn if create_new_turn else (turn_dir_for(run_dir, turn_number - 1) if turn_number > 1 else None)
+    try:
+        continuation_plan_data = resolve_continuation_plan(run_dir, state)
+    except ContinuationResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
+    if continuation_plan_data["mode"] == "terminal":
+        raise SystemExit("cannot continue an approved run")
+
+    turn_number = continuation_plan_data["turn_number"]
+    role = continuation_plan_data["role"]
+    create_new_turn = continuation_plan_data["create_new_turn"]
+    prior_status = continuation_plan_data["prior_status"]
     continue_context = build_continue_context(
         state=state,
-        previous_turn_dir=previous_turn_dir,
+        previous_turn_dir=continuation_plan_data["reference_turn_dir"],
         role=role,
         inspection=inspection,
     )
@@ -4711,7 +5271,7 @@ def continue_run(args: argparse.Namespace) -> int:
 
     if create_new_turn:
         state["status"] = TRANSITIONING_TURN_STATUS
-        state["current_turn"] = int(latest_turn.name)
+        state["current_turn"] = continuation_plan_data["source_turn_number"]
         state["pending_turn"] = turn_number
         state["pending_role"] = role
         state["transition_source_verdict"] = prior_status
@@ -4720,14 +5280,21 @@ def continue_run(args: argparse.Namespace) -> int:
         state["pending_turn"] = None
         state["pending_role"] = None
         state["transition_source_verdict"] = None
-        state["status"] = "waiting_generator" if role == "generator" else "waiting_reviewer"
+        prompt_exists = (
+            continuation_plan_data["reuse_existing_turn_for_first"]
+            and role_prompt_path(continuation_plan_data["turn_dir"], role).exists()
+        )
+        if prompt_exists:
+            state["status"] = "waiting_generator" if role == "generator" else "waiting_reviewer"
+        else:
+            state["status"] = "booting"
     state["stop_reason"] = None
     target_turn_dir = (
         begin_turn_transition(
             run_dir,
             state,
             task_root,
-            from_turn=int(latest_turn.name),
+            from_turn=continuation_plan_data["source_turn_number"],
             to_turn=turn_number,
             from_role=(
                 "reviewer"
@@ -4736,24 +5303,31 @@ def continue_run(args: argparse.Namespace) -> int:
             ),
             to_role=role,
             source_verdict=prior_status,
+            reason=continuation_plan_data["reason"],
         )
         if create_new_turn
-        else turn_dir_for(run_dir, turn_number)
+        else continuation_plan_data["turn_dir"]
     )
     if not create_new_turn:
         save_run_state(run_dir, state)
-        annotate_turn_continuation(
-            target_turn_dir,
-            continuation_source=prior_status,
-            selected_role=role,
-            selected_turn=turn_number,
-        )
+        if continuation_plan_data["reuse_existing_turn_for_first"]:
+            annotate_turn_continuation(
+                target_turn_dir,
+                continuation_source=prior_status,
+                selected_role=role,
+                selected_turn=turn_number,
+                reason=continuation_plan_data["reason"],
+            )
     append_run_event(
         run_dir,
         "run_continued",
         turn_number=turn_number,
         role=role,
-        details={"prior_status": prior_status},
+        details={
+            "prior_status": prior_status,
+            "reason": continuation_plan_data["reason"],
+            "ignored_turns": continuation_plan_data["ignored_turns"],
+        },
     )
     supervisor_loop_from(
         run_dir,
@@ -4761,13 +5335,16 @@ def continue_run(args: argparse.Namespace) -> int:
         task_root,
         start_turn=turn_number,
         start_role=role,
-        reuse_existing_turn_for_first=not create_new_turn,
+        reuse_existing_turn_for_first=continuation_plan_data["reuse_existing_turn_for_first"],
         first_continue_context_block=continue_context,
     )
 
     final_state = load_json(run_dir / "state.json")
     print(f"run_dir: {run_dir}")
     print(f"continued role: {role}")
+    print(f"continuation reason: {continuation_plan_data['reason']}")
+    if continuation_plan_data["ignored_turns"]:
+        print(f"ignored turns: {', '.join(continuation_plan_data['ignored_turns'])}")
     print(f"current_turn: {final_state['current_turn']}")
     print(f"final status: {final_state['status']}")
     if final_state.get("stop_reason"):

@@ -103,6 +103,117 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         )
         self.assertEqual(MODULE.extract_terminal_summary_block(pane), "latest")
 
+    def test_pane_has_trust_prompt_detects_codex_trust_screen(self) -> None:
+        pane = "\n".join(
+            [
+                "You are in /tmp/repo",
+                "Do you trust the contents of this directory?",
+                "Press enter to continue",
+            ]
+        )
+        self.assertTrue(MODULE.pane_has_trust_prompt(pane))
+        self.assertEqual(MODULE.classify_tmux_pane(pane), "trust_prompt")
+        self.assertFalse(MODULE.pane_shows_prompt(pane))
+
+    def test_classify_tmux_pane_treats_non_footer_text_after_prompt_as_busy(self) -> None:
+        pane = "\n".join(
+            [
+                "› Ready for prompt",
+                "working...",
+            ]
+        )
+        self.assertEqual(MODULE.classify_tmux_pane(pane), "busy")
+        self.assertFalse(MODULE.pane_shows_prompt(pane))
+
+    def test_classify_tmux_pane_accepts_codex_footer_after_prompt_line(self) -> None:
+        pane = "\n".join(
+            [
+                "╭─────────────────────────────────────────────╮",
+                "│ >_ OpenAI Codex (v0.120.0)                  │",
+                "╰─────────────────────────────────────────────╯",
+                "",
+                "› Use /skills to list available skills",
+                "",
+                "  gpt-5.4 xhigh · ~/projects/demo",
+            ]
+        )
+        self.assertTrue(MODULE.pane_has_codex_footer(pane))
+        self.assertTrue(MODULE.pane_looks_interactive(pane))
+        self.assertEqual(MODULE.classify_tmux_pane(pane), "ready")
+        self.assertTrue(MODULE.pane_shows_prompt(pane))
+
+    def test_wait_for_tmux_prompt_advances_past_trust_screen(self) -> None:
+        trust_pane = "\n".join(
+            [
+                "You are in /tmp/repo",
+                "Do you trust the contents of this directory?",
+                "Press enter to continue",
+            ]
+        )
+        ready_pane = "› Ready for prompt"
+        with mock.patch.object(MODULE, "tmux_session_exists", side_effect=[True, True]), mock.patch.object(
+            MODULE,
+            "tmux_capture_pane",
+            side_effect=[trust_pane, ready_pane],
+        ), mock.patch.object(MODULE.time, "sleep", return_value=None), mock.patch.object(
+            MODULE,
+            "run_subprocess",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ) as run_subprocess:
+            MODULE.wait_for_tmux_prompt("demo-session", 5, phase="demo", role="generator")
+        run_subprocess.assert_called_once_with(["tmux", "send-keys", "-t", "demo-session", "Enter"])
+
+    def test_tmux_send_prompt_retries_once_when_first_dispatch_does_not_change_pane(self) -> None:
+        ready_pane = "› Ready for prompt"
+        busy_pane = "running..."
+        with mock.patch.object(
+            MODULE,
+            "tmux_capture_pane",
+            side_effect=[ready_pane, ready_pane, busy_pane],
+        ), mock.patch.object(
+            MODULE.time,
+            "sleep",
+            return_value=None,
+        ), mock.patch.object(
+            MODULE,
+            "run_subprocess",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ) as run_subprocess, mock.patch.object(
+            MODULE.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ):
+            MODULE.tmux_send_prompt("demo-session", "hello", phase="demo", role="generator")
+
+        send_key_calls = [
+            call
+            for call in run_subprocess.call_args_list
+            if call.args[0][:2] == ["tmux", "send-keys"]
+        ]
+        self.assertEqual(len(send_key_calls), 2)
+
+    def test_tmux_send_prompt_blocks_when_dispatch_never_changes_pane(self) -> None:
+        ready_pane = "› Ready for prompt"
+        with mock.patch.object(
+            MODULE,
+            "tmux_capture_pane",
+            side_effect=[ready_pane, ready_pane, ready_pane],
+        ), mock.patch.object(
+            MODULE.time,
+            "sleep",
+            return_value=None,
+        ), mock.patch.object(
+            MODULE,
+            "run_subprocess",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ), mock.patch.object(
+            MODULE.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ):
+            with self.assertRaises(MODULE.SupervisorRuntimeError):
+                MODULE.tmux_send_prompt("demo-session", "hello", phase="demo", role="generator")
+
     def test_scaffold_task_root_creates_base_files_only_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir)
@@ -1125,14 +1236,163 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             latest_turn.mkdir(parents=True)
             with mock.patch.object(
                 MODULE,
-                "classify_continuation_state",
-                return_value=(latest_turn, "reviewer_blocked", {}),
+                "resolve_continuation_plan",
+                return_value={
+                    "mode": "continue",
+                    "turn_dir": latest_turn,
+                    "turn_number": 1,
+                    "role": "reviewer",
+                    "create_new_turn": False,
+                    "prior_status": "reviewer_blocked",
+                },
             ):
                 result = MODULE.determine_continue_target(
                     run_dir,
                     {"review_bridge": {"mode": "github_pr_codex"}},
                 )
             self.assertEqual(result, (latest_turn, 1, "reviewer", False, "reviewer_blocked"))
+
+    def test_determine_continue_target_ignores_stray_future_turn_when_reviewer_should_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            turn_two = MODULE.prepare_turn(run_dir, 2, task_root)
+            MODULE.write_text(turn_one / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_one / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+
+            result = MODULE.determine_continue_target(run_dir, {"review_bridge": {"mode": "internal"}})
+            self.assertEqual(result, (turn_one, 1, "reviewer", False, "generator_complete_waiting_reviewer"))
+            plan = MODULE.resolve_continuation_plan(run_dir, {"review_bridge": {"mode": "internal"}})
+            self.assertEqual(plan["ignored_turns"], ["0002"])
+            self.assertIn("reviewer has not started", plan["reason"])
+
+    def test_determine_continue_target_reuses_annotated_empty_next_turn_after_changes_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            turn_two = MODULE.prepare_turn(run_dir, 2, task_root)
+            MODULE.write_text(turn_one / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_one / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.write_text(turn_one / "reviewer" / "message.md", "reviewer message")
+            MODULE.save_json(
+                turn_one / "reviewer" / "status.json",
+                {
+                    "verdict": "changes_requested",
+                    "summary": "fix it",
+                    "blocking_issues": ["one fix"],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "fail",
+                        "regression_risk": "pass",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "fail",
+                        "maintainability": "pass",
+                    },
+                },
+            )
+            MODULE.annotate_turn_continuation(
+                turn_two,
+                continuation_source="reviewer_changes_requested",
+                selected_role="generator",
+                selected_turn=2,
+            )
+
+            result = MODULE.determine_continue_target(run_dir, {"review_bridge": {"mode": "internal"}})
+            self.assertEqual(result, (turn_two, 2, "generator", False, "reviewer_changes_requested"))
+
+    def test_determine_continue_target_fails_for_unexplained_empty_next_turn_after_changes_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            MODULE.prepare_turn(run_dir, 2, task_root)
+            MODULE.write_text(turn_one / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_one / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.write_text(turn_one / "reviewer" / "message.md", "reviewer message")
+            MODULE.save_json(
+                turn_one / "reviewer" / "status.json",
+                {
+                    "verdict": "changes_requested",
+                    "summary": "fix it",
+                    "blocking_issues": ["one fix"],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "fail",
+                        "regression_risk": "pass",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "fail",
+                        "maintainability": "pass",
+                    },
+                },
+            )
+
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.determine_continue_target(run_dir, {"review_bridge": {"mode": "internal"}})
+            self.assertIn("does not clearly match", str(ctx.exception))
+
+    def test_determine_continue_target_fails_when_later_turn_conflicts_with_earlier_unfinished_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            turn_two = MODULE.prepare_turn(run_dir, 2, task_root)
+            MODULE.write_text(turn_one / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_one / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.write_text(turn_two / "generator" / "prompt.md", "generator prompt")
+
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.determine_continue_target(run_dir, {"review_bridge": {"mode": "internal"}})
+            self.assertIn("later turns already contain conflicting activity", str(ctx.exception))
+
+    def test_show_status_includes_derived_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            MODULE.write_text(turn_one / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_one / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.save_json(
+                run_dir / "state.json",
+                {"status": "blocked", "review_bridge": {"mode": "internal"}},
+            )
+
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+            )
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                result = MODULE.show_status(args)
+
+            self.assertEqual(result, 0)
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual(payload["derived_continuation"]["mode"], "continue")
+            self.assertEqual(payload["derived_continuation"]["role"], "reviewer")
+            self.assertEqual(payload["derived_continuation"]["continuation_state"], "generator_complete_waiting_reviewer")
 
     def test_save_run_state_rejects_waiting_reviewer_without_reviewer_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1236,6 +1496,54 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIsNone(saved["pending_role"])
             events = (run_dir / "events.jsonl").read_text(encoding="utf-8")
             self.assertIn("turn_transition_completed", events)
+
+    def test_run_generator_phase_records_prompt_prepared_then_sent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix a small bug.\n\n## Context\n\n- Keep the change narrow.\n\n## Success Signal\n\nThe bug is fixed.\n",
+                encoding="utf-8",
+            )
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+            )
+            MODULE.save_run_state(run_dir, state)
+
+            def fake_wait_for_role_artifacts(current_turn_dir, role, **kwargs):
+                message_path, status_path = MODULE.role_artifact_paths(current_turn_dir, role)
+                MODULE.write_text(message_path, "generator message")
+                MODULE.save_json(
+                    status_path,
+                    {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+                )
+                return message_path, status_path, MODULE.validate_generator_status(MODULE.load_json(status_path))
+
+            with mock.patch.object(MODULE, "ensure_role_session_ready", return_value=None), mock.patch.object(
+                MODULE, "wait_for_tmux_prompt", return_value=None
+            ), mock.patch.object(
+                MODULE, "tmux_send_prompt", return_value=None
+            ), mock.patch.object(
+                MODULE, "wait_for_role_artifacts", side_effect=fake_wait_for_role_artifacts
+            ), mock.patch.object(MODULE, "write_raw_final_output_artifact", return_value=None):
+                MODULE.run_generator_phase(run_dir, state, task_root, 1, turn_one, inline_context=True)
+
+            events = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+            self.assertLess(events.index("generator_prompt_prepared"), events.index("generator_prompt_sent"))
+            turn_metadata = MODULE.load_json(turn_one / "turn.json")
+            self.assertEqual(turn_metadata["phase"], "generator_prompt_sent")
 
     def test_continue_run_recovers_from_broken_changes_requested_half_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1463,6 +1771,14 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertIn("outer coding agent", readme)
         self.assertIn("source of truth", architecture.lower())
         self.assertIn("artifact-driven", architecture)
+        self.assertIn("harness operator", readme)
+        self.assertIn("harness operator", instructs)
+        self.assertIn("Do not implement the target-repo feature directly", instructs)
+        self.assertIn("supervisor process", readme)
+        self.assertIn("supervisor process", instructs)
+        self.assertIn("tmux", architecture)
+        self.assertIn("editing the canonical files directly", readme)
+        self.assertIn("fill the canonical files directly", instructs)
 
     def test_codex_council_skill_reference_pack_is_present_and_linked(self) -> None:
         repo_root = MODULE_PATH.parents[1]
@@ -1474,6 +1790,8 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         expected_refs = (
             "references/routing.md",
             "references/novice-normalization.md",
+            "references/operator-boundary.md",
+            "references/supervisor-lifetime.md",
             "references/task-doc.md",
             "references/review-doc.md",
             "references/spec-doc.md",
@@ -1486,6 +1804,9 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         for relative_ref in expected_refs:
             self.assertTrue((skill_root / relative_ref).exists())
             self.assertIn(relative_ref, skill_text)
+        self.assertIn("directly implement the target-repo feature yourself", skill_text)
+        self.assertIn("abandon the supervisor process", skill_text)
+        self.assertIn("prefer editing the canonical files directly", skill_text)
 
     def test_scaffold_templates_and_role_instructions_emphasize_brief_quality(self) -> None:
         repo_root = MODULE_PATH.parents[1]

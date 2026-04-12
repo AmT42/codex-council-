@@ -6,6 +6,7 @@
 - the user edited docs after a pause
 - you are unsure whether `continue` is the right move
 - the docs are too weak to justify `start`
+- the supervisor died while a role session was still running
 
 ## Weak-doc failure
 
@@ -15,6 +16,14 @@ If the docs are not strong enough for safe execution:
 - improve the docs first
 - ask the smallest blocking question only if repo inspection cannot resolve the ambiguity
 
+## Boundary failure
+
+If you notice yourself drifting into “I should just build the feature directly”:
+
+- stop
+- reread `operator-boundary.md`
+- return to preparing or resuming the council run
+
 ## Resume failure
 
 If a task workspace and run already exist:
@@ -23,6 +32,15 @@ If a task workspace and run already exist:
 2. inspect the current canonical docs
 3. decide whether the user is still talking about the same task
 4. prefer `continue` if the task and run still match
+
+## Supervisor-death failure
+
+If the supervisor died mid-run:
+
+- do not assume the generator or reviewer stopped too
+- inspect `status` and especially `derived_continuation`
+- if the artifacts show a clear next role, recover with `continue`
+- when restarting orchestration, keep the new supervisor process alive
 
 ## Human intervention failure
 

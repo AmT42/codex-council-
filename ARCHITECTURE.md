@@ -49,6 +49,12 @@ Its responsibilities:
 - synthesize the right canonical documents
 - ask only the minimum blocking questions
 
+Its non-responsibilities:
+
+- it should not directly implement the target-repo feature when the user asked to use the harness
+- it should not extend `council-agent` itself just because the target task needs some glue
+- it should not replace the generator/reviewer council with its own one-shot implementation pass
+
 ### Skill router
 
 The `codex-council` skill is the front door for the outer agent.
@@ -60,6 +66,7 @@ It does not replace the runtime. It encodes:
 - doc selection
 - lifecycle rules
 - recovery rules
+- operator-vs-implementer boundary
 
 ### Canonical docs
 
@@ -88,6 +95,8 @@ It is responsible for:
 - artifact validation
 - turn transitions
 - pause/resume behavior
+
+It is a live orchestrator process, not just a launcher. If it dies mid-run, role sessions may keep going, but orchestration stops.
 
 ### Role sessions
 
@@ -184,6 +193,8 @@ The reviewer does not silently invent requirements.
 
 This avoids resuming the wrong role or wrong turn.
 
+It also makes recovery possible when the supervisor died and `state.json` is stale but the role artifacts already show what should happen next.
+
 ### 5. Approval discipline
 
 Approval is structured, not narrative.
@@ -258,3 +269,29 @@ This repo is not just runtime code. It is a **behavioral system** whose quality 
 - how humans resume and customize it
 
 That is why public docs, skill references, templates, runtime validators, and tests must all stay synchronized.
+
+## Boundary Rule
+
+When the user says, in effect, “use this harness to do feature X”, the system boundary is:
+
+- outer agent: classify, inspect, synthesize docs, launch or resume
+- council runtime: actual implementation/review loop in the target repo
+
+Breaking that boundary is a product failure, even if the direct implementation would have been technically possible.
+
+## Process-Lifetime Rule
+
+When an outer agent launches `start` or `continue`, it must preserve the lifetime of the supervisor process.
+
+Valid patterns:
+
+- block and wait
+- launch in a dedicated persistent terminal
+- launch in `tmux`
+- launch as a truly detached background job
+
+Invalid pattern:
+
+- start the supervisor from an outer-agent shell and then let that shell die
+
+That failure mode can leave a run stale even if a role session later writes valid artifacts.

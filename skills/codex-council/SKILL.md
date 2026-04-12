@@ -9,6 +9,25 @@ This skill is the front door for using `council-agent` as a long-running harness
 
 Use it when the user wants you to operate this repo against some target repository. Do not use it when you are modifying `council-agent` itself; for maintainer work, follow repo-root `AGENTS.md`.
 
+## Non-Negotiable Boundary
+
+If the user asked you to **use this harness** for a task, you are the harness operator.
+
+Your job is to:
+
+- inspect the target repo
+- write or update the canonical council docs
+- choose between direct answer, `start`, and `continue`
+- launch or resume the council
+
+Your job is **not** to:
+
+- directly implement the target-repo feature yourself instead of using the council
+- add helper code, wrappers, integrations, or glue inside `council-agent` just because the target task would be easier that way
+- treat a missing convenience layer as permission to bypass the harness
+
+Only modify `council-agent` itself when the user explicitly asks for a feature or change in this harness repository.
+
 ## Purpose
 
 Your job is not only to launch commands. Your job is to transform user intent into a strong council brief.
@@ -50,6 +69,8 @@ Then load only the references needed for the chosen route:
 - Default to `contract.md` for non-trivial work.
 - Prefer `status` + `continue` over restarting a healthy paused run.
 - Do not pass vague user wording directly into the council docs.
+- Do not do the target-repo implementation work yourself when the harness is the requested tool.
+- Do not launch `start` or `continue` and then abandon the supervisor process.
 - Summarize the chosen route to the user before launching the harness.
 
 ## Required routing
@@ -88,7 +109,11 @@ Do not invent a new interface. Use the existing CLI:
 - `status`
 - `continue`
 
+For document authoring, prefer editing the canonical files directly with your normal file tools when you already have them. Treat `write --body` as a convenience fallback, not the primary path for a capable outer agent.
+
 Use [`references/run-lifecycle.md`](./references/run-lifecycle.md) for command recipes and continuation policy.
+
+When using `start` or `continue`, also read [`references/supervisor-lifetime.md`](./references/supervisor-lifetime.md).
 
 ## Document rules
 
@@ -113,6 +138,8 @@ Use [`references/failure-recovery.md`](./references/failure-recovery.md) when:
 - the docs are too weak for launch
 - `continue` is likely but not obviously correct
 - a human paused the run and edited task docs
+
+Use [`references/operator-boundary.md`](./references/operator-boundary.md) if you feel tempted to “just do the feature directly” instead of operating the harness.
 
 ## Worked examples
 
