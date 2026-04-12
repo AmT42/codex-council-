@@ -71,6 +71,9 @@ Then load only the references needed for the chosen route:
 - Do not pass vague user wording directly into the council docs.
 - Do not do the target-repo implementation work yourself when the harness is the requested tool.
 - Do not launch `start`, `continue`, or `reopen` and then abandon the supervisor process.
+- This is a process-lifetime rule, not a special built-in Codex background feature.
+- A plain foreground command is fine only when you will stay attached and wait for the supervisor.
+- If you need the supervisor to outlive the current outer-agent shell, prefer launching the supervisor command inside a dedicated `tmux` session.
 - Summarize the chosen route to the user before launching the harness.
 
 ## Required routing

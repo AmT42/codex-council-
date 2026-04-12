@@ -65,7 +65,14 @@ Process rule:
 
 - either wait for `start`
 - or run it in a truly persistent environment
+- if you are an outer Codex agent and do not want to stay attached, prefer a dedicated `tmux` session for the supervisor command itself
 - never fire-and-forget from an outer-agent session that may exit
+
+Preferred persistent command example:
+
+```bash
+tmux new-session -d -s council-supervisor 'python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo'
+```
 
 ## Status
 
@@ -94,6 +101,7 @@ Process rule:
 
 - `continue` is also a live supervisor process
 - it needs the same lifetime guarantees as `start`
+- if you will not wait in the foreground, prefer running the `continue` command inside a dedicated `tmux` session
 
 Approved runs are terminal for `continue`.
 

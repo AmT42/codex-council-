@@ -6,6 +6,11 @@
 
 That process must remain alive while the council is advancing turns.
 
+This is not a special Codex-only background API requirement.
+
+- a normal foreground command is enough if the launcher will stay attached and wait
+- `tmux` is needed only when the launcher cannot reliably stay attached
+
 ## Why this matters
 
 The generator and reviewer run inside separate `tmux` sessions, but the supervisor is what:
@@ -26,6 +31,18 @@ If the supervisor dies:
 - run it inside a dedicated terminal that stays open
 - run it inside a dedicated `tmux` session
 - run it as a truly detached background job
+
+## Preferred default
+
+- if the outer agent can stay attached, a normal foreground command is sufficient
+- if the outer agent might continue doing other work or might exit, the preferred default is to launch the supervisor command inside a dedicated `tmux` session
+- detached background jobs such as `nohup` are acceptable, but they are a fallback behind a dedicated `tmux` session because `tmux` keeps the lifetime and logs easier to inspect
+
+Example:
+
+```bash
+tmux new-session -d -s council-supervisor 'python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo'
+```
 
 ## Unsafe pattern
 

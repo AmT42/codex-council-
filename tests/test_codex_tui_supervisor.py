@@ -107,6 +107,33 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         )
         self.assertEqual(MODULE.extract_terminal_summary_block(pane), "latest")
 
+    def test_write_raw_final_output_artifact_uses_full_pane_history_for_summary_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            (turn_dir / "reviewer").mkdir(parents=True)
+            pane = "\n".join(
+                [
+                    "noise",
+                    "COUNCIL_TERMINAL_SUMMARY_BEGIN",
+                    "review complete",
+                    "COUNCIL_TERMINAL_SUMMARY_END",
+                    "",
+                    "› Run /review on my current changes",
+                ]
+            )
+            with mock.patch.object(MODULE, "wait_for_tmux_prompt", return_value=None), mock.patch.object(
+                MODULE, "tmux_capture_joined_pane", return_value=pane
+            ):
+                MODULE.write_raw_final_output_artifact(turn_dir, "reviewer", "reviewer-session")
+            self.assertEqual(
+                (turn_dir / "reviewer" / "raw_final_output.md").read_text(encoding="utf-8").strip(),
+                "review complete",
+            )
+            self.assertEqual(
+                MODULE.load_json(turn_dir / "reviewer" / "capture_status.json"),
+                {"status": "captured", "source": "terminal_summary_markers"},
+            )
+
     def test_pane_has_trust_prompt_detects_codex_trust_screen(self) -> None:
         pane = "\n".join(
             [
@@ -2018,6 +2045,9 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertIn("supervisor process", readme)
         self.assertIn("supervisor process", instructs)
         self.assertIn("tmux", architecture)
+        self.assertIn("dedicated `tmux` session", readme)
+        self.assertIn("dedicated `tmux` session", instructs)
+        self.assertIn("foreground command is enough", instructs)
         self.assertIn("editing the canonical files directly", readme)
         self.assertIn("fill the canonical files directly", instructs)
         self.assertIn("false_approved", readme)
@@ -2056,6 +2086,8 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn(relative_ref, skill_text)
         self.assertIn("directly implement the target-repo feature yourself", skill_text)
         self.assertIn("abandon the supervisor process", skill_text)
+        self.assertIn("process-lifetime rule", skill_text)
+        self.assertIn("dedicated `tmux` session", skill_text)
         self.assertIn("prefer editing the canonical files directly", skill_text)
 
     def test_scaffold_templates_and_role_instructions_emphasize_brief_quality(self) -> None:

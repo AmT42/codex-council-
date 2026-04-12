@@ -44,10 +44,21 @@ If the user says “use this repo to add feature X”, interpret that as:
 
 When you run `start`, `continue`, or `reopen`, you are launching a live supervisor process.
 
+This is not a special built-in Codex background feature.
+
+- a normal foreground command is enough if you will stay attached and wait
+- the moment you cannot guarantee that, you must preserve the supervisor with a persistent terminal or `tmux`
+
 You must either:
 
 - wait for it to keep running
 - or run it in a truly persistent environment
+
+Preferred default:
+
+- if you can keep the command attached and wait, a normal foreground command is fine
+- if you need the supervisor to outlive the current outer-agent shell, use a dedicated `tmux` session for the supervisor itself
+- use detached background jobs like `nohup` only when a dedicated `tmux` session is not practical
 
 Safe patterns:
 
@@ -390,6 +401,7 @@ Process rule:
 
 - either wait for this command
 - or run it in a persistent environment
+- if you are an outer Codex agent and do not plan to wait on the foreground process, prefer a dedicated `tmux` session for the supervisor command itself
 - do not fire-and-forget from an outer-agent session that may exit
 
 ### Inspect a run
@@ -415,6 +427,11 @@ Use `continue` after:
 - stale runs where the supervisor died but `status` now shows the correct derived continuation
 
 Like `start`, `continue` must also be kept alive. The same lifetime rule applies to `reopen`.
+
+Preferred default for an outer Codex agent:
+
+- run `continue` as a normal foreground command only if you will stay attached and wait
+- otherwise launch the supervisor command inside a dedicated `tmux` session and keep that session alive
 
 Approved runs are terminal for `continue`. If `status` shows an approved run and that approval must be superseded, use `reopen` instead.
 

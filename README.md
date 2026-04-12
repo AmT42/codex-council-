@@ -359,6 +359,12 @@ So an outer agent must do one of these:
 - wait for `start`, `continue`, or `reopen` to keep running
 - or launch the supervisor in a truly persistent environment
 
+Practical rule:
+
+- a plain foreground command is fine if the outer agent will stay attached and wait for it
+- if the outer agent wants the supervisor to outlive the current shell, the preferred default is a dedicated `tmux` session for the supervisor command itself
+- detached background jobs like `nohup` are acceptable, but less operator-friendly than `tmux`
+
 Safe persistent environments:
 
 - a dedicated terminal that stays open

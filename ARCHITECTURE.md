@@ -303,6 +303,12 @@ Valid patterns:
 - launch in `tmux`
 - launch as a truly detached background job
 
+Preferred operator default:
+
+- if the outer agent can stay attached, run the supervisor command in the foreground and wait
+- if the outer agent cannot guarantee that, launch the supervisor command in its own dedicated `tmux` session
+- treat detached background jobs as a fallback, not the default operator path
+
 Invalid pattern:
 
 - start the supervisor from an outer-agent shell and then let that shell die

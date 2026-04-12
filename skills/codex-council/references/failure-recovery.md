@@ -42,6 +42,7 @@ If the supervisor died mid-run:
 - inspect `status` and especially `derived_continuation`
 - if the artifacts show a clear next role, recover with `continue`
 - when restarting orchestration, keep the new supervisor process alive
+- if you are not going to wait in the foreground, relaunch that supervisor command inside a dedicated `tmux` session rather than another transient outer-agent shell
 
 ## Superseded-approval failure
 
