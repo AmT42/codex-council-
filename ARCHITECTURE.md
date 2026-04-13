@@ -82,6 +82,11 @@ They are the durable briefing layer between the outer agent and the runtime:
 - `generator.instructions.md`
 - `reviewer.instructions.md`
 
+Optional supporting context may also exist under the task workspace:
+
+- `branch_northstar_summary.md`
+  - non-canonical branch/worktree context used to preserve intent for branch-driven work such as `github_pr_codex`
+
 ### Runtime supervisor
 
 `scripts/codex_tui_supervisor.py` is the low-level control plane.
@@ -121,6 +126,8 @@ Core files:
 - `<role>/message.md`
 - `<role>/status.json`
 - `<role>/raw_final_output.md`
+
+Some modes may add non-canonical, turn-scoped context artifacts such as GitHub review input snapshots when the reviewer source is external.
 
 These artifacts are the real control plane.
 

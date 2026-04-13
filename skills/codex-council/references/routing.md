@@ -80,6 +80,8 @@ Default docs:
 Optional:
 
 - add `task.md` only when a short brief materially clarifies what the generator should do
+- if the findings already live on an existing PR and the operator is using `github_pr_codex`, local `review.md` can be omitted and the PR review findings can drive the loop directly
+- add `branch_northstar_summary.md` when the branch/worktree intent needs durable context without promoting that context into `task.md`
 
 ## Mode 5: Broad feature or spec work
 

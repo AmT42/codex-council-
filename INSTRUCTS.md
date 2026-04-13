@@ -155,6 +155,7 @@ Behavior:
 - `spec.md` is usually unnecessary here
 - after writing the needed docs, run `start`
 - do not directly implement the target feature yourself when the harness is the requested tool
+- special case: for `github_pr_codex` on an existing PR, the PR and current-head review findings can be enough to start without local `task.md`, `review.md`, or `spec.md`
 
 ### 4. Findings-driven fix
 
@@ -170,6 +171,7 @@ Behavior:
 - add `task.md` only if a short brief materially improves generator intent
 - run `start` once the docs are ready
 - do not bypass the council by fixing the findings yourself unless the user explicitly switched tasks and asked you to modify the target repo directly
+- if the findings are already living on an existing PR and the operator is using `github_pr_codex`, local `review.md` is optional; prefer `branch_northstar_summary.md` only when the branch/worktree intent would otherwise be underspecified
 
 ### 5. Broad feature or spec work
 

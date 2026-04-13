@@ -33,6 +33,9 @@ REVIEW_FILENAME = "review.md"
 LEGACY_REVIEW_FILENAME = "initial_review.md"
 SPEC_FILENAME = "spec.md"
 CONTRACT_FILENAME = "contract.md"
+BRANCH_NORTHSTAR_SUMMARY_FILENAME = "branch_northstar_summary.md"
+GITHUB_REVIEW_INPUT_MARKDOWN_FILENAME = "github_review_input.md"
+GITHUB_REVIEW_INPUT_JSON_FILENAME = "github_review_input.json"
 INPUT_DOC_ORDER = ("task", "review", "spec", "contract")
 INPUT_DOC_FILENAMES = {
     "task": TASK_FILENAME,
@@ -186,6 +189,100 @@ GITHUB_CODEX_APPROVED_PREFIX = "Codex Review: Didn't find any major issues. Keep
 GITHUB_CODEX_INITIAL_WAIT_SECONDS = 600
 GITHUB_CODEX_POLL_INTERVAL_SECONDS = 300
 DEFAULT_GITHUB_PR_BASE_BRANCH = "staging"
+GITHUB_PR_REVIEW_THREADS_QUERY = textwrap.dedent(
+    """\
+    query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100, after: $cursor) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              id
+              isResolved
+              isOutdated
+              path
+              line
+              originalLine
+              startLine
+              originalStartLine
+              comments(first: 100) {
+                nodes {
+                  id
+                  databaseId
+                  body
+                  createdAt
+                  path
+                  line
+                  originalLine
+                  startLine
+                  originalStartLine
+                  author {
+                    __typename
+                    login
+                  }
+                  commit {
+                    oid
+                  }
+                  originalCommit {
+                    oid
+                  }
+                  pullRequestReview {
+                    id
+                    databaseId
+                    body
+                    state
+                    submittedAt
+                    author {
+                      __typename
+                      login
+                    }
+                    commit {
+                      oid
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+)
+GITHUB_PR_REVIEWS_QUERY = textwrap.dedent(
+    """\
+    query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $number) {
+          reviews(first: 100, after: $cursor) {
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+            nodes {
+              id
+              databaseId
+              body
+              state
+              createdAt
+              submittedAt
+              author {
+                __typename
+                login
+              }
+              commit {
+                oid
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+)
 CODEX_TRUST_PROMPT_TEXT = "Do you trust the contents of this directory?"
 CODEX_TRUST_CONTINUE_TEXT = "Press enter to continue"
 CODEX_FOOTER_RE = re.compile(r"^\s*\S.*\s+·\s+(?:~|/).+$")
@@ -574,6 +671,24 @@ def gh_json(
         ) from exc
 
 
+def gh_graphql_json(
+    repo_root: Path,
+    query: str,
+    *,
+    phase: str,
+    variables: dict[str, str | int | None],
+):
+    args = ["api", "graphql", "-f", f"query={query}"]
+    for key, value in variables.items():
+        if value is None:
+            continue
+        if isinstance(value, int):
+            args.extend(["-F", f"{key}={value}"])
+        else:
+            args.extend(["-f", f"{key}={value}"])
+    return gh_json(repo_root, args, phase=phase)
+
+
 def git_preflight(repo_root: Path) -> dict:
     status_porcelain = git_stdout(repo_root, "status", "--porcelain")
     if status_porcelain:
@@ -760,6 +875,10 @@ def context_manifest_path(turn_dir: Path) -> Path:
     return turn_dir / "context_manifest.json"
 
 
+def branch_northstar_summary_path(task_root: Path) -> Path:
+    return task_root / BRANCH_NORTHSTAR_SUMMARY_FILENAME
+
+
 def reopen_metadata_path(run_dir: Path) -> Path:
     return run_dir / REOPEN_METADATA_FILENAME
 
@@ -778,6 +897,14 @@ def role_message_path(turn_dir: Path, role: str) -> Path:
 
 def role_status_path(turn_dir: Path, role: str) -> Path:
     return role_dir_for(turn_dir, role) / "status.json"
+
+
+def github_review_input_markdown_path(turn_dir: Path) -> Path:
+    return turn_dir / GITHUB_REVIEW_INPUT_MARKDOWN_FILENAME
+
+
+def github_review_input_json_path(turn_dir: Path) -> Path:
+    return turn_dir / GITHUB_REVIEW_INPUT_JSON_FILENAME
 
 
 def role_raw_output_path(turn_dir: Path, role: str) -> Path:
@@ -1616,7 +1743,7 @@ def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def build_context_manifest(task_root: Path) -> dict:
+def build_context_manifest(task_root: Path, *, extra_files: dict[str, Path] | None = None) -> dict:
     inspection = inspect_task_workspace(task_root)
     manifest: dict[str, dict] = {
         "generated_at": now_ts(),
@@ -1636,11 +1763,41 @@ def build_context_manifest(task_root: Path) -> dict:
             "size_bytes": stat.st_size,
             "mtime_ns": stat.st_mtime_ns,
         }
+    for key, extra_path in (extra_files or {}).items():
+        text = extra_path.read_text(encoding="utf-8")
+        digest = hash_text(text)
+        stat = extra_path.stat()
+        manifest["files"][key] = {
+            "canonical_path": str(extra_path),
+            "sha256": digest,
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        }
     return manifest
 
 
-def snapshot_context_manifest(run_dir: Path, task_root: Path) -> dict:
-    return build_context_manifest(task_root)
+def extra_context_files(task_root: Path, turn_dir: Path | None = None) -> dict[str, Path]:
+    files: dict[str, Path] = {}
+    northstar_path = branch_northstar_summary_path(task_root)
+    if northstar_path.exists():
+        files["branch_northstar_summary"] = northstar_path
+    if turn_dir is not None:
+        review_markdown_path = github_review_input_markdown_path(turn_dir)
+        review_json_path = github_review_input_json_path(turn_dir)
+        if review_markdown_path.exists():
+            files["github_review_input_markdown"] = review_markdown_path
+        if review_json_path.exists():
+            files["github_review_input_json"] = review_json_path
+    return files
+
+
+def snapshot_context_manifest(run_dir: Path, task_root: Path, *, turn_dir: Path | None = None) -> dict:
+    del run_dir
+    return build_context_manifest(task_root, extra_files=extra_context_files(task_root, turn_dir))
+
+
+def refresh_turn_context_manifest(run_dir: Path, task_root: Path, turn_dir: Path) -> None:
+    save_json(context_manifest_path(turn_dir), snapshot_context_manifest(run_dir, task_root, turn_dir=turn_dir))
 
 
 def compare_context_manifests(previous_manifest: dict, current_manifest: dict) -> dict:
@@ -1775,7 +1932,7 @@ def prepare_turn(run_dir: Path, turn_number: int, task_root: Path) -> Path:
     ensure_dir(current)
     ensure_dir(role_dir_for(current, "generator"))
     ensure_dir(role_dir_for(current, "reviewer"))
-    save_json(context_manifest_path(current), snapshot_context_manifest(run_dir, task_root))
+    refresh_turn_context_manifest(run_dir, task_root, current)
     if not turn_metadata_path(current).exists():
         save_turn_metadata(current, turn_number, "initialized")
     return current
@@ -2150,6 +2307,27 @@ def format_doc_paths_block(task_root: Path, inspection: dict, role: str) -> str:
     return "\n".join(lines).rstrip()
 
 
+def turn_has_github_review_input(turn_dir: Path) -> bool:
+    return (
+        github_review_input_markdown_path(turn_dir).exists()
+        or github_review_input_json_path(turn_dir).exists()
+    )
+
+
+def format_generator_input_files_block(task_root: Path, inspection: dict, turn_dir: Path) -> str:
+    lines = [format_doc_paths_block(task_root, inspection, "generator")]
+    northstar_path = branch_northstar_summary_path(task_root)
+    if northstar_path.exists():
+        lines.append(f"- {northstar_path}")
+    review_markdown_path = github_review_input_markdown_path(turn_dir)
+    review_json_path = github_review_input_json_path(turn_dir)
+    if review_markdown_path.exists():
+        lines.append(f"- {review_markdown_path}")
+    if review_json_path.exists():
+        lines.append(f"- {review_json_path}")
+    return "\n".join(lines).rstrip()
+
+
 def format_reviewer_input_files_block(task_root: Path, inspection: dict, turn_dir: Path) -> str:
     lines = [format_doc_paths_block(task_root, inspection, "reviewer")]
     lines.extend(
@@ -2165,28 +2343,67 @@ def format_bootstrap_reviewer_input_files_block(task_root: Path, inspection: dic
     return format_doc_paths_block(task_root, inspection, "reviewer")
 
 
-def format_generator_objective_block(inspection: dict) -> str:
+def generator_requires_findings_triage(
+    inspection: dict,
+    *,
+    turn_dir: Path,
+    previous_reviewer_status: dict | None,
+) -> bool:
+    return (
+        inspection["doc_paths"]["review"] is not None
+        or turn_has_github_review_input(turn_dir)
+        or (
+            previous_reviewer_status is not None
+            and previous_reviewer_status.get("verdict") == "changes_requested"
+        )
+    )
+
+
+def format_generator_objective_block(
+    inspection: dict,
+    *,
+    state: dict,
+    turn_dir: Path,
+    previous_reviewer_status: dict | None,
+) -> str:
     has_task = inspection["doc_paths"]["task"] is not None
     has_review = inspection["doc_paths"]["review"] is not None
     has_spec = inspection["doc_paths"]["spec"] is not None
     has_contract = inspection["doc_paths"]["contract"] is not None
+    has_github_review_input = turn_has_github_review_input(turn_dir)
+    requires_findings_triage = generator_requires_findings_triage(
+        inspection,
+        turn_dir=turn_dir,
+        previous_reviewer_status=previous_reviewer_status,
+    )
     lines: list[str] = []
-    if has_review:
+    if requires_findings_triage:
+        if has_github_review_input:
+            lines.append("Treat the GitHub inline review snapshot as the active review findings for this turn.")
+            if has_review:
+                lines.append("Use `review.md` as supporting context for the branch/worktree goals and prior debugging notes.")
+        elif has_review:
+            lines.append("Treat the review document as a set of review findings, not unquestionable truth.")
+        else:
+            lines.append("Treat the imported reviewer findings as active review findings, not unquestionable truth.")
         lines.extend(
             [
-                "Treat the review document as a set of review findings, not unquestionable truth.",
                 "Before changing code, classify each review point as `agree`, `disagree`, or `uncertain`.",
                 "- Fix the points you agree are valid.",
                 "- If you disagree with a point, do not implement it blindly. Explain the disagreement with concrete code evidence in `generator/message.md`.",
                 "- If you are uncertain, investigate before changing code and surface the uncertainty explicitly if it remains.",
             ]
         )
+    if review_bridge_mode(state) == "github_pr_codex" and not (has_task or has_review or has_spec):
+        lines.append("You are working to get the current PR merge-ready on this branch/worktree.")
     if has_task and has_spec:
         lines.append("Implement the requested work using `task.md` as the brief and `spec.md` as the detailed design reference.")
     elif has_task:
         lines.append("Implement the requested work described in `task.md`.")
     elif has_review:
         lines.append("Use the review findings as the starting brief for the fix.")
+    elif has_github_review_input:
+        lines.append("Use the GitHub inline review findings as the starting brief for the fix.")
     if has_contract:
         lines.append("Use `contract.md` as an objective stop condition and do not claim completion if its relevant items are not satisfied.")
     lines.extend(
@@ -2200,12 +2417,15 @@ def format_generator_objective_block(inspection: dict) -> str:
     return "\n".join(lines).rstrip()
 
 
-def format_review_bridge_block(state: dict) -> str:
+def format_review_bridge_block(state: dict, inspection: dict, *, turn_dir: Path, role: str) -> str:
     if review_bridge_mode(state) != "github_pr_codex":
         return ""
     github_state = state["review_bridge"]["github"]
+    has_local_docs = bool(inspection["present_docs"])
+    has_github_review_input = turn_has_github_review_input(turn_dir)
     lines = [
         "GitHub PR review mode is enabled.",
+        f"- Current local branch/worktree target: `{state.get('git', {}).get('current_branch') or github_state['branch']}`.",
         f"- Work on branch `{github_state['branch']}` and ensure the latest branch head is pushed before ending the turn.",
     ]
     if github_state.get("pr_url"):
@@ -2220,6 +2440,23 @@ def format_review_bridge_block(state: dict) -> str:
             f"- The expected base branch for PR creation is `{github_state['base_branch']}`.",
         ]
     )
+    if role == "generator":
+        if state.get("bootstrap_phase") == "fork_to_generator_github_pr":
+            lines.append("- You are continuing forked Codex context to get this PR merge-ready.")
+            lines.append("- Use the repository state and GitHub PR as source of truth; use forked context only as supporting background.")
+        else:
+            lines.append("- You are working to get this PR merge-ready on the current branch/worktree.")
+        if has_github_review_input:
+            lines.append("- Existing inline PR review findings for the current head have been materialized for this turn; triage them before making changes.")
+        else:
+            lines.append("- If no inline PR review findings are currently materialized for this head, inspect the branch/worktree, make the next implementation step, push, and let the harness request GitHub Codex review.")
+        if has_local_docs:
+            lines.append("- Local task documents are supporting context for what this branch/worktree is trying to accomplish; keep the active GitHub review findings as the fix queue when they are present.")
+        task_root_value = state.get("task_root")
+        if isinstance(task_root_value, str) and task_root_value:
+            northstar_path = branch_northstar_summary_path(Path(task_root_value))
+            if northstar_path.exists():
+                lines.append(f"- Optional branch/worktree northstar context is available at `{northstar_path}`.")
     return "\n".join(lines).rstrip()
 
 
@@ -2257,8 +2494,17 @@ def format_reopen_context_block(state: dict) -> str:
     return "\n".join(lines).rstrip()
 
 
-def format_generator_message_requirements_block(inspection: dict) -> str:
-    has_review = inspection["doc_paths"]["review"] is not None
+def format_generator_message_requirements_block(
+    inspection: dict,
+    *,
+    turn_dir: Path,
+    previous_reviewer_status: dict | None,
+) -> str:
+    has_review = generator_requires_findings_triage(
+        inspection,
+        turn_dir=turn_dir,
+        previous_reviewer_status=previous_reviewer_status,
+    )
     has_contract = inspection["doc_paths"]["contract"] is not None
     lines = []
     if has_review:
@@ -2462,10 +2708,19 @@ def build_generator_turn_prompt(
         "continue_context_block": continue_context_block,
         "reopen_context_block": format_reopen_context_block(state),
         "fork_context_block": fork_context_block,
-        "docs_to_read_block": format_doc_paths_block(task_root, inspection, "generator"),
-        "review_bridge_block": format_review_bridge_block(state),
-        "generator_objective_block": format_generator_objective_block(inspection),
-        "generator_message_requirements_block": format_generator_message_requirements_block(inspection),
+        "docs_to_read_block": format_generator_input_files_block(task_root, inspection, turn_dir),
+        "review_bridge_block": format_review_bridge_block(state, inspection, turn_dir=turn_dir, role="generator"),
+        "generator_objective_block": format_generator_objective_block(
+            inspection,
+            state=state,
+            turn_dir=turn_dir,
+            previous_reviewer_status=previous_reviewer_status,
+        ),
+        "generator_message_requirements_block": format_generator_message_requirements_block(
+            inspection,
+            turn_dir=turn_dir,
+            previous_reviewer_status=previous_reviewer_status,
+        ),
         "previous_reviewer_message_path": str(role_message_path(previous_turn_dir, "reviewer")),
         "previous_reviewer_status_path": str(previous_reviewer_status_path),
         "previous_reviewer_focus_block": previous_reviewer_focus,
@@ -2913,7 +3168,7 @@ def has_any_fork_parent(generator_fork_id: str | None, reviewer_fork_id: str | N
     return bool(generator_fork_id or reviewer_fork_id)
 
 
-def validate_task_workspace_for_start(task_root: Path, inspection: dict) -> None:
+def validate_task_workspace_for_start(task_root: Path, inspection: dict, *, review_mode: str = "internal") -> None:
     errors: list[str] = []
     warnings: list[str] = []
     task_text = ""
@@ -2959,6 +3214,7 @@ def determine_start_role(
     inspection: dict,
     fork_enabled: bool,
     requested_role: str,
+    review_mode: str = "internal",
 ) -> tuple[str, str | None]:
     if requested_role not in {"auto", "generator", "reviewer"}:
         raise SystemExit("--start-role must be one of: auto, generator, reviewer")
@@ -2968,11 +3224,13 @@ def determine_start_role(
     has_docs = bool(inspection["present_docs"])
 
     if requested_role == "generator":
-        if has_task or has_review or has_spec:
+        if has_task or has_review or has_spec or review_mode == "github_pr_codex":
             return "generator", None
         raise SystemExit(f"cannot start with generator without a local {TASK_FILENAME}, {REVIEW_FILENAME}, or {SPEC_FILENAME}")
 
     if requested_role == "reviewer":
+        if review_mode == "github_pr_codex":
+            raise SystemExit("github_pr_codex review mode cannot start with reviewer")
         if has_docs:
             return "reviewer", None
         if fork_enabled:
@@ -2983,6 +3241,8 @@ def determine_start_role(
         return "generator", None
     if has_task:
         return "generator", None
+    if review_mode == "github_pr_codex":
+        return "generator", "fork_to_generator_github_pr" if fork_enabled else None
     if fork_enabled:
         return "reviewer", "fork_to_review"
     raise SystemExit(
@@ -3132,10 +3392,13 @@ def new_github_review_wait_state() -> dict:
 
 def clear_github_review_tracking(github_state: dict) -> None:
     github_state["current_head_started_at"] = None
+    github_state["last_consumed_review_body_sha256"] = None
+    github_state["last_consumed_review_submitted_at"] = None
+    github_state["last_consumed_review_id"] = None
+    github_state["last_consumed_review_turn"] = None
     github_state["last_consumed_review_comment_body_sha256"] = None
     github_state["last_consumed_review_comment_created_at"] = None
     github_state["last_consumed_review_comment_id"] = None
-    github_state["last_consumed_review_turn"] = None
     github_state["last_request_comment_created_at"] = None
     github_state["last_request_comment_id"] = None
     github_state["last_request_turn"] = None
@@ -3149,6 +3412,14 @@ def sync_github_review_head_tracking(github_state: dict, head_sha: str | None) -
         return False
     clear_github_review_tracking(github_state)
     return True
+
+
+def last_consumed_github_review_id(github_state: dict) -> int | None:
+    review_id = github_state.get("last_consumed_review_id")
+    if isinstance(review_id, int):
+        return review_id
+    legacy_review_id = github_state.get("last_consumed_review_comment_id")
+    return legacy_review_id if isinstance(legacy_review_id, int) else None
 
 
 def resolve_github_pr_reference(repo_root: Path, pr_ref: str) -> dict:
@@ -3430,10 +3701,13 @@ def build_review_bridge_state(
             "branch": branch,
             "branch_source": branch_source,
             "current_head_started_at": None,
+            "last_consumed_review_body_sha256": None,
+            "last_consumed_review_id": None,
+            "last_consumed_review_submitted_at": None,
+            "last_consumed_review_turn": None,
             "last_consumed_review_comment_body_sha256": None,
             "last_consumed_review_comment_created_at": None,
             "last_consumed_review_comment_id": None,
-            "last_consumed_review_turn": None,
             "last_observed_head_sha": pr_head_sha,
             "last_request_comment_created_at": None,
             "last_request_comment_id": None,
@@ -3681,6 +3955,351 @@ def list_github_pr_timeline_events(
     return events
 
 
+def list_github_pr_reviews(
+    repo_root: Path,
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+) -> list[dict]:
+    reviews: list[dict] = []
+    cursor: str | None = None
+    while True:
+        response = gh_graphql_json(
+            repo_root,
+            GITHUB_PR_REVIEWS_QUERY,
+            phase="github_review_reviews",
+            variables={
+                "owner": owner,
+                "repo": repo,
+                "number": pr_number,
+                "cursor": cursor,
+            },
+        )
+        pull_request = (((response.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+        reviews_connection = pull_request.get("reviews") or {}
+        nodes = reviews_connection.get("nodes") or []
+        reviews.extend(node for node in nodes if isinstance(node, dict))
+        page_info = reviews_connection.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor:
+            break
+    return reviews
+
+
+def list_github_pr_review_threads(
+    repo_root: Path,
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+) -> list[dict]:
+    threads: list[dict] = []
+    cursor: str | None = None
+    while True:
+        response = gh_graphql_json(
+            repo_root,
+            GITHUB_PR_REVIEW_THREADS_QUERY,
+            phase="github_review_threads",
+            variables={
+                "owner": owner,
+                "repo": repo,
+                "number": pr_number,
+                "cursor": cursor,
+            },
+        )
+        pull_request = (((response.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+        threads_connection = pull_request.get("reviewThreads") or {}
+        nodes = threads_connection.get("nodes") or []
+        threads.extend(node for node in nodes if isinstance(node, dict))
+        page_info = threads_connection.get("pageInfo") or {}
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor:
+            break
+    return threads
+
+
+def github_author_login(author: dict | None) -> str | None:
+    if not isinstance(author, dict):
+        return None
+    login = author.get("login")
+    return login.strip() if isinstance(login, str) and login.strip() else None
+
+
+def is_github_codex_author(author: dict | None) -> bool:
+    login = github_author_login(author)
+    return bool(login and "codex" in login.lower())
+
+
+def normalize_github_review_candidate(raw_review: dict) -> dict | None:
+    review_id = raw_review.get("databaseId")
+    submitted_at = raw_review.get("submittedAt") or raw_review.get("createdAt")
+    submitted_at_epoch = parse_utc_timestamp(submitted_at if isinstance(submitted_at, str) else None)
+    author = raw_review.get("author")
+    if (
+        not isinstance(review_id, int)
+        or submitted_at_epoch is None
+        or not is_github_codex_author(author)
+    ):
+        return None
+    commit = raw_review.get("commit")
+    commit_oid = commit.get("oid") if isinstance(commit, dict) and isinstance(commit.get("oid"), str) else None
+    body = raw_review.get("body")
+    state = raw_review.get("state")
+    return {
+        "author_login": github_author_login(author),
+        "body": body.strip() if isinstance(body, str) else "",
+        "commit_oid": commit_oid,
+        "id": review_id,
+        "state": state.strip() if isinstance(state, str) and state.strip() else "COMMENTED",
+        "submitted_at": str(submitted_at),
+        "submitted_at_epoch": submitted_at_epoch,
+    }
+
+
+def normalize_github_review_thread_comment(thread: dict, comment: dict) -> dict | None:
+    comment_id = comment.get("databaseId")
+    created_at = comment.get("createdAt")
+    created_at_epoch = parse_utc_timestamp(created_at if isinstance(created_at, str) else None)
+    author = comment.get("author")
+    if (
+        not isinstance(comment_id, int)
+        or created_at_epoch is None
+        or not is_github_codex_author(author)
+    ):
+        return None
+    review = comment.get("pullRequestReview")
+    review_id = review.get("databaseId") if isinstance(review, dict) and isinstance(review.get("databaseId"), int) else None
+    review_author = review.get("author") if isinstance(review, dict) else None
+    review_submitted_at = (
+        review.get("submittedAt")
+        if isinstance(review, dict) and isinstance(review.get("submittedAt"), str)
+        else None
+    )
+    review_submitted_at_epoch = parse_utc_timestamp(review_submitted_at)
+    if review_id is None or review_submitted_at_epoch is None:
+        return None
+    if review_author is not None and not is_github_codex_author(review_author):
+        return None
+    review_commit = review.get("commit") if isinstance(review, dict) else None
+    commit = comment.get("commit")
+    original_commit = comment.get("originalCommit")
+    commit_oid = None
+    for candidate in (review_commit, commit, original_commit):
+        if isinstance(candidate, dict) and isinstance(candidate.get("oid"), str) and candidate.get("oid").strip():
+            commit_oid = candidate["oid"].strip()
+            break
+    path = comment.get("path")
+    if not isinstance(path, str) or not path.strip():
+        path = thread.get("path")
+    return {
+        "author_login": github_author_login(author),
+        "body": comment["body"].strip() if isinstance(comment.get("body"), str) else "",
+        "comment_id": comment_id,
+        "commit_oid": commit_oid,
+        "created_at": str(created_at),
+        "created_at_epoch": created_at_epoch,
+        "diff_side": comment.get("diffSide") or thread.get("diffSide"),
+        "is_outdated": bool(thread.get("isOutdated")),
+        "is_resolved": bool(thread.get("isResolved")),
+        "line": comment.get("line") if isinstance(comment.get("line"), int) else thread.get("line"),
+        "original_line": (
+            comment.get("originalLine")
+            if isinstance(comment.get("originalLine"), int)
+            else thread.get("originalLine")
+        ),
+        "original_start_line": (
+            comment.get("originalStartLine")
+            if isinstance(comment.get("originalStartLine"), int)
+            else thread.get("originalStartLine")
+        ),
+        "path": path.strip() if isinstance(path, str) and path.strip() else "(unknown path)",
+        "review_author_login": github_author_login(review_author) or github_author_login(author),
+        "review_body": review.get("body").strip() if isinstance(review, dict) and isinstance(review.get("body"), str) else "",
+        "review_id": review_id,
+        "review_state": review.get("state").strip() if isinstance(review, dict) and isinstance(review.get("state"), str) and review.get("state").strip() else "COMMENTED",
+        "review_submitted_at": review_submitted_at,
+        "review_submitted_at_epoch": review_submitted_at_epoch,
+        "start_line": comment.get("startLine") if isinstance(comment.get("startLine"), int) else thread.get("startLine"),
+        "thread_id": thread.get("id"),
+    }
+
+
+def current_head_review_threshold_epoch(
+    *,
+    current_head_started_at: str | None,
+    request_comment_created_at: str | None,
+) -> float | None:
+    request_epoch = parse_utc_timestamp(request_comment_created_at)
+    head_epoch = parse_utc_timestamp(current_head_started_at)
+    if request_epoch is None:
+        return head_epoch
+    if head_epoch is None:
+        return request_epoch
+    return max(request_epoch, head_epoch)
+
+
+def build_github_inline_review_snapshot(
+    reviews: list[dict],
+    review_threads: list[dict],
+    *,
+    current_head_sha: str,
+    current_head_started_at: str | None,
+    pr_number: int,
+    pr_url: str | None,
+    request_comment_created_at: str | None = None,
+    last_consumed_review_id: int | None = None,
+    latest_allowed_created_at: str | None = None,
+) -> dict | None:
+    threshold_epoch = current_head_review_threshold_epoch(
+        current_head_started_at=current_head_started_at,
+        request_comment_created_at=request_comment_created_at,
+    )
+    latest_allowed_epoch = parse_utc_timestamp(latest_allowed_created_at)
+    review_candidates: dict[int, dict] = {}
+    for raw_review in reviews:
+        review = normalize_github_review_candidate(raw_review)
+        if review is None:
+            continue
+        if review["commit_oid"] and review["commit_oid"] != current_head_sha:
+            continue
+        if threshold_epoch is not None and review["submitted_at_epoch"] < threshold_epoch:
+            continue
+        if latest_allowed_epoch is not None and review["submitted_at_epoch"] > latest_allowed_epoch:
+            continue
+        if last_consumed_review_id is not None and review["id"] == last_consumed_review_id:
+            continue
+        review_candidates[review["id"]] = review
+
+    thread_candidates: dict[int, dict[str, dict]] = {}
+    for thread in review_threads:
+        comments = ((thread.get("comments") or {}).get("nodes") or [])
+        for raw_comment in comments:
+            if not isinstance(raw_comment, dict):
+                continue
+            comment = normalize_github_review_thread_comment(thread, raw_comment)
+            if comment is None:
+                continue
+            review_id = comment["review_id"]
+            review_epoch = comment["review_submitted_at_epoch"]
+            if comment["commit_oid"] and comment["commit_oid"] != current_head_sha:
+                continue
+            if threshold_epoch is not None and review_epoch < threshold_epoch:
+                continue
+            if latest_allowed_epoch is not None and review_epoch > latest_allowed_epoch:
+                continue
+            if last_consumed_review_id is not None and review_id == last_consumed_review_id:
+                continue
+            review_candidates.setdefault(
+                review_id,
+                {
+                    "author_login": comment["review_author_login"],
+                    "body": comment["review_body"],
+                    "commit_oid": comment["commit_oid"],
+                    "id": review_id,
+                    "state": comment["review_state"],
+                    "submitted_at": comment["review_submitted_at"],
+                    "submitted_at_epoch": review_epoch,
+                },
+            )
+            if comment["is_resolved"] or comment["is_outdated"]:
+                continue
+            per_review_threads = thread_candidates.setdefault(review_id, {})
+            existing = per_review_threads.get(str(comment["thread_id"]))
+            if existing is None or (
+                comment["created_at"],
+                comment["comment_id"],
+            ) > (
+                existing["created_at"],
+                existing["comment_id"],
+            ):
+                per_review_threads[str(comment["thread_id"])] = comment
+
+    if not review_candidates:
+        return None
+    selected_review = sorted(
+        review_candidates.values(),
+        key=lambda item: (item["submitted_at"], item["id"]),
+    )[-1]
+    active_threads = list(thread_candidates.get(selected_review["id"], {}).values())
+    active_threads.sort(key=lambda item: (item["path"], item.get("line") or 0, item["comment_id"]))
+    return {
+        "active_threads": active_threads,
+        "blocking_issues": [summarize_github_review_thread(item) for item in active_threads],
+        "current_head_sha": current_head_sha,
+        "current_head_started_at": current_head_started_at,
+        "pr_number": pr_number,
+        "pr_url": pr_url,
+        "request_comment_created_at": request_comment_created_at,
+        "review": selected_review,
+    }
+
+
+def summarize_github_review_thread(thread: dict) -> str:
+    location = thread["path"]
+    if isinstance(thread.get("line"), int):
+        location += f":{thread['line']}"
+    body = " ".join(thread["body"].split())
+    return f"{location} - {body[:280]}".rstrip()
+
+
+def build_github_review_input_markdown(snapshot: dict) -> str:
+    review = snapshot["review"]
+    pr_label = snapshot["pr_url"] or f"#{snapshot['pr_number']}"
+    lines = [
+        "# GitHub Review Input",
+        "",
+        f"- PR: {pr_label}",
+        f"- Head SHA: `{snapshot['current_head_sha']}`",
+        f"- Review ID: `{review['id']}`",
+        f"- Review author: `{review['author_login'] or 'unknown'}`",
+        f"- Review state: `{review['state']}`",
+        f"- Submitted at: `{review['submitted_at']}`",
+    ]
+    if review["body"]:
+        lines.extend(["", "## Review Summary", "", review["body"]])
+    threads = snapshot["active_threads"]
+    if not threads:
+        lines.extend(["", "## Active Findings", "", "- No unresolved inline GitHub review findings were present for this review."])
+        return "\n".join(lines).rstrip()
+    lines.extend(["", "## Active Findings", ""])
+    for index, thread in enumerate(threads, start=1):
+        location = thread["path"]
+        if isinstance(thread.get("line"), int):
+            location += f":{thread['line']}"
+        lines.extend(
+            [
+                f"{index}. `{location}`",
+                "",
+                thread["body"],
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip()
+
+
+def clear_github_review_input_artifacts(run_dir: Path, task_root: Path, turn_dir: Path) -> None:
+    for path in (github_review_input_markdown_path(turn_dir), github_review_input_json_path(turn_dir)):
+        if path.exists():
+            path.unlink()
+    refresh_turn_context_manifest(run_dir, task_root, turn_dir)
+
+
+def write_github_review_input_artifacts(
+    run_dir: Path,
+    task_root: Path,
+    turn_dir: Path,
+    snapshot: dict,
+) -> None:
+    write_text(github_review_input_markdown_path(turn_dir), build_github_review_input_markdown(snapshot))
+    save_json(github_review_input_json_path(turn_dir), snapshot)
+    refresh_turn_context_manifest(run_dir, task_root, turn_dir)
+
+
 def is_exact_github_codex_request_comment(body: str) -> bool:
     return body == "@codex"
 
@@ -3749,11 +4368,26 @@ def current_github_pr_head_started_at(
     return ts_from_epoch(latest_epoch) if latest_epoch is not None else None
 
 
+def current_turn_review_scope_started_at(
+    run_dir: Path,
+    turn_number: int,
+    *,
+    current_head_started_at: str | None,
+) -> str | None:
+    scope_epoch = parse_utc_timestamp(current_head_started_at)
+    generator_status = role_status_path(turn_dir_for(run_dir, turn_number), "generator")
+    if generator_status.exists():
+        generator_epoch = generator_status.stat().st_mtime
+        scope_epoch = generator_epoch if scope_epoch is None else max(scope_epoch, generator_epoch)
+    return ts_from_epoch(scope_epoch) if scope_epoch is not None else None
+
+
 def classify_github_pr_review_state_for_current_head(
     comments: list[dict],
     *,
     current_head_started_at: str | None,
-    last_consumed_comment_id: int | None,
+    last_consumed_comment_id: int | None = None,
+    review_snapshot: dict | None = None,
 ) -> dict:
     current_head_started_at_epoch = parse_utc_timestamp(current_head_started_at)
     scoped_comments: list[dict] = []
@@ -3779,30 +4413,44 @@ def classify_github_pr_review_state_for_current_head(
             continue
         if latest_request is not None and is_github_codex_review_comment(body):
             latest_reply = comment
-
-    if latest_request is None:
-        return {
-            "current_head_started_at": current_head_started_at,
-            "reply_comment": None,
-            "request_comment": None,
-            "state": "needs_request_comment",
-        }
-    if latest_reply is None:
+    if review_snapshot is not None:
         return {
             "current_head_started_at": current_head_started_at,
             "reply_comment": None,
             "request_comment": latest_request,
+            "review_snapshot": review_snapshot,
+            "state": "codex_reply_ready_to_ingest",
+        }
+    if latest_request is not None:
+        if latest_reply is not None:
+            if last_consumed_comment_id is not None and latest_reply["id"] == last_consumed_comment_id:
+                return {
+                    "current_head_started_at": current_head_started_at,
+                    "reply_comment": latest_reply,
+                    "request_comment": latest_request,
+                    "review_snapshot": None,
+                    "state": "codex_reply_ready_to_ingest",
+                }
+            return {
+                "current_head_started_at": current_head_started_at,
+                "reply_comment": latest_reply,
+                "request_comment": latest_request,
+                "review_snapshot": None,
+                "state": "codex_reply_ready_to_ingest",
+            }
+        return {
+            "current_head_started_at": current_head_started_at,
+            "reply_comment": None,
+            "request_comment": latest_request,
+            "review_snapshot": None,
             "state": "waiting_for_codex_reply",
         }
-    # A consumed reply can still be the authoritative current-head state on
-    # continuation when reviewer artifacts need to be rebuilt. Consumption only
-    # suppresses polling for "new" replies; it does not mean the current head
-    # lost its request/reply pair or needs another external @codex post.
     return {
         "current_head_started_at": current_head_started_at,
-        "reply_comment": latest_reply,
-        "request_comment": latest_request,
-        "state": "codex_reply_ready_to_ingest",
+        "reply_comment": None,
+        "request_comment": None,
+        "review_snapshot": None,
+        "state": "needs_request_comment",
     }
 
 
@@ -3819,6 +4467,35 @@ def adopt_github_review_request_comment(github_state: dict, turn_number: int, re
     github_state["review_wait"] = new_github_review_wait_state()
 
 
+def record_consumed_github_codex_review_snapshot(
+    run_dir: Path,
+    state: dict,
+    turn_number: int,
+    review_snapshot: dict,
+) -> None:
+    github_state = state["review_bridge"]["github"]
+    review = review_snapshot["review"]
+    markdown = build_github_review_input_markdown(review_snapshot)
+    github_state["last_consumed_review_body_sha256"] = hash_text(markdown)
+    github_state["last_consumed_review_id"] = review["id"]
+    github_state["last_consumed_review_submitted_at"] = review["submitted_at"]
+    github_state["last_consumed_review_turn"] = turn_name(turn_number)
+    github_state["last_consumed_review_comment_body_sha256"] = hash_text(markdown)
+    github_state["last_consumed_review_comment_created_at"] = review["submitted_at"]
+    github_state["last_consumed_review_comment_id"] = review["id"]
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "github_review_received",
+        turn_number=turn_number,
+        role="reviewer",
+        details={
+            "pr_number": github_state.get("pr_number"),
+            "review_id": review["id"],
+        },
+    )
+
+
 def record_consumed_github_codex_review_comment(
     run_dir: Path,
     state: dict,
@@ -3829,6 +4506,8 @@ def record_consumed_github_codex_review_comment(
     github_state["last_consumed_review_comment_body_sha256"] = hash_text(comment["body"])
     github_state["last_consumed_review_comment_created_at"] = comment["created_at"]
     github_state["last_consumed_review_comment_id"] = comment["id"]
+    github_state["last_consumed_review_id"] = comment["id"]
+    github_state["last_consumed_review_submitted_at"] = comment["created_at"]
     github_state["last_consumed_review_turn"] = turn_name(turn_number)
     save_run_state(run_dir, state)
     append_run_event(
@@ -3876,11 +4555,42 @@ def inspect_github_pr_review_state_for_current_head(
         current_head_sha=current_head_sha,
         pr_created_at=github_state.get("pr_created_at"),
     )
+    current_head_started_at = current_turn_review_scope_started_at(
+        run_dir,
+        turn_number,
+        current_head_started_at=current_head_started_at,
+    )
     github_state["current_head_started_at"] = current_head_started_at
+    latest_request = classify_github_pr_review_state_for_current_head(
+        comments,
+        current_head_started_at=current_head_started_at,
+        last_consumed_comment_id=None,
+        review_snapshot=None,
+    )["request_comment"]
+    review_snapshot = build_github_inline_review_snapshot(
+        list_github_pr_reviews(
+            repo_root,
+            owner=github_state["repo_owner"],
+            repo=github_state["repo"],
+            pr_number=pr_number,
+        ),
+        list_github_pr_review_threads(
+            repo_root,
+            owner=github_state["repo_owner"],
+            repo=github_state["repo"],
+            pr_number=pr_number,
+        ),
+        current_head_sha=current_head_sha,
+        current_head_started_at=current_head_started_at,
+        pr_number=pr_number,
+        pr_url=github_state.get("pr_url"),
+        request_comment_created_at=latest_request["created_at"] if isinstance(latest_request, dict) else None,
+    )
     review_state = classify_github_pr_review_state_for_current_head(
         comments,
         current_head_started_at=current_head_started_at,
-        last_consumed_comment_id=github_state.get("last_consumed_review_comment_id"),
+        last_consumed_comment_id=last_consumed_github_review_id(github_state),
+        review_snapshot=review_snapshot,
     )
     adopt_github_review_request_comment(
         github_state,
@@ -4077,6 +4787,135 @@ def wait_for_new_github_codex_review_comment(
             return comment
 
 
+def wait_for_new_github_inline_review_snapshot(
+    run_dir: Path,
+    state: dict,
+    turn_number: int,
+    *,
+    current_head_sha: str,
+    current_head_started_at: str | None,
+    timeout_seconds: float,
+    reuse_existing_request: bool = False,
+) -> dict:
+    if timeout_seconds < GITHUB_CODEX_INITIAL_WAIT_SECONDS:
+        raise SupervisorRuntimeError(
+            "github_review_timeout_config",
+            f"github_pr_codex review mode requires turn_timeout_seconds >= {GITHUB_CODEX_INITIAL_WAIT_SECONDS}",
+            role="reviewer",
+            details={"turn_timeout_seconds": timeout_seconds},
+        )
+    repo_root = Path(state["repo_root"])
+    github_state = state["review_bridge"]["github"]
+    pr_number = github_state.get("pr_number")
+    request_comment_id = github_state.get("last_request_comment_id")
+    request_comment_created_at = github_state.get("last_request_comment_created_at")
+    if not isinstance(pr_number, int) or not isinstance(request_comment_id, int):
+        raise SupervisorRuntimeError(
+            "github_review_poll",
+            "cannot poll GitHub inline review findings before posting a request comment",
+            role="reviewer",
+            details={
+                "pr_number": pr_number,
+                "request_comment_id": request_comment_id,
+            },
+        )
+    wait_state = github_state["review_wait"]
+    request_created_at_epoch = parse_utc_timestamp(request_comment_created_at)
+    if not reuse_existing_request:
+        started_at_epoch = request_created_at_epoch or time.time()
+        wait_state["started_at"] = ts_from_epoch(started_at_epoch)
+        wait_state["deadline_at"] = ts_from_epoch(started_at_epoch + timeout_seconds)
+        wait_state["last_polled_at"] = None
+        wait_state["poll_count"] = 0
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            "github_review_wait_started",
+            turn_number=turn_number,
+            role="reviewer",
+            details={
+                "initial_wait_seconds": GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                "poll_interval_seconds": GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                "pr_number": pr_number,
+            },
+        )
+    else:
+        started_at_epoch = (
+            parse_utc_timestamp(wait_state.get("started_at"))
+            or request_created_at_epoch
+            or time.time()
+        )
+        deadline_epoch = parse_utc_timestamp(wait_state.get("deadline_at"))
+        if deadline_epoch is None:
+            deadline_epoch = started_at_epoch + timeout_seconds
+            wait_state["deadline_at"] = ts_from_epoch(deadline_epoch)
+        wait_state["started_at"] = ts_from_epoch(started_at_epoch)
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            "github_review_wait_resumed",
+            turn_number=turn_number,
+            role="reviewer",
+            details={
+                "poll_count": int(wait_state.get("poll_count", 0)),
+                "pr_number": pr_number,
+            },
+        )
+
+    deadline = parse_utc_timestamp(wait_state.get("deadline_at")) or (started_at_epoch + timeout_seconds)
+    while True:
+        last_polled_at_epoch = parse_utc_timestamp(wait_state.get("last_polled_at"))
+        if last_polled_at_epoch is not None:
+            next_poll_epoch = last_polled_at_epoch + GITHUB_CODEX_POLL_INTERVAL_SECONDS
+        else:
+            initial_wait_anchor = request_created_at_epoch or started_at_epoch
+            next_poll_epoch = initial_wait_anchor + GITHUB_CODEX_INITIAL_WAIT_SECONDS
+        if next_poll_epoch > deadline:
+            raise SupervisorRuntimeError(
+                "github_review_timeout",
+                f"no new Codex inline review findings appeared on PR #{pr_number} within {int(timeout_seconds)} seconds",
+                role="reviewer",
+                details={
+                    "last_request_comment_created_at": request_comment_created_at,
+                    "last_request_comment_id": request_comment_id,
+                    "poll_count": int(wait_state.get("poll_count", 0)),
+                    "pr_number": pr_number,
+                },
+            )
+        now_epoch = time.time()
+        if now_epoch < next_poll_epoch:
+            time.sleep(next_poll_epoch - now_epoch)
+            continue
+        polled_at = time.time()
+        wait_state["last_polled_at"] = ts_from_epoch(polled_at)
+        wait_state["poll_count"] = int(wait_state.get("poll_count", 0)) + 1
+        save_run_state(run_dir, state)
+        snapshot = build_github_inline_review_snapshot(
+            list_github_pr_reviews(
+                repo_root,
+                owner=github_state["repo_owner"],
+                repo=github_state["repo"],
+                pr_number=pr_number,
+            ),
+            list_github_pr_review_threads(
+                repo_root,
+                owner=github_state["repo_owner"],
+                repo=github_state["repo"],
+                pr_number=pr_number,
+            ),
+            current_head_sha=current_head_sha,
+            current_head_started_at=current_head_started_at,
+            pr_number=pr_number,
+            pr_url=github_state.get("pr_url"),
+            request_comment_created_at=request_comment_created_at,
+            last_consumed_review_id=last_consumed_github_review_id(github_state),
+            latest_allowed_created_at=wait_state.get("deadline_at"),
+        )
+        if snapshot is not None:
+            record_consumed_github_codex_review_snapshot(run_dir, state, turn_number, snapshot)
+            return snapshot
+
+
 def github_reviewer_status_from_comment(comment_body: str, reviewed_commit_sha: str) -> dict:
     if comment_body.startswith(GITHUB_CODEX_APPROVED_PREFIX):
         dimensions = {
@@ -4106,11 +4945,40 @@ def github_reviewer_status_from_comment(comment_body: str, reviewed_commit_sha: 
     }
 
 
+def github_reviewer_status_from_snapshot(snapshot: dict, reviewed_commit_sha: str) -> dict:
+    review = snapshot["review"]
+    active_threads = snapshot["active_threads"]
+    if not active_threads:
+        dimensions = {key: "pass" for key in critical_review_dimension_keys()}
+        return {
+            "verdict": "approved",
+            "summary": "GitHub Codex reported no unresolved inline review findings on the current PR head.",
+            "blocking_issues": [],
+            "critical_dimensions": dimensions,
+            "reviewed_commit_sha": reviewed_commit_sha,
+        }
+    dimensions = {
+        key: ("fail" if key == "correctness_vs_intent" else "uncertain")
+        for key in critical_review_dimension_keys()
+    }
+    summary = "GitHub Codex requested follow-up changes."
+    if review.get("body"):
+        summary = review["body"].splitlines()[0].strip() or summary
+    return {
+        "verdict": "changes_requested",
+        "summary": summary,
+        "blocking_issues": snapshot["blocking_issues"],
+        "critical_dimensions": dimensions,
+        "reviewed_commit_sha": reviewed_commit_sha,
+    }
+
+
 def build_github_reviewer_message(
     state: dict,
     turn_number: int,
     *,
     comment: dict | None = None,
+    review_snapshot: dict | None = None,
     request_comment: dict | None = None,
     status: dict,
     error: SupervisorRuntimeError | None = None,
@@ -4131,13 +4999,17 @@ def build_github_reviewer_message(
     ]
     if request_comment is not None:
         lines.append(f"- Review request comment ID: `{request_comment['id']}`")
+    if review_snapshot is not None:
+        lines.append(f"- Imported GitHub review ID: `{review_snapshot['review']['id']}`")
     if comment is not None:
         lines.append(f"- Imported Codex review comment ID: `{comment['id']}`")
     if status["blocking_issues"]:
         lines.extend(["", "## Blocking Issues", ""])
         lines.extend(f"- {item}" for item in status["blocking_issues"])
     lines.extend(["", "## Imported Review Comment", ""])
-    if comment is not None:
+    if review_snapshot is not None:
+        lines.append(build_github_review_input_markdown(review_snapshot))
+    elif comment is not None:
         lines.append(comment["body"].rstrip())
     elif error is not None:
         lines.append(f"GitHub review bridge failed during `{error.phase}`.")
@@ -4158,14 +5030,16 @@ def build_github_reviewer_message(
             )
         if waited_for_reply:
             lines.append(
-                f"- Waited {GITHUB_CODEX_INITIAL_WAIT_SECONDS // 60} minutes, then polled every {GITHUB_CODEX_POLL_INTERVAL_SECONDS // 60} minutes for a new Codex review comment."
+                f"- Waited {GITHUB_CODEX_INITIAL_WAIT_SECONDS // 60} minutes, then polled every {GITHUB_CODEX_POLL_INTERVAL_SECONDS // 60} minutes for new GitHub Codex review findings."
             )
+    elif review_snapshot is not None:
+        lines.append("- Imported already-present GitHub inline review findings for the current pushed head without posting a new request.")
     elif comment is not None:
         lines.append("- Imported an already-present Codex review comment for the current pushed head without posting a new request.")
     if error is not None:
         lines.append("- Surfaced the GitHub review bridge failure explicitly as a blocked reviewer artifact.")
     else:
-        lines.append("- Stored the latest unconsumed Codex review comment in the reviewer turn artifacts for the next generator turn.")
+        lines.append("- Stored the latest unconsumed GitHub review findings in the reviewer turn artifacts for the next generator turn.")
     lines.extend(["", "## Residual Risks or Follow-up Notes", ""])
     if status["verdict"] == "changes_requested":
         lines.append("- The next generator turn should triage the imported GitHub Codex findings just like internal reviewer feedback.")
@@ -4333,6 +5207,52 @@ def wait_for_tmux_sessions_ready(run_dir: Path, state: dict) -> None:
     assign_recent_codex_session_ids(run_dir, state)
 
 
+def ensure_active_role_sessions_ready(run_dir: Path, state: dict) -> None:
+    for role in active_tmux_roles(state):
+        ensure_role_session_ready(run_dir, state, role)
+
+
+def seed_generator_github_review_input(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_number: int,
+    current_turn_dir: Path,
+) -> None:
+    if review_bridge_mode(state) != "github_pr_codex":
+        clear_github_review_input_artifacts(run_dir, task_root, current_turn_dir)
+        return
+    if turn_number > 1:
+        previous_turn_dir = current_turn_dir.parent / turn_name(turn_number - 1)
+        previous_markdown = github_review_input_markdown_path(previous_turn_dir)
+        previous_json = github_review_input_json_path(previous_turn_dir)
+        if previous_markdown.exists() and previous_json.exists():
+            write_text(
+                github_review_input_markdown_path(current_turn_dir),
+                previous_markdown.read_text(encoding="utf-8"),
+            )
+            save_json(
+                github_review_input_json_path(current_turn_dir),
+                load_json(previous_json),
+            )
+            refresh_turn_context_manifest(run_dir, task_root, current_turn_dir)
+            return
+        clear_github_review_input_artifacts(run_dir, task_root, current_turn_dir)
+        return
+    pr_info = ensure_github_pr_ready(run_dir, state, task_root, turn_number)
+    review_state = inspect_github_pr_review_state_for_current_head(
+        run_dir,
+        state,
+        turn_number,
+        current_head_sha=pr_info["head_ref_oid"],
+    )
+    snapshot = review_state.get("review_snapshot")
+    if snapshot is not None and snapshot.get("active_threads"):
+        write_github_review_input_artifacts(run_dir, task_root, current_turn_dir, snapshot)
+    else:
+        clear_github_review_input_artifacts(run_dir, task_root, current_turn_dir)
+
+
 def run_generator_phase(
     run_dir: Path,
     state: dict,
@@ -4344,6 +5264,7 @@ def run_generator_phase(
     continue_context_block: str = "",
 ) -> dict:
     repo_root = Path(state["repo_root"])
+    seed_generator_github_review_input(run_dir, state, task_root, turn_number, current_turn_dir)
     inspection = inspect_task_workspace(task_root)
     state["workspace_profile"] = inspection["profile"]
     was_transitioning = state.get("status") == TRANSITIONING_TURN_STATUS
@@ -4552,6 +5473,8 @@ def run_github_codex_review_phase(
 ) -> dict:
     github_state = state["review_bridge"]["github"]
     request_comment = None
+    comment = None
+    review_snapshot = None
     reviewed_commit_sha = github_state.get("last_observed_head_sha")
     waited_for_reply = False
     try:
@@ -4602,56 +5525,83 @@ def run_github_codex_review_phase(
                 reviewed_commit_sha,
             )
             waited_for_reply = True
-            comment = wait_for_new_github_codex_review_comment(
-                run_dir,
-                state,
-                turn_number,
-                timeout_seconds=float(state["council_config"]["council"]["turn_timeout_seconds"]),
-                reuse_existing_request=False,
-            )
         elif review_state == "waiting_for_codex_reply":
             existing_request_comment = current_review_state["request_comment"]
-            request_comment = {
-                "body": None,
-                "created_at": existing_request_comment["created_at"],
-                "html_url": None,
-                "id": existing_request_comment["id"],
-            }
+            request_comment = (
+                {
+                    "body": None,
+                    "created_at": existing_request_comment["created_at"],
+                    "html_url": None,
+                    "id": existing_request_comment["id"],
+                }
+                if isinstance(existing_request_comment, dict)
+                else None
+            )
             waited_for_reply = True
-            comment = wait_for_new_github_codex_review_comment(
+            review_snapshot = wait_for_new_github_inline_review_snapshot(
                 run_dir,
                 state,
                 turn_number,
+                current_head_sha=reviewed_commit_sha,
+                current_head_started_at=current_review_state["current_head_started_at"],
                 timeout_seconds=float(state["council_config"]["council"]["turn_timeout_seconds"]),
                 reuse_existing_request=True,
             )
         else:
             existing_request_comment = current_review_state["request_comment"]
-            request_comment = {
-                "body": None,
-                "created_at": existing_request_comment["created_at"],
-                "html_url": None,
-                "id": existing_request_comment["id"],
-            }
-            comment = current_review_state["reply_comment"]
-            record_consumed_github_codex_review_comment(run_dir, state, turn_number, comment)
-        reviewer_status = validate_reviewer_status(
-            github_reviewer_status_from_comment(comment["body"], reviewed_commit_sha)
-        )
+            request_comment = (
+                {
+                    "body": None,
+                    "created_at": existing_request_comment["created_at"],
+                    "html_url": None,
+                    "id": existing_request_comment["id"],
+                }
+                if isinstance(existing_request_comment, dict)
+                else None
+            )
+            review_snapshot = current_review_state.get("review_snapshot")
+            comment = current_review_state.get("reply_comment")
+            if review_snapshot is not None:
+                record_consumed_github_codex_review_snapshot(run_dir, state, turn_number, review_snapshot)
+            elif comment is not None:
+                record_consumed_github_codex_review_comment(run_dir, state, turn_number, comment)
+        if review_state == "needs_request_comment":
+            review_snapshot = wait_for_new_github_inline_review_snapshot(
+                run_dir,
+                state,
+                turn_number,
+                current_head_sha=reviewed_commit_sha,
+                current_head_started_at=current_review_state["current_head_started_at"],
+                timeout_seconds=float(state["council_config"]["council"]["turn_timeout_seconds"]),
+                reuse_existing_request=False,
+            )
+        if review_snapshot is not None:
+            write_github_review_input_artifacts(run_dir, task_root, current_turn_dir, review_snapshot)
+            reviewer_status = validate_reviewer_status(
+                github_reviewer_status_from_snapshot(review_snapshot, reviewed_commit_sha)
+            )
+        else:
+            reviewer_status = validate_reviewer_status(
+                github_reviewer_status_from_comment(comment["body"], reviewed_commit_sha)
+            )
         reviewer_message = build_github_reviewer_message(
             state,
             turn_number,
             comment=comment,
+            review_snapshot=review_snapshot,
             request_comment=request_comment,
             status=reviewer_status,
             waited_for_reply=waited_for_reply,
         )
         write_final_message_artifact(current_turn_dir, "reviewer", reviewer_message)
         save_json(role_status_path(current_turn_dir, "reviewer"), reviewer_status)
-        write_text(role_raw_output_path(current_turn_dir, "reviewer"), comment["body"])
+        write_text(
+            role_raw_output_path(current_turn_dir, "reviewer"),
+            build_github_review_input_markdown(review_snapshot) if review_snapshot is not None else comment["body"],
+        )
         save_json(
             role_capture_status_path(current_turn_dir, "reviewer"),
-            {"status": "captured", "source": "github_pr_comment"},
+            {"status": "captured", "source": "github_pr_inline_review" if review_snapshot is not None else "github_pr_comment"},
         )
         save_turn_metadata(
             current_turn_dir,
@@ -4674,6 +5624,7 @@ def run_github_codex_review_phase(
             state,
             turn_number,
             request_comment=request_comment,
+            review_snapshot=review_snapshot,
             status=reviewer_status,
             error=error,
             waited_for_reply=waited_for_reply,
@@ -4795,6 +5746,9 @@ def supervisor_loop_from(
                     details={"summary": generator_status["summary"]},
                 )
                 return
+            if state.get("bootstrap_phase") == "fork_to_generator_github_pr":
+                state["bootstrap_phase"] = None
+                save_run_state(run_dir, state)
             record_current_git_state(run_dir, state)
             reviewer_status = run_review_phase(
                 run_dir,
@@ -5058,21 +6012,30 @@ def start_run(args: argparse.Namespace) -> int:
     inspection = ensure_task_workspace_exists(task_root)
     council_config = load_council_config(repo_root)
     generator_fork_session_id, reviewer_fork_session_id = resolve_fork_parent_session_ids(args)
+    explicit_reviewer_fork_session_id = normalize_optional_text(
+        getattr(args, "reviewer_fork_session_id", None),
+        field_name="reviewer fork session id",
+    )
+    if review_mode == "github_pr_codex":
+        if explicit_reviewer_fork_session_id:
+            raise SystemExit(
+                "github_pr_codex review mode does not support reviewer fork bootstrap; use --fork-session-id or --generator-fork-session-id for generator context."
+            )
+        reviewer_fork_session_id = None
     for session_id in (generator_fork_session_id, reviewer_fork_session_id):
         if session_id and not find_codex_session_entry(session_id):
             raise SystemExit(f"unknown fork parent session id: {session_id}")
     fork_enabled = has_any_fork_parent(generator_fork_session_id, reviewer_fork_session_id)
-    if review_mode == "github_pr_codex" and fork_enabled:
-        raise SystemExit("github_pr_codex review mode does not support forked role sessions")
     if review_mode == "github_pr_codex" and not is_git:
         raise SystemExit("github_pr_codex review mode requires a git worktree")
     if not is_git and fork_enabled:
         raise SystemExit("fork start requires a git worktree and cannot be used with --allow-non-git")
-    validate_task_workspace_for_start(task_root, inspection)
+    validate_task_workspace_for_start(task_root, inspection, review_mode=review_mode)
     start_role, bootstrap_phase = determine_start_role(
         inspection=inspection,
         fork_enabled=fork_enabled,
         requested_role=args.start_role,
+        review_mode=review_mode,
     )
     if bootstrap_phase == "fork_to_review" and not reviewer_fork_session_id:
         raise SystemExit(
@@ -5197,7 +6160,8 @@ def reopen_run(args: argparse.Namespace) -> int:
         role_status_path(approved_turn_dir, "reviewer"),
         validate_reviewer_status,
     )
-    validate_task_workspace_for_start(task_root, inspection)
+    previous_review_mode = review_bridge_mode(previous_state)
+    validate_task_workspace_for_start(task_root, inspection, review_mode=previous_review_mode)
     doc_comparison = build_reopen_doc_comparison(approved_turn_dir, task_root)
     reopen_metadata = build_reopen_metadata(
         task_name=task_name,
@@ -5213,6 +6177,7 @@ def reopen_run(args: argparse.Namespace) -> int:
         inspection=inspection,
         fork_enabled=False,
         requested_role="auto",
+        review_mode=previous_review_mode,
     )
     if bootstrap_phase is not None:
         raise SystemExit("reopen does not support fork bootstrap; add local task documents first")
@@ -5885,10 +6850,13 @@ def clone_review_bridge_state_for_new_run(previous_state: dict) -> dict:
             "branch": previous["branch"],
             "branch_source": previous.get("branch_source", "auto"),
             "current_head_started_at": None,
+            "last_consumed_review_body_sha256": None,
+            "last_consumed_review_id": None,
+            "last_consumed_review_submitted_at": None,
+            "last_consumed_review_turn": None,
             "last_consumed_review_comment_body_sha256": None,
             "last_consumed_review_comment_created_at": None,
             "last_consumed_review_comment_id": None,
-            "last_consumed_review_turn": None,
             "last_observed_head_sha": previous.get("last_observed_head_sha"),
             "last_request_comment_created_at": None,
             "last_request_comment_id": None,
@@ -5998,6 +6966,7 @@ def continue_run(args: argparse.Namespace) -> int:
             "ignored_turns": continuation_plan_data["ignored_turns"],
         },
     )
+    ensure_active_role_sessions_ready(run_dir, state)
     supervisor_loop_from(
         run_dir,
         state,

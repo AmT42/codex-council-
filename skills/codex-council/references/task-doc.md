@@ -11,6 +11,10 @@ It is the default brief for:
 - narrow refactors
 - follow-up changes that are not naturally findings-shaped
 
+`github_pr_codex` exception:
+
+- when the operator already has an existing PR and wants the live PR review loop to drive the work, `task.md` can be omitted if the PR plus current-head review findings already provide a concrete brief
+
 ## Writing rules
 
 Keep it short and executable.

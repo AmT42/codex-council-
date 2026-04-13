@@ -12,6 +12,10 @@ Typical triggers:
 - bug-analysis notes
 - a debugging handoff
 
+`github_pr_codex` exception:
+
+- when the findings already live on the PR and the operator is running the GitHub review loop directly, those findings may be materialized into turn-scoped GitHub review input artifacts instead of a canonical `review.md`
+
 ## Writing rules
 
 Under `## Findings`:

@@ -146,12 +146,21 @@ Canonical documents:
 - `AGENTS.md`
   - stable council behavior only, not feature requirements
 
+Optional supporting context:
+
+- `branch_northstar_summary.md`
+  - non-canonical branch/worktree context for `github_pr_codex` or other branch-driven work when the operator wants to preserve the repo northstar without turning it into a task brief
+
 Recommended defaults for outer-agent routing:
 
 - concrete bugfix or targeted implementation
   - `task.md` + `contract.md`
 - findings-driven fix
   - `review.md` + `contract.md`
+- GitHub PR Codex loop on an existing PR
+  - `github_pr_codex` may start without local `task.md`, `review.md`, or `spec.md`
+  - use the PR plus current-head GitHub review findings as the effective brief
+  - add `branch_northstar_summary.md` when the branch/worktree intent needs durable context
 - broad feature or complex design
   - `task.md` + `spec.md` + `contract.md`
 - meta question about the harness
@@ -192,6 +201,7 @@ Use when the user provides review comments, logs, repro notes, or debugging find
 
 - default to `review.md` + `contract.md`
 - add `task.md` only if it materially clarifies the implementation target
+- special case: when using `github_pr_codex` against an existing PR, local `task.md` / `review.md` / `spec.md` may be omitted if the PR and current-head review findings already provide a usable brief
 
 ### 5. Broad feature or spec work
 
@@ -288,12 +298,29 @@ Start the council:
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo
 ```
 
+GitHub PR Codex example:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
+  --dir /path/to/target-repo \
+  --review-mode github_pr_codex \
+  --github-pr https://github.com/acme/repo/pull/123
+```
+
 Inspect or resume later:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --dir /path/to/target-repo
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task --dir /path/to/target-repo
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py reopen my-task --dir /path/to/target-repo --run-id latest --reason-kind false_approved --reason "The approval missed a blocking fallback bug."
+```
+
+GitHub PR Codex recovery example:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task \
+  --dir /path/to/target-repo \
+  --run-id 20260413-155411-90d947
 ```
 
 ## CLI Overview
@@ -327,6 +354,9 @@ The TUI supervisor:
 - keeps `continue` terminal for approved runs and requires explicit `reopen` to supersede them
 - can bootstrap from forked session context when local task docs are missing
 - validates task documents before `start`
+- can start `github_pr_codex` generator-first without local `task.md`, `review.md`, or `spec.md`
+- materializes current-head GitHub review findings into turn-scoped review input artifacts for the generator
+- resumes blocked `github_pr_codex` reviewer turns on the same turn instead of forcing a new turn
 
 `continue` is the intended path after:
 

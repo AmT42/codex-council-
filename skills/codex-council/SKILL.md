@@ -126,6 +126,8 @@ When using `start`, `continue`, or `reopen`, also read [`references/supervisor-l
 - `spec.md` is only for work that needs deeper structure than a short task brief.
 - `contract.md` is the default acceptance and approval checklist for most non-trivial runs.
 - Task-local `AGENTS.md` stays behavioral and stable; do not put task-specific requirements there.
+- `github_pr_codex` special case: when the user already has a PR and wants GitHub Codex to review the live branch, local `task.md` / `review.md` / `spec.md` may be omitted if the PR and current-head review findings already form a usable brief.
+- `branch_northstar_summary.md` is optional supporting context for branch/worktree intent in that PR-driven mode.
 
 Use the corresponding document references before writing:
 

@@ -61,6 +61,21 @@ Before `start`, ensure the docs are strong enough to survive runtime validation.
 
 Default to the current auto role routing.
 
+`github_pr_codex` special case:
+
+- when the user already has a PR and wants GitHub Codex to review the live branch, `start` may proceed without local `task.md`, `review.md`, or `spec.md`
+- in that mode, the PR plus current-head GitHub review findings act as the effective brief
+- `branch_northstar_summary.md` is optional supporting context when the branch/worktree intent needs to be stated explicitly
+
+Example:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
+  --dir /path/to/target-repo \
+  --review-mode github_pr_codex \
+  --github-pr https://github.com/acme/repo/pull/123
+```
+
 Process rule:
 
 - either wait for `start`
@@ -92,6 +107,7 @@ Prefer `continue` over a new run when:
 - the run paused for `needs_human`
 - the reviewer returned `changes_requested`
 - the human edited task docs and wants the same run to proceed
+- the run is blocked in the `github_pr_codex` reviewer bridge and should resume the same reviewer turn
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task --dir /path/to/target-repo
@@ -104,6 +120,11 @@ Process rule:
 - if you will not wait in the foreground, prefer running the `continue` command inside a dedicated `tmux` session
 
 Approved runs are terminal for `continue`.
+
+`github_pr_codex` special case:
+
+- a blocked reviewer bridge should usually resume on the same turn
+- if the latest pushed head has no matching `@codex` request, a correct resume path should post a fresh literal `@codex` rather than reusing an older request from a previous head
 
 ## Reopen
 

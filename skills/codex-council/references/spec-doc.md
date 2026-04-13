@@ -12,6 +12,11 @@ Common triggers:
 - non-obvious validation expectations
 - work that would otherwise need too much detail stuffed into `task.md`
 
+`github_pr_codex` note:
+
+- a PR-driven run can still omit `spec.md` entirely when the PR plus current-head review findings are specific enough
+- add `spec.md` only when the branch/worktree change remains too broad to execute safely from the PR context alone
+
 ## Writing rules
 
 `spec.md` should make complex work executable without becoming a dumping ground.
