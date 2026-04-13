@@ -1179,6 +1179,27 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         assert review_state["reply_comment"] is not None
         self.assertEqual(review_state["reply_comment"]["id"], 10)
 
+    def test_classify_github_pr_review_state_for_current_head_returns_reply_ready_for_terminal_approval_comment(self) -> None:
+        review_state = MODULE.classify_github_pr_review_state_for_current_head(
+            [
+                {
+                    "id": 9,
+                    "created_at": "2026-04-12T00:00:00Z",
+                    "body": "@codex",
+                },
+                {
+                    "id": 10,
+                    "created_at": "2026-04-12T00:10:00Z",
+                    "body": "Codex Review: Didn't find any major issues. Keep it up!\n\nAll good.",
+                },
+            ],
+            current_head_started_at="2026-04-12T00:00:00Z",
+            last_consumed_comment_id=None,
+        )
+        self.assertEqual(review_state["state"], "codex_reply_ready_to_ingest")
+        assert review_state["reply_comment"] is not None
+        self.assertEqual(review_state["reply_comment"]["id"], 10)
+
     def test_classify_github_pr_review_state_for_current_head_keeps_consumed_current_head_reply_ready(self) -> None:
         review_state = MODULE.classify_github_pr_review_state_for_current_head(
             [
@@ -1228,6 +1249,32 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         assert review_state["request_comment"] is not None
         self.assertEqual(review_state["request_comment"]["id"], 10)
 
+    def test_classify_github_pr_review_state_for_current_head_ignores_old_head_terminal_approval_comment(self) -> None:
+        review_state = MODULE.classify_github_pr_review_state_for_current_head(
+            [
+                {
+                    "id": 8,
+                    "created_at": "2026-04-12T00:00:00Z",
+                    "body": "@codex",
+                },
+                {
+                    "id": 9,
+                    "created_at": "2026-04-12T00:05:00Z",
+                    "body": "Codex Review: Didn't find any major issues. Keep it up!\n\nAll good.",
+                },
+                {
+                    "id": 10,
+                    "created_at": "2026-04-12T00:20:00Z",
+                    "body": "@codex",
+                },
+            ],
+            current_head_started_at="2026-04-12T00:20:00Z",
+            last_consumed_comment_id=None,
+        )
+        self.assertEqual(review_state["state"], "waiting_for_codex_reply")
+        assert review_state["request_comment"] is not None
+        self.assertEqual(review_state["request_comment"]["id"], 10)
+
     def test_select_latest_unconsumed_github_codex_review_comment_ignores_consumed_comments(self) -> None:
         comments = [
             {"id": 10, "created_at": "2026-04-12T00:00:00Z", "body": "@codex"},
@@ -1239,6 +1286,22 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             request_comment_id=10,
             request_comment_created_at="2026-04-12T00:00:00Z",
             last_consumed_comment_id=11,
+        )
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected["id"], 12)
+
+    def test_select_latest_unconsumed_github_codex_approved_comment_ignores_non_approved_replies(self) -> None:
+        comments = [
+            {"id": 10, "created_at": "2026-04-12T00:00:00Z", "body": "@codex"},
+            {"id": 11, "created_at": "2026-04-12T00:10:00Z", "body": "Codex Review: Needs one more fix."},
+            {"id": 12, "created_at": "2026-04-12T00:20:00Z", "body": "Codex Review: Didn't find any major issues. Keep it up!\nAll good."},
+        ]
+        selected = MODULE.select_latest_unconsumed_github_codex_approved_comment(
+            comments,
+            request_comment_id=10,
+            request_comment_created_at="2026-04-12T00:00:00Z",
+            last_consumed_comment_id=None,
         )
         self.assertIsNotNone(selected)
         assert selected is not None
@@ -1417,6 +1480,76 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertEqual(result["id"], 202)
             self.assertEqual(sleeps, [600, 30, 30, 30, 30])
             self.assertEqual(state["review_bridge"]["github"]["review_wait"]["poll_count"], 5)
+
+    def test_wait_for_new_github_inline_review_snapshot_returns_approved_snapshot_from_issue_comment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            request_created_at = "2026-04-12T01:00:00Z"
+            now = [MODULE.parse_utc_timestamp(request_created_at)]
+            sleeps: list[float] = []
+
+            def fake_sleep(seconds: float) -> None:
+                sleeps.append(seconds)
+                now[0] += seconds
+
+            state = {
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "last_consumed_review_id": None,
+                        "last_consumed_review_comment_id": None,
+                        "last_request_comment_created_at": request_created_at,
+                        "last_request_comment_id": 101,
+                        "pr_number": 9,
+                        "pr_url": "https://github.com/acme/repo/pull/9",
+                        "repo": "repo",
+                        "repo_owner": "acme",
+                        "review_wait": {
+                            "deadline_at": None,
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": None,
+                            "poll_count": 0,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": None,
+                        },
+                    },
+                },
+            }
+            with mock.patch.object(MODULE.time, "time", side_effect=lambda: now[0]), mock.patch.object(
+                MODULE.time,
+                "sleep",
+                side_effect=fake_sleep,
+            ), mock.patch.object(
+                MODULE,
+                "list_github_pr_issue_comments",
+                return_value=[
+                    {
+                        "id": 202,
+                        "created_at": "2026-04-12T01:10:00Z",
+                        "body": "Codex Review: Didn't find any major issues. Keep it up!\nAll good.",
+                    }
+                ],
+            ), mock.patch.object(
+                MODULE,
+                "list_github_pr_reviews",
+                side_effect=AssertionError("GraphQL reviews should not be needed for terminal approval"),
+            ), mock.patch.object(
+                MODULE,
+                "list_github_pr_review_threads",
+                side_effect=AssertionError("GraphQL threads should not be needed for terminal approval"),
+            ):
+                snapshot = MODULE.wait_for_new_github_inline_review_snapshot(
+                    run_dir,
+                    state,
+                    1,
+                    current_head_sha="deadbeef",
+                    current_head_started_at="2026-04-12T01:00:00Z",
+                    timeout_seconds=1800,
+                )
+            self.assertEqual(snapshot["source"], "issue_comment_approval")
+            self.assertEqual(snapshot["review"]["id"], 202)
+            self.assertEqual(sleeps, [600])
 
     def test_seed_generator_github_review_input_materializes_existing_inline_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1783,6 +1916,91 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("timed out waiting for Codex", reviewer_status["summary"])
             reviewer_message = (turn_dir / "reviewer" / "message.md").read_text(encoding="utf-8")
             self.assertIn("GitHub review bridge failed", reviewer_message)
+
+    def test_run_github_codex_review_phase_approves_from_existing_terminal_issue_comment_without_graphql(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir) / "run"
+            turn_dir = run_dir / "turns" / "0001"
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            state = {
+                "council_config": {"council": {"turn_timeout_seconds": 1800}},
+                "repo_root": str(Path(tmp_dir) / "repo"),
+                "review_bridge": {
+                    "mode": "github_pr_codex",
+                    "github": {
+                        "base_branch": "main",
+                        "branch": "feature/demo",
+                        "current_head_started_at": "2026-04-12T01:00:00Z",
+                        "last_consumed_review_comment_body_sha256": None,
+                        "last_consumed_review_comment_created_at": None,
+                        "last_consumed_review_comment_id": None,
+                        "last_consumed_review_turn": None,
+                        "last_request_comment_created_at": None,
+                        "last_request_comment_id": None,
+                        "last_request_turn": None,
+                        "last_observed_head_sha": "deadbeef",
+                        "pr_created_at": "2026-04-12T00:00:00Z",
+                        "pr_head_sha": "deadbeef",
+                        "pr_number": 9,
+                        "pr_url": "https://github.com/acme/repo/pull/9",
+                        "repo": "repo",
+                        "repo_owner": "acme",
+                        "review_wait": {
+                            "deadline_at": None,
+                            "initial_wait_seconds": MODULE.GITHUB_CODEX_INITIAL_WAIT_SECONDS,
+                            "last_polled_at": None,
+                            "poll_count": 0,
+                            "poll_interval_seconds": MODULE.GITHUB_CODEX_POLL_INTERVAL_SECONDS,
+                            "started_at": None,
+                        },
+                    },
+                },
+                "roles": {"reviewer": {"last_wait_phase": None}},
+                "status": "booting",
+            }
+            with mock.patch.object(
+                MODULE,
+                "ensure_github_pr_ready",
+                return_value={
+                    "number": 9,
+                    "url": "https://github.com/acme/repo/pull/9",
+                    "head_ref_name": "feature/demo",
+                    "base_ref_name": "main",
+                    "head_ref_oid": "deadbeef",
+                    "title": "Fix bug",
+                },
+            ), mock.patch.object(
+                MODULE,
+                "inspect_github_pr_review_state_for_current_head",
+                return_value={
+                    "state": "codex_reply_ready_to_ingest",
+                    "current_head_started_at": "2026-04-12T01:00:00Z",
+                    "request_comment": {
+                        "id": 101,
+                        "created_at": "2026-04-12T01:00:00Z",
+                        "body": "@codex",
+                    },
+                    "reply_comment": {
+                        "id": 202,
+                        "created_at": "2026-04-12T01:04:00Z",
+                        "body": "Codex Review: Didn't find any major issues. Keep it up!\nAll good.",
+                    },
+                    "review_snapshot": None,
+                },
+            ), mock.patch.object(
+                MODULE,
+                "post_github_pr_review_request_comment",
+            ) as post_request, mock.patch.object(
+                MODULE,
+                "wait_for_new_github_inline_review_snapshot",
+            ) as wait_for_snapshot:
+                reviewer_status = MODULE.run_github_codex_review_phase(run_dir, state, task_root, 1, turn_dir)
+            self.assertEqual(reviewer_status["verdict"], "approved")
+            post_request.assert_not_called()
+            wait_for_snapshot.assert_not_called()
+            reviewer_message = (turn_dir / "reviewer" / "message.md").read_text(encoding="utf-8")
+            self.assertIn("Imported Codex review comment ID: `202`", reviewer_message)
 
     def test_run_github_codex_review_phase_imports_existing_current_head_reply_without_waiting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

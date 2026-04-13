@@ -4315,6 +4315,10 @@ def is_github_codex_review_comment(body: str) -> bool:
     return body.lstrip().startswith(GITHUB_CODEX_REVIEW_PREFIX)
 
 
+def is_github_codex_approved_comment(body: str) -> bool:
+    return body.startswith(GITHUB_CODEX_APPROVED_PREFIX)
+
+
 def normalize_github_issue_comment(comment: dict) -> dict | None:
     comment_id = comment.get("id")
     body = comment.get("body")
@@ -4461,6 +4465,36 @@ def classify_github_pr_review_state_for_current_head(
     }
 
 
+def build_github_approved_snapshot_from_comment(
+    comment: dict,
+    *,
+    current_head_sha: str,
+    current_head_started_at: str | None,
+    pr_number: int,
+    pr_url: str | None,
+    request_comment_created_at: str | None,
+) -> dict:
+    return {
+        "source": "issue_comment_approval",
+        "active_threads": [],
+        "blocking_issues": [],
+        "current_head_sha": current_head_sha,
+        "current_head_started_at": current_head_started_at,
+        "pr_number": pr_number,
+        "pr_url": pr_url,
+        "request_comment_created_at": request_comment_created_at,
+        "review": {
+            "author_login": None,
+            "body": comment["body"],
+            "commit_oid": current_head_sha,
+            "id": comment["id"],
+            "state": "APPROVED",
+            "submitted_at": comment["created_at"],
+            "submitted_at_epoch": comment["created_at_epoch"],
+        },
+    }
+
+
 def adopt_github_review_request_comment(github_state: dict, turn_number: int, request_comment: dict | None) -> None:
     if request_comment is None:
         github_state["last_request_comment_created_at"] = None
@@ -4568,31 +4602,52 @@ def inspect_github_pr_review_state_for_current_head(
         current_head_started_at=current_head_started_at,
     )
     github_state["current_head_started_at"] = current_head_started_at
-    latest_request = classify_github_pr_review_state_for_current_head(
+    issue_review_state = classify_github_pr_review_state_for_current_head(
         comments,
         current_head_started_at=current_head_started_at,
         last_consumed_comment_id=None,
         review_snapshot=None,
-    )["request_comment"]
-    review_snapshot = build_github_inline_review_snapshot(
-        list_github_pr_reviews(
-            repo_root,
-            owner=github_state["repo_owner"],
-            repo=github_state["repo"],
-            pr_number=pr_number,
-        ),
-        list_github_pr_review_threads(
-            repo_root,
-            owner=github_state["repo_owner"],
-            repo=github_state["repo"],
-            pr_number=pr_number,
-        ),
-        current_head_sha=current_head_sha,
-        current_head_started_at=current_head_started_at,
-        pr_number=pr_number,
-        pr_url=github_state.get("pr_url"),
-        request_comment_created_at=latest_request["created_at"] if isinstance(latest_request, dict) else None,
     )
+    latest_request = issue_review_state["request_comment"]
+    latest_reply = issue_review_state["reply_comment"]
+    if isinstance(latest_reply, dict) and is_github_codex_approved_comment(latest_reply["body"]):
+        adopt_github_review_request_comment(
+            github_state,
+            turn_number,
+            latest_request,
+        )
+        save_run_state(run_dir, state)
+        return issue_review_state
+    try:
+        review_snapshot = build_github_inline_review_snapshot(
+            list_github_pr_reviews(
+                repo_root,
+                owner=github_state["repo_owner"],
+                repo=github_state["repo"],
+                pr_number=pr_number,
+            ),
+            list_github_pr_review_threads(
+                repo_root,
+                owner=github_state["repo_owner"],
+                repo=github_state["repo"],
+                pr_number=pr_number,
+            ),
+            current_head_sha=current_head_sha,
+            current_head_started_at=current_head_started_at,
+            pr_number=pr_number,
+            pr_url=github_state.get("pr_url"),
+            request_comment_created_at=latest_request["created_at"] if isinstance(latest_request, dict) else None,
+        )
+    except SupervisorRuntimeError:
+        if isinstance(latest_reply, dict) and is_github_codex_approved_comment(latest_reply["body"]):
+            adopt_github_review_request_comment(
+                github_state,
+                turn_number,
+                latest_request,
+            )
+            save_run_state(run_dir, state)
+            return issue_review_state
+        raise
     review_state = classify_github_pr_review_state_for_current_head(
         comments,
         current_head_started_at=current_head_started_at,
@@ -4669,6 +4724,40 @@ def select_latest_unconsumed_github_codex_review_comment(
     if not candidates:
         return None
     candidates.sort(key=lambda item: (item.get("created_at", ""), item.get("id", 0)))
+    return candidates[-1]
+
+
+def select_latest_unconsumed_github_codex_approved_comment(
+    comments: list[dict],
+    *,
+    request_comment_id: int | None,
+    request_comment_created_at: str | None,
+    last_consumed_comment_id: int | None,
+    latest_allowed_created_at: str | None = None,
+) -> dict | None:
+    candidates: list[dict] = []
+    latest_allowed_created_at_epoch = parse_utc_timestamp(latest_allowed_created_at)
+    for comment in comments:
+        normalized = normalize_github_issue_comment(comment)
+        if normalized is None:
+            continue
+        if request_comment_id is not None and normalized["id"] <= request_comment_id:
+            continue
+        if last_consumed_comment_id is not None and normalized["id"] == last_consumed_comment_id:
+            continue
+        if request_comment_created_at and normalized["created_at"] < request_comment_created_at:
+            continue
+        if (
+            latest_allowed_created_at_epoch is not None
+            and normalized["created_at_epoch"] > latest_allowed_created_at_epoch
+        ):
+            continue
+        if not is_github_codex_approved_comment(normalized["body"]):
+            continue
+        candidates.append(normalized)
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item["created_at"], item["id"]))
     return candidates[-1]
 
 
@@ -4897,27 +4986,70 @@ def wait_for_new_github_inline_review_snapshot(
         wait_state["last_polled_at"] = ts_from_epoch(polled_at)
         wait_state["poll_count"] = int(wait_state.get("poll_count", 0)) + 1
         save_run_state(run_dir, state)
-        snapshot = build_github_inline_review_snapshot(
-            list_github_pr_reviews(
-                repo_root,
-                owner=github_state["repo_owner"],
-                repo=github_state["repo"],
-                pr_number=pr_number,
-            ),
-            list_github_pr_review_threads(
-                repo_root,
-                owner=github_state["repo_owner"],
-                repo=github_state["repo"],
-                pr_number=pr_number,
-            ),
-            current_head_sha=current_head_sha,
-            current_head_started_at=current_head_started_at,
+        issue_comments = list_github_pr_issue_comments(
+            repo_root,
+            owner=github_state["repo_owner"],
+            repo=github_state["repo"],
             pr_number=pr_number,
-            pr_url=github_state.get("pr_url"),
+        )
+        approval_comment = select_latest_unconsumed_github_codex_approved_comment(
+            issue_comments,
+            request_comment_id=request_comment_id,
             request_comment_created_at=request_comment_created_at,
-            last_consumed_review_id=last_consumed_github_review_id(github_state),
+            last_consumed_comment_id=github_state.get("last_consumed_review_comment_id"),
             latest_allowed_created_at=wait_state.get("deadline_at"),
         )
+        if approval_comment is not None:
+            record_consumed_github_codex_review_comment(run_dir, state, turn_number, approval_comment)
+            return build_github_approved_snapshot_from_comment(
+                approval_comment,
+                current_head_sha=current_head_sha,
+                current_head_started_at=current_head_started_at,
+                pr_number=pr_number,
+                pr_url=github_state.get("pr_url"),
+                request_comment_created_at=request_comment_created_at,
+            )
+        try:
+            snapshot = build_github_inline_review_snapshot(
+                list_github_pr_reviews(
+                    repo_root,
+                    owner=github_state["repo_owner"],
+                    repo=github_state["repo"],
+                    pr_number=pr_number,
+                ),
+                list_github_pr_review_threads(
+                    repo_root,
+                    owner=github_state["repo_owner"],
+                    repo=github_state["repo"],
+                    pr_number=pr_number,
+                ),
+                current_head_sha=current_head_sha,
+                current_head_started_at=current_head_started_at,
+                pr_number=pr_number,
+                pr_url=github_state.get("pr_url"),
+                request_comment_created_at=request_comment_created_at,
+                last_consumed_review_id=last_consumed_github_review_id(github_state),
+                latest_allowed_created_at=wait_state.get("deadline_at"),
+            )
+        except SupervisorRuntimeError:
+            approval_comment = select_latest_unconsumed_github_codex_approved_comment(
+                issue_comments,
+                request_comment_id=request_comment_id,
+                request_comment_created_at=request_comment_created_at,
+                last_consumed_comment_id=github_state.get("last_consumed_review_comment_id"),
+                latest_allowed_created_at=wait_state.get("deadline_at"),
+            )
+            if approval_comment is not None:
+                record_consumed_github_codex_review_comment(run_dir, state, turn_number, approval_comment)
+                return build_github_approved_snapshot_from_comment(
+                    approval_comment,
+                    current_head_sha=current_head_sha,
+                    current_head_started_at=current_head_started_at,
+                    pr_number=pr_number,
+                    pr_url=github_state.get("pr_url"),
+                    request_comment_created_at=request_comment_created_at,
+                )
+            raise
         if snapshot is not None:
             record_consumed_github_codex_review_snapshot(run_dir, state, turn_number, snapshot)
             return snapshot
@@ -5007,7 +5139,10 @@ def build_github_reviewer_message(
     if request_comment is not None:
         lines.append(f"- Review request comment ID: `{request_comment['id']}`")
     if review_snapshot is not None:
-        lines.append(f"- Imported GitHub review ID: `{review_snapshot['review']['id']}`")
+        if review_snapshot.get("source") == "issue_comment_approval":
+            lines.append(f"- Imported Codex review comment ID: `{review_snapshot['review']['id']}`")
+        else:
+            lines.append(f"- Imported GitHub review ID: `{review_snapshot['review']['id']}`")
     if comment is not None:
         lines.append(f"- Imported Codex review comment ID: `{comment['id']}`")
     if status["blocking_issues"]:
@@ -5583,10 +5718,11 @@ def run_github_codex_review_phase(
                 reuse_existing_request=False,
             )
         if review_snapshot is not None:
-            write_github_review_input_artifacts(run_dir, task_root, current_turn_dir, review_snapshot)
             reviewer_status = validate_reviewer_status(
                 github_reviewer_status_from_snapshot(review_snapshot, reviewed_commit_sha)
             )
+            if reviewer_status["verdict"] == "changes_requested":
+                write_github_review_input_artifacts(run_dir, task_root, current_turn_dir, review_snapshot)
         else:
             reviewer_status = validate_reviewer_status(
                 github_reviewer_status_from_comment(comment["body"], reviewed_commit_sha)
