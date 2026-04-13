@@ -187,7 +187,7 @@ TURN_METADATA_AUDIT_KEYS = (
 GITHUB_CODEX_REVIEW_PREFIX = "Codex Review:"
 GITHUB_CODEX_APPROVED_PREFIX = "Codex Review: Didn't find any major issues. Keep it up!"
 GITHUB_CODEX_INITIAL_WAIT_SECONDS = 600
-GITHUB_CODEX_POLL_INTERVAL_SECONDS = 300
+GITHUB_CODEX_POLL_INTERVAL_SECONDS = 30
 DEFAULT_GITHUB_PR_BASE_BRANCH = "staging"
 GITHUB_PR_REVIEW_THREADS_QUERY = textwrap.dedent(
     """\
@@ -2293,6 +2293,13 @@ def format_review_dimensions_block() -> str:
         f"- [pass|fail|uncertain] {item['label']}"
         for item in load_critical_review_dimensions()
     )
+
+
+def format_duration_label(seconds: int) -> str:
+    if seconds % 60 == 0:
+        minutes = seconds // 60
+        return f"{minutes} minute" if minutes == 1 else f"{minutes} minutes"
+    return f"{seconds} second" if seconds == 1 else f"{seconds} seconds"
 
 
 def format_doc_paths_block(task_root: Path, inspection: dict, role: str) -> str:
@@ -5030,7 +5037,7 @@ def build_github_reviewer_message(
             )
         if waited_for_reply:
             lines.append(
-                f"- Waited {GITHUB_CODEX_INITIAL_WAIT_SECONDS // 60} minutes, then polled every {GITHUB_CODEX_POLL_INTERVAL_SECONDS // 60} minutes for new GitHub Codex review findings."
+                f"- Waited {format_duration_label(GITHUB_CODEX_INITIAL_WAIT_SECONDS)}, then polled every {format_duration_label(GITHUB_CODEX_POLL_INTERVAL_SECONDS)} for new GitHub Codex review findings."
             )
     elif review_snapshot is not None:
         lines.append("- Imported already-present GitHub inline review findings for the current pushed head without posting a new request.")

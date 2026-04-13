@@ -1298,7 +1298,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                     timeout_seconds=1800,
                 )
             self.assertEqual(result["id"], 202)
-            self.assertEqual(sleeps, [600, 300])
+            self.assertEqual(sleeps, [600, 30])
             self.assertEqual(state["review_bridge"]["github"]["review_wait"]["poll_count"], 2)
 
     def test_wait_for_new_github_codex_review_comment_reuses_existing_request_without_restarting_initial_wait(self) -> None:
@@ -1415,7 +1415,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                     timeout_seconds=1800,
                 )
             self.assertEqual(result["id"], 202)
-            self.assertEqual(sleeps, [600, 300, 300, 300, 300])
+            self.assertEqual(sleeps, [600, 30, 30, 30, 30])
             self.assertEqual(state["review_bridge"]["github"]["review_wait"]["poll_count"], 5)
 
     def test_seed_generator_github_review_input_materializes_existing_inline_findings(self) -> None:
@@ -1706,6 +1706,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertEqual(saved_status["verdict"], "approved")
             reviewer_message = (turn_dir / "reviewer" / "message.md").read_text(encoding="utf-8")
             self.assertIn("Didn't find any major issues", reviewer_message)
+            self.assertIn("polled every 30 seconds", reviewer_message)
 
     def test_run_github_codex_review_phase_surfaces_timeout_as_blocked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
