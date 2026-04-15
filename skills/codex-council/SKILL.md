@@ -70,6 +70,7 @@ Then load only the references needed for the chosen route:
 - Prefer `status` + `continue` over restarting a healthy paused run, but use `reopen` when an approved run must be superseded explicitly.
 - Do not pass vague user wording directly into the council docs.
 - Do not do the target-repo implementation work yourself when the harness is the requested tool.
+- For broad/spec-driven work, do not stop at architecture shape. Write a **decision-complete** `spec.md` that covers the relevant runtime, state, fallback, performance, and validation consequences so the generator does not need to invent policy.
 - Do not launch `start`, `continue`, or `reopen` and then abandon the supervisor process.
 - This is a process-lifetime rule, not a special built-in Codex background feature.
 - A plain foreground command is fine only when you will stay attached and wait for the supervisor.
@@ -99,6 +100,7 @@ Instead:
 - extract the real engineering problem
 - write stronger docs than the user could have written directly
 - escalate to `spec.md` when needed
+- when using `spec.md`, cover not just what is being built, but the relevant source-of-truth, read/write flow, failure/fallback, runtime cost, integrity/concurrency, and observability decisions unless they are explicitly not applicable
 
 Use [`references/novice-normalization.md`](./references/novice-normalization.md) before handling vague or under-specified requests.
 

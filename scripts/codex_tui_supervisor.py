@@ -116,6 +116,15 @@ SPEC_REQUIRED_HEADINGS = (
     "## Validation Expectations",
     "## Open Questions",
 )
+SPEC_DECISION_REQUIRED_HEADINGS = (
+    "### Source of Truth / Ownership",
+    "### Read Path",
+    "### Write Path / Mutation Flow",
+    "### Runtime / Performance Expectations",
+    "### Failure / Fallback / Degraded Behavior",
+    "### State / Integrity / Concurrency Invariants",
+    "### Observability / Validation Hooks",
+)
 TASK_VAGUE_WORDS = ("production-ready", "production ready", "scalable", "viral", "enterprise", "best-in-class")
 GENERIC_SUCCESS_SIGNAL_PHRASES = (
     "works",
@@ -142,6 +151,17 @@ CONTRACT_VAGUE_PHRASES = TASK_VAGUE_WORDS + (
     "better",
     "clean up",
 )
+SPEC_NON_DECISION_PHRASES = (
+    "implementation defined",
+    "to be decided",
+    "decide during implementation",
+    "left to implementation",
+    "as appropriate",
+    "handle edge cases appropriately",
+    "reuse existing infrastructure as appropriate",
+    "use best judgment",
+)
+SPEC_NA_PREFIX = "not applicable because"
 VERIFICATION_HINT_WORDS = (
     "test",
     "tests",
@@ -156,6 +176,44 @@ VERIFICATION_HINT_WORDS = (
     "screenshot",
     "typecheck",
     "lint",
+)
+REVIEWER_RISK_HINT_WORDS = (
+    "state",
+    "metadata",
+    "cache",
+    "checkpoint",
+    "fallback",
+    "degraded",
+    "health",
+    "retry",
+    "silent",
+    "persistence",
+    "migration",
+    "concurrency",
+    "authorization",
+    "auth",
+    "protocol",
+    "performance",
+    "runtime",
+)
+INTEGRITY_HINT_WORDS = (
+    "regression",
+    "integrity",
+    "fallback",
+    "degrade",
+    "state",
+    "metadata",
+    "cache",
+    "checkpoint",
+    "idempot",
+    "duplicate",
+    "data loss",
+    "backward compat",
+    "compatibility",
+    "auth",
+    "authorization",
+    "scope",
+    "concurrency",
 )
 BROAD_TASK_HINT_WORDS = (
     "build",
@@ -1082,6 +1140,26 @@ def extract_markdown_section(text: str, heading: str) -> str:
     return "\n".join(collected).strip()
 
 
+def extract_markdown_subsection(text: str, heading: str) -> str:
+    lines = text.splitlines()
+    capture = False
+    collected: list[str] = []
+    heading_level = len(heading) - len(heading.lstrip("#"))
+    for line in lines:
+        stripped = line.strip()
+        if stripped == heading:
+            capture = True
+            collected = []
+            continue
+        if capture and stripped.startswith("#"):
+            line_level = len(stripped) - len(stripped.lstrip("#"))
+            if line_level <= heading_level:
+                break
+        if capture:
+            collected.append(line)
+    return "\n".join(collected).strip()
+
+
 def strip_checklist_prefix(line: str) -> str:
     return re.sub(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s*", "", line).strip()
 
@@ -1092,6 +1170,22 @@ def strip_bullet_prefix(line: str) -> str:
 
 def section_contains_placeholder(section_text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in section_text for marker in markers)
+
+
+def section_has_explicit_na_reason(section_text: str) -> bool:
+    normalized = normalize_text(section_text)
+    return normalize_text(SPEC_NA_PREFIX) in normalized and meaningful_word_count(section_text) >= 4
+
+
+def section_has_decision_complete_content(section_text: str, *, minimum_words: int) -> bool:
+    if section_has_explicit_na_reason(section_text):
+        return True
+    if meaningful_word_count(section_text) < minimum_words:
+        return False
+    lowered = section_text.lower()
+    if contains_any_phrase(lowered, SPEC_NON_DECISION_PHRASES):
+        return False
+    return True
 
 
 def task_brief_requires_spec(task_text: str) -> bool:
@@ -1194,6 +1288,15 @@ def lint_spec_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]
         section_text = extract_markdown_section(spec_text, heading)
         if meaningful_word_count(section_text) < 2:
             warnings.append(f"{SPEC_FILENAME} should make `{heading}` more explicit for safe execution")
+    for heading in SPEC_DECISION_REQUIRED_HEADINGS:
+        subsection_text = extract_markdown_subsection(spec_text, heading)
+        if not subsection_text:
+            errors.append(f"{SPEC_FILENAME} is missing required decision-completeness subsection: {heading}")
+            continue
+        if not section_has_decision_complete_content(subsection_text, minimum_words=5):
+            errors.append(
+                f"{SPEC_FILENAME} must make `{heading}` decision-complete or explicitly mark it `Not applicable because ...`"
+            )
     lowered_spec = spec_text.lower()
     for vague_word in TASK_VAGUE_WORDS:
         if vague_word in lowered_spec:
@@ -1227,6 +1330,33 @@ def lint_contract_workspace_readiness(task_root: Path) -> tuple[list[str], list[
     if normalized_items and not any(not contains_any_phrase(item, VERIFICATION_HINT_WORDS) for item in normalized_items):
         warnings.append(
             f"{CONTRACT_FILENAME} should usually include at least one behavior or integrity item in addition to verification"
+        )
+    return errors, warnings
+
+
+def lint_broad_spec_contract_alignment(task_root: Path) -> tuple[list[str], list[str]]:
+    contract_text = (task_root / CONTRACT_FILENAME).read_text(encoding="utf-8")
+    checklist_items = [strip_checklist_prefix(item) for item in contract_checklist_items(contract_text)]
+    errors: list[str] = []
+    warnings: list[str] = []
+    if not checklist_items:
+        return errors, warnings
+    has_verification = any(contains_any_phrase(item, VERIFICATION_HINT_WORDS) for item in checklist_items)
+    has_integrity_guardrail = any(contains_any_phrase(item, INTEGRITY_HINT_WORDS) for item in checklist_items)
+    has_behavior_outcome = any(
+        not contains_any_phrase(item, VERIFICATION_HINT_WORDS) for item in checklist_items
+    )
+    if not has_verification:
+        errors.append(
+            f"{CONTRACT_FILENAME} for spec-driven work must include at least one explicit verification item"
+        )
+    if not has_integrity_guardrail:
+        errors.append(
+            f"{CONTRACT_FILENAME} for spec-driven work must include at least one regression, integrity, fallback, or state guardrail"
+        )
+    if not has_behavior_outcome:
+        errors.append(
+            f"{CONTRACT_FILENAME} for spec-driven work must include at least one concrete behavior or outcome item"
         )
     return errors, warnings
 
@@ -2554,12 +2684,68 @@ def format_generator_message_requirements_block(
     return "\n".join(lines).rstrip()
 
 
-def format_reviewer_focus_block(inspection: dict) -> str:
+def _optional_doc_text(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
+def reviewer_posture_for_task_root(task_root: Path, inspection: dict, state: dict) -> str:
+    if inspection["doc_paths"]["spec"] is not None:
+        return "forensic"
+    reopen = state.get("reopen")
+    if isinstance(reopen, dict):
+        return "forensic"
+    combined = "\n".join(
+        text
+        for text in (
+            _optional_doc_text(inspection["doc_paths"].get("task")),
+            _optional_doc_text(inspection["doc_paths"].get("review")),
+        )
+        if text
+    )
+    if combined and contains_any_phrase(combined, REVIEWER_RISK_HINT_WORDS):
+        return "deep"
+    if inspection["doc_paths"]["review"] is not None:
+        return "deep"
+    return "standard"
+
+
+def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict) -> str:
     has_task = inspection["doc_paths"]["task"] is not None
     has_review = inspection["doc_paths"]["review"] is not None
     has_spec = inspection["doc_paths"]["spec"] is not None
     has_contract = inspection["doc_paths"]["contract"] is not None
+    posture = reviewer_posture_for_task_root(task_root, inspection, state)
     lines = ["Review the current repository state and the generator artifacts carefully."]
+    if posture == "forensic":
+        lines.extend(
+            [
+                "Reviewer posture: forensic.",
+                "Start by deeply reading the changed code and reconstructing the real execution model before looking at tests or checklist satisfaction.",
+                "Trace the relevant read path, write path, fallback or degraded path, and downstream readers or consumers for the changed behavior.",
+                "Treat passing tests as supporting evidence only; they are not the primary proof that the implementation is correct or production-safe.",
+                "Perform at least one falsification attempt on the riskiest invariant even if the provided verification is green.",
+                "You may edit repo-tracked files only to add or tighten tests or fixtures when that is necessary to falsify or confirm a risky invariant. Do not edit production code.",
+            ]
+        )
+    elif posture == "deep":
+        lines.extend(
+            [
+                "Reviewer posture: deep.",
+                "Read the changed code before treating tests or checklist satisfaction as evidence of correctness.",
+                "Inspect at least one downstream reader, consumer, or fallback path relevant to the changed behavior.",
+                "Treat passing tests as supporting evidence, not as sufficient proof by themselves.",
+                "You may edit repo-tracked files only to add or tighten tests or fixtures when that materially improves the review evidence. Do not edit production code.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "Reviewer posture: standard.",
+                "Read the changed code and verify the key behavior directly; do not rely on tests alone.",
+            ]
+        )
     if has_review:
         lines.extend(
             [
@@ -2574,19 +2760,21 @@ def format_reviewer_focus_block(inspection: dict) -> str:
     elif has_task:
         lines.append("Verify the implementation matches the brief in `task.md`.")
     if has_contract:
-        lines.append("Treat `contract.md` as an objective approval bar. Approval is invalid if the relevant checklist items are not satisfied.")
+        lines.append("Treat `contract.md` as an objective approval bar, but only after you have independently audited the changed code and failure behavior. Contract satisfaction does not excuse weak code, silent regressions, or hidden operational risk.")
     lines.extend(
         [
             "Focus on correctness, unintended behavior, regressions, state integrity, maintainability, test adequacy, tech debt, and unnecessary complexity.",
             "Look for fragile changes that are likely to cause future errors.",
+            "If the implementation is logically correct but introduces avoidable complexity, fragile coupling, hidden debt, or weaker operational behavior than necessary, treat that as a real review issue rather than letting tests dominate the verdict.",
         ]
     )
     return "\n".join(lines).rstrip()
 
 
-def format_reviewer_message_requirements_block(inspection: dict) -> str:
+def format_reviewer_message_requirements_block(task_root: Path, inspection: dict, state: dict) -> str:
     has_review = inspection["doc_paths"]["review"] is not None
     has_contract = inspection["doc_paths"]["contract"] is not None
+    posture = reviewer_posture_for_task_root(task_root, inspection, state)
     lines = ["- Verdict summary"]
     if has_review:
         lines.append("- Disagreement Adjudication")
@@ -2597,10 +2785,17 @@ def format_reviewer_message_requirements_block(inspection: dict) -> str:
             "- Critical review dimensions, using `[pass]`, `[fail]`, or `[uncertain]`, one line for each of:",
             format_review_dimensions_block(),
             "- Blocking issues",
+            "- Code paths inspected",
+            "- Downstream readers / consumers / fallback paths checked",
+            "- Falsification attempts performed",
+            "- Verification reviewed",
+            "- Reviewer-authored tests or fixtures, if any, and why they were needed",
             "- Independent verification performed",
             "- Residual risks or follow-up notes",
         ]
     )
+    if posture in {"deep", "forensic"}:
+        lines.append("- Whether passing tests were contradicted by deeper code inspection, and if so how")
     return "\n".join(lines).rstrip()
 
 
@@ -2768,8 +2963,8 @@ def build_reviewer_turn_prompt(
         "reopen_context_block": format_reopen_context_block(state),
         "fork_context_block": fork_context_block,
         "docs_to_read_block": docs_to_read_block,
-        "reviewer_focus_block": format_reviewer_focus_block(inspection),
-        "reviewer_message_requirements_block": format_reviewer_message_requirements_block(inspection),
+        "reviewer_focus_block": format_reviewer_focus_block(task_root, inspection, state),
+        "reviewer_message_requirements_block": format_reviewer_message_requirements_block(task_root, inspection, state),
         "bootstrap_review_block": bootstrap_review_block,
         "generator_message_path": str(role_message_path(turn_dir, "generator")),
         "generator_status_path": str(role_status_path(turn_dir, "generator")),
@@ -3196,6 +3391,10 @@ def validate_task_workspace_for_start(task_root: Path, inspection: dict, *, revi
         contract_errors, contract_warnings = lint_contract_workspace_readiness(task_root)
         errors.extend(contract_errors)
         warnings.extend(contract_warnings)
+        if inspection["doc_paths"]["spec"] is not None:
+            broad_contract_errors, broad_contract_warnings = lint_broad_spec_contract_alignment(task_root)
+            errors.extend(broad_contract_errors)
+            warnings.extend(broad_contract_warnings)
     if inspection["doc_paths"]["spec"] is not None and inspection["doc_paths"]["contract"] is None:
         errors.append(f"{SPEC_FILENAME} should be paired with {CONTRACT_FILENAME} so approval stays auditable")
     elif inspection["doc_paths"]["contract"] is None and inspection["present_docs"]:

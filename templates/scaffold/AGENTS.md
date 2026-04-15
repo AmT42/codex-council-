@@ -29,6 +29,9 @@ This task is handled by a two-agent council:
 - If `review.md` is present, generator must explicitly classify each review point as `agree`, `disagree`, or `uncertain` before acting.
 - Reviewer must adjudicate generator disagreements with evidence and must not keep repeating the same blocker without stronger evidence.
 - If `contract.md` is present, reviewer approves only when the checklist is satisfied and all critical review dimensions pass.
+- For broad/spec-driven work, `spec.md` should be decision-complete for the relevant runtime/state/fallback/integrity dimensions. Missing implementation-critical policy is a document-quality blocker, not something the council should quietly invent.
+- The reviewer should start from the changed code and failure behavior, not from test results alone. Passing tests are supporting evidence, not sufficient proof of correctness.
+- The reviewer may strengthen tests or fixtures when needed to improve review evidence, but should not directly patch production code.
 
 ## Human intervention rule
 - If the task documents, this brief, or the role-specific instructions conflict or are too ambiguous to continue safely, stop and emit `needs_human`.

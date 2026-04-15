@@ -368,11 +368,67 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
             (task_root / MODULE.SPEC_FILENAME).write_text(
-                "# Spec\n\n## Goal\n\nBuild dashboard\n\n## User Outcome\n\nUsers can use it.\n\n## In Scope\n\n- dashboard\n\n## Out of Scope\n\n- none\n\n## Constraints\n\n- keep API\n\n## Existing Context\n\nThere is an existing billing page.\n\n## Desired Behavior\n\nWorks.\n\n## Technical Boundaries\n\n- keep routes stable\n\n## Validation Expectations\n\nTests.\n\n## Open Questions\n\n- none\n",
+                "# Spec\n\n## Goal\n\nBuild dashboard\n\n## User Outcome\n\nUsers can use it.\n\n## In Scope\n\n- dashboard\n\n## Out of Scope\n\n- none\n\n## Constraints\n\n- keep API\n\n## Existing Context\n\nThere is an existing billing page.\n\n## Desired Behavior\n\nWorks.\n\n### Source of Truth / Ownership\n\nExisting billing state.\n\n### Read Path\n\nUse existing queries.\n\n### Write Path / Mutation Flow\n\nNot applicable because the page is read-only.\n\n### Runtime / Performance Expectations\n\nFast enough.\n\n### Failure / Fallback / Degraded Behavior\n\nHandle errors appropriately.\n\n### State / Integrity / Concurrency Invariants\n\nKeep it consistent.\n\n### Observability / Validation Hooks\n\nTests.\n\n## Technical Boundaries\n\n- keep routes stable\n\n## Validation Expectations\n\nTests.\n\n## Open Questions\n\n- none\n",
                 encoding="utf-8",
             )
             errors, _ = MODULE.lint_spec_workspace_readiness(task_root)
-            self.assertTrue(any("`## Desired Behavior`" in item for item in errors))
+            self.assertTrue(any("decision-complete" in item for item in errors))
+
+    def test_lint_spec_requires_decision_complete_subsections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n"
+                "## Goal\n\nImplement a memory system.\n\n"
+                "## User Outcome\n\nOperators can rely on durable memory and recall.\n\n"
+                "## In Scope\n\n- Memory runtime\n\n"
+                "## Out of Scope\n\n- UI redesign\n\n"
+                "## Constraints\n\n- Preserve the current database backend.\n\n"
+                "## Existing Context\n\nThe repo already persists canonical events.\n\n"
+                "## Desired Behavior\n\nThe system should support memory and recall.\n\n"
+                "### Source of Truth / Ownership\n\nconversation events are involved.\n\n"
+                "### Read Path\n\nimplementation defined.\n\n"
+                "### Write Path / Mutation Flow\n\nas appropriate.\n\n"
+                "### Runtime / Performance Expectations\n\nhandle edge cases appropriately.\n\n"
+                "### Failure / Fallback / Degraded Behavior\n\nreuse existing infrastructure as appropriate.\n\n"
+                "### State / Integrity / Concurrency Invariants\n\nleft to implementation.\n\n"
+                "### Observability / Validation Hooks\n\nuse best judgment.\n\n"
+                "## Technical Boundaries\n\n- Existing interfaces stay stable.\n\n"
+                "## Validation Expectations\n\nRelevant validation is required.\n\n"
+                "## Open Questions\n\n- None.\n",
+                encoding="utf-8",
+            )
+            errors, _ = MODULE.lint_spec_workspace_readiness(task_root)
+            self.assertTrue(any("decision-complete" in item for item in errors))
+
+    def test_lint_spec_accepts_explicit_not_applicable_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n"
+                "## Goal\n\nImplement a read-only reporting dashboard.\n\n"
+                "## User Outcome\n\nOperators can inspect dashboard state safely.\n\n"
+                "## In Scope\n\n- Reporting page\n\n"
+                "## Out of Scope\n\n- Data mutation\n\n"
+                "## Constraints\n\n- Preserve auth boundaries.\n\n"
+                "## Existing Context\n\nThe repo already has billing read models.\n\n"
+                "## Desired Behavior\n\nThe page shows billing status and retry health.\n\n"
+                "### Source of Truth / Ownership\n\nExisting billing tables remain authoritative and the dashboard does not create a new state store.\n\n"
+                "### Read Path\n\nRead through the current billing service and repository path.\n\n"
+                "### Write Path / Mutation Flow\n\nNot applicable because this dashboard is read-only and must not mutate billing state.\n\n"
+                "### Runtime / Performance Expectations\n\nAvoid N+1 queries and keep the existing request path.\n\n"
+                "### Failure / Fallback / Degraded Behavior\n\nIf retry-state data is unavailable, show the main dashboard and render a degraded retry panel.\n\n"
+                "### State / Integrity / Concurrency Invariants\n\nThe page must not change invoice semantics or auth behavior.\n\n"
+                "### Observability / Validation Hooks\n\nTests must cover both the main path and degraded retry-state rendering.\n\n"
+                "## Technical Boundaries\n\n- Keep current routes stable.\n\n"
+                "## Validation Expectations\n\nAutomated and manual checks should cover the changed behavior.\n\n"
+                "## Open Questions\n\n- None.\n",
+                encoding="utf-8",
+            )
+            errors, _ = MODULE.lint_spec_workspace_readiness(task_root)
+            self.assertEqual(errors, [])
 
     def test_lint_contract_rejects_vague_items_and_warns_without_verification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -385,6 +441,24 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             errors, warnings = MODULE.lint_contract_workspace_readiness(task_root)
             self.assertTrue(any("too vague or aspirational" in item for item in errors))
             self.assertTrue(any("verification item" in item for item in warnings))
+
+    def test_validate_start_rejects_spec_contract_without_integrity_guardrail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            brief_root = FIXTURES_ROOT / "brief_quality"
+            (task_root / MODULE.TASK_FILENAME).write_text((brief_root / "good_task.md").read_text(encoding="utf-8"), encoding="utf-8")
+            (task_root / MODULE.SPEC_FILENAME).write_text((brief_root / "good_spec.md").read_text(encoding="utf-8"), encoding="utf-8")
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n"
+                "- [ ] Finance operators can inspect billing health from one dashboard.\n"
+                "- [ ] Relevant automated verification for the changed behavior is present and passing.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as exc:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("regression, integrity, fallback, or state guardrail", str(exc.exception))
 
     def test_validate_start_rejects_broad_task_without_spec(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -551,6 +625,68 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("Contract checklist copied from `contract.md`", prompt)
             self.assertIn("Disagreement Adjudication", prompt)
             self.assertIn("Do not repeat the same blocker without stronger evidence", prompt)
+            self.assertIn("Code paths inspected", prompt)
+            self.assertIn("Verification reviewed", prompt)
+
+    def test_reviewer_posture_is_forensic_when_spec_is_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            (task_root / MODULE.SPEC_FILENAME).write_text((FIXTURES_ROOT / "brief_quality" / "good_spec.md").read_text(encoding="utf-8"), encoding="utf-8")
+            inspection = MODULE.inspect_task_workspace(task_root)
+            posture = MODULE.reviewer_posture_for_task_root(task_root, inspection, {"review_bridge": {"mode": "internal"}})
+            self.assertEqual(posture, "forensic")
+
+    def test_reviewer_posture_is_deep_for_findings_driven_work_without_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            (task_root / MODULE.REVIEW_FILENAME).write_text(
+                "# Review\n\n## Findings\n\n- Retry fallback still leaves stale cache metadata behind.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            posture = MODULE.reviewer_posture_for_task_root(task_root, inspection, {"review_bridge": {"mode": "internal"}})
+            self.assertEqual(posture, "deep")
+
+    def test_reviewer_initial_prompt_uses_forensic_posture_for_spec_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            (task_root / MODULE.SPEC_FILENAME).write_text((FIXTURES_ROOT / "brief_quality" / "good_spec.md").read_text(encoding="utf-8"), encoding="utf-8")
+            (task_root / MODULE.CONTRACT_FILENAME).write_text("# Definition of Done\n\n- [ ] One behavior outcome\n- [ ] One regression guardrail\n- [ ] One verification item\n", encoding="utf-8")
+            inspection = MODULE.inspect_task_workspace(task_root)
+            prompt = MODULE.build_reviewer_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                state={"review_bridge": {"mode": "internal"}},
+                inspection=inspection,
+                inline_context=True,
+            )
+            self.assertIn("Reviewer posture: forensic.", prompt)
+            self.assertIn("Treat passing tests as supporting evidence only", prompt)
+            self.assertIn("You may edit repo-tracked files only to add or tighten tests or fixtures", prompt)
+
+    def test_reviewer_initial_prompt_uses_standard_posture_for_narrow_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix parser bug")
+            inspection = MODULE.inspect_task_workspace(task_root)
+            prompt = MODULE.build_reviewer_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                state={"review_bridge": {"mode": "internal"}},
+                inspection=inspection,
+                inline_context=True,
+            )
+            self.assertIn("Reviewer posture: standard.", prompt)
+            self.assertNotIn("Reviewer posture: forensic.", prompt)
 
     def test_build_reviewer_bootstrap_prompt_materializes_review(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3004,6 +3140,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertIn("foreground command is enough", instructs)
         self.assertIn("editing the canonical files directly", readme)
         self.assertIn("fill the canonical files directly", instructs)
+        self.assertIn("Decision-Complete Specs", instructs)
         self.assertIn("false_approved", readme)
         self.assertIn("requirements_changed_after_approval", readme)
         self.assertIn("false_approved", instructs)
@@ -3043,6 +3180,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertIn("process-lifetime rule", skill_text)
         self.assertIn("dedicated `tmux` session", skill_text)
         self.assertIn("prefer editing the canonical files directly", skill_text)
+        self.assertIn("decision-complete", skill_text)
 
     def test_scaffold_templates_and_role_instructions_emphasize_brief_quality(self) -> None:
         repo_root = MODULE_PATH.parents[1]
@@ -3058,10 +3196,17 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertIn("pair this file with `contract.md`", task_template)
         self.assertIn("deeper structure than `task.md`", spec_template)
         self.assertIn("keep `contract.md` alongside this file", spec_template)
+        self.assertIn("### Source of Truth / Ownership", spec_template)
+        self.assertIn("Not applicable because", spec_template)
         self.assertIn("default acceptance and approval checklist", contract_template)
         self.assertIn("Skip it only for ultra-trivial tasks", contract_template)
+        self.assertIn("regression / integrity / fallback / state guardrail", contract_template)
         self.assertIn("do not compensate by inventing missing requirements", generator_instructions)
         self.assertIn("vague or aspirational `contract.md` items", reviewer_instructions)
+        self.assertIn("decision-complete", generator_instructions)
+        self.assertIn("missing implementation-critical decisions", reviewer_instructions)
+        self.assertIn("Passing tests or a satisfied-looking contract are not enough for approval", reviewer_instructions)
+        self.assertIn("Code paths inspected", reviewer_instructions)
 
 
 if __name__ == "__main__":

@@ -104,6 +104,24 @@ The outer agent should:
 - preserve the user’s intent precisely
 - move directly into `start`, `continue`, or `reopen` once the docs are strong enough
 
+## Decision-Complete Specs
+
+For broad/spec-driven work, “strong enough” means more than having the right headings.
+
+The outer agent must prefer a **decision-complete** `spec.md`, where relevant implementation-critical dimensions are explicitly decided rather than left for the generator to improvise.
+
+Typical dimensions that must be either decided or marked explicitly not applicable:
+
+- source of truth / ownership
+- read path
+- write path / mutation flow
+- runtime or performance expectations
+- failure / fallback / degraded behavior
+- state / integrity / concurrency invariants
+- observability / validation hooks
+
+If one of those dimensions is relevant to the requested work and the docs still leave it open, the outer agent should fix the docs before launch instead of hoping the council will infer the intended policy.
+
 ## Request Classification
 
 Classify every request into one of five modes before taking action.

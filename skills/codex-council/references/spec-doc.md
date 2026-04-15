@@ -34,6 +34,18 @@ Fill the existing sections with concrete decisions:
 - `## Validation Expectations`
 - `## Open Questions`
 
+For broad/spec-driven work, the spec should also make the relevant execution dimensions decision-complete, not merely mention them. Typical dimensions:
+
+- source of truth / ownership
+- read path
+- write path / mutation flow
+- runtime / performance expectations
+- failure / fallback / degraded behavior
+- state / integrity / concurrency invariants
+- observability / validation hooks
+
+If a dimension is relevant, decide it. If it truly does not apply, say so explicitly with a short reason.
+
 ## Quality bar
 
 The spec should answer enough questions that the generator does not need to invent architecture or scope boundaries.
@@ -44,6 +56,7 @@ At minimum, it should make clear:
 - what is explicitly in and out of scope
 - what constraints matter
 - what validation the reviewer should expect
+- what implementation-critical runtime or state policy should happen, when relevant
 
 ## Question policy
 
@@ -56,6 +69,7 @@ Use `## Open Questions` only for uncertainty that does not prevent safe executio
 - Keep the spec concrete and implementation-relevant.
 - Name important boundaries explicitly so the reviewer can enforce them.
 - Pair `spec.md` with `contract.md`.
+- Prefer explicit defaults or assumptions over leaving the generator to choose policy during implementation.
 
 ## Example uses
 

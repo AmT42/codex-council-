@@ -35,6 +35,13 @@ It does that by combining:
 - artifact-driven `continue` rather than guessing from stale state
 - explicit `reopen` when a historical approval must be superseded audibly
 
+For broad or risky work, the reviewer is expected to act as a deeper forensic code auditor rather than a shallow checklist gate:
+
+- passing tests are supporting evidence, not primary truth
+- contract satisfaction does not excuse fragile code or hidden operational risk
+- the reviewer should inspect changed code, downstream readers/consumers, and failure behavior directly
+- the reviewer may tighten tests or fixtures when needed to improve review evidence, but it should not patch production code directly
+
 ## Operator Boundary
 
 When a user asks an outer agent to **use this repo or harness** for some task, the outer agent is acting as a **harness operator**, not as the direct implementer of the target feature.
@@ -85,6 +92,24 @@ Use:
 - repo-root [`AGENTS.md`](./AGENTS.md)
 
 That file is for harness maintenance and customization, not for operating the harness against a target repo.
+
+## Decision-Complete Specs
+
+For broad/spec-driven work, the outer agent should not stop at a high-level architecture sketch.
+
+A strong `spec.md` is **decision-complete**: it makes the relevant implementation-critical dimensions explicit instead of leaving the generator to improvise them during coding.
+
+Typical dimensions that should be decided, when relevant:
+
+- source of truth / ownership
+- read path
+- write path / mutation flow
+- runtime / performance expectations
+- failure / fallback / degraded behavior
+- state / integrity / concurrency invariants
+- observability / validation hooks
+
+If a dimension truly does not apply, the spec should say so explicitly instead of leaving the section vague.
 
 ## What The Harness Does
 
@@ -209,6 +234,7 @@ Use when the work spans multiple surfaces or would be unsafe to execute from a s
 
 - ask only minimum blocking questions
 - default to `task.md` + `spec.md` + `contract.md`
+- make `spec.md` decision-complete for the relevant runtime/state/fallback/integrity dimensions
 
 ## For Novices vs Experts
 

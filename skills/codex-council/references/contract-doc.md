@@ -48,6 +48,8 @@ A strong contract usually contains:
 - at least one regression or integrity guardrail when relevant
 - at least one verification item
 
+For broad/spec-driven work, treat those as a minimum bar rather than a nice-to-have.
+
 If the contract cannot tell the reviewer why approval is justified, it is too weak.
 
 ## Recommended shape
@@ -59,6 +61,8 @@ Useful categories:
 - behavior or user-visible outcome
 - state or integrity requirement
 - verification requirement such as tests, repro, or manual validation
+
+When the spec introduces runtime, fallback, state, persistence, or compatibility guarantees, ensure at least one checklist item makes those guarantees auditable.
 
 ## Example seed
 

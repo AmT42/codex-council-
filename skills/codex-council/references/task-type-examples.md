@@ -52,6 +52,7 @@ Route:
 - questions: only the minimum blocking questions needed to make the spec executable
 - commands: `init` if needed, fill the docs directly, then `start`
 - do not add harness-side glue unless the user explicitly asked for a harness feature
+- spec bar: decision-complete for the relevant runtime/state/fallback/integrity dimensions, not just a high-level design sketch
 
 ## Resume
 

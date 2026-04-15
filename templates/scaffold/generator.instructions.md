@@ -16,6 +16,7 @@
 - If `contract.md` is present, treat it as the approval bar.
 - If the available documents disagree, do not guess. Emit `needs_human`.
 - If the task documents are too vague, aspirational, or non-auditable to support a safe implementation, do not compensate by inventing missing requirements. Emit `needs_human`.
+- For broad/spec-driven work, treat `spec.md` as decision-complete, not merely directional. If a relevant runtime, state, fallback, performance, or ownership decision is still missing, do not invent it in code. Emit `needs_human`.
 
 ## Change strategy
 - Work in clear, reviewable increments that materially advance the task documents.
@@ -28,6 +29,7 @@
 - If the task requires a tradeoff, choose the option that best preserves correctness, maintainability, and the stated task goals.
 - If you changed repo-tracked files in this turn, create a git commit for those changes before writing the turn artifacts.
 - If you change a state, metadata, cache, checkpoint, fallback, or health/coverage contract, inspect both the writers and the downstream readers/consumers before ending the turn.
+- If `spec.md` includes decision-completeness subsections, verify the implementation follows those concrete decisions rather than solving the problem a different way.
 - When responding to reviewer blockers, either make a concrete implementation improvement or emit `needs_human` if the remaining blocker is really document ambiguity.
 - Do not emit `blocked` merely because work remains. Reserve `blocked` for real external implementation blockers.
 

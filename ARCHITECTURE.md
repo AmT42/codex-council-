@@ -113,6 +113,15 @@ The runtime launches two role sessions:
 
 These are separate cognitive roles, not just two consecutive prompts. The system depends on preserving that separation.
 
+The reviewer is not merely a checklist scorer. In stronger review postures, it should:
+
+- audit changed code directly before trusting tests
+- inspect downstream readers/consumers and failure paths
+- treat passing tests as supporting evidence rather than primary truth
+- surface fragile architecture, hidden regressions, or silent degradation even when the contract appears mostly satisfied
+
+The reviewer may tighten tests or fixtures when that materially improves review evidence, but it should not directly patch production code.
+
 ### Turn artifacts
 
 Each turn writes role-scoped artifacts.
@@ -182,6 +191,7 @@ Before `start`, the runtime validates:
 - enough useful content to execute safely
 - auditable `contract.md` checklist quality
 - broad work that likely requires `spec.md`
+- decision-complete `spec.md` subsections for broad/spec-driven work
 
 This is the layer that prevents weak documents from reaching the council.
 
@@ -191,6 +201,7 @@ Generator and reviewer have different jobs and different approval semantics.
 
 The generator does not decide approval.
 The reviewer does not silently invent requirements.
+The reviewer should not silently backfill missing implementation-critical policy from vague specs; that is a doc-quality failure, not reviewer discretion.
 
 ### 4. Artifact-driven continuation
 
@@ -238,9 +249,17 @@ Findings input for debugging, review comments, and externally supplied issues.
 
 Detailed design layer when the task is too broad or ambiguous.
 
+For broad/spec-driven work, this layer should be decision-complete rather than directional. Relevant execution dimensions such as source of truth, read/write flow, fallback, runtime expectations, integrity invariants, and validation hooks should be decided explicitly or marked not applicable.
+
 ### `contract.md`
 
 Auditable approval bar for most non-trivial work.
+
+For spec-driven work, the contract should still stay short, but it should cover more than a feature outcome alone. It should usually include:
+
+- at least one behavior outcome
+- at least one regression / integrity / fallback / state guardrail
+- at least one verification item
 
 ### Task-local `AGENTS.md`
 

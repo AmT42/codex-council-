@@ -12,6 +12,10 @@ Rules:
 - Each bullet should describe something that must be true before approval.
 - Keep detailed product reasoning, architecture, and implementation notes in `task.md`, `review.md`, or `spec.md`, not here.
 - The reviewer will copy this checklist into the reviewer turn message artifact and mark items with `[x]` / `[ ]`.
+- For broad/spec-driven work, include at least:
+  - one concrete behavior or outcome item
+  - one regression / integrity / fallback / state guardrail
+  - one explicit verification item
 
 Bad examples:
 - [ ] ready to go viral

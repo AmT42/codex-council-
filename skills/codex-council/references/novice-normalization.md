@@ -37,6 +37,8 @@ These are not executable council briefs.
 5. Create `contract.md` with auditable checks.
 6. Decide whether the work is still too broad and needs `spec.md`.
 
+If the work needs `spec.md`, do not stop at “what feature are we building?”. Normalize the request into explicit decisions about the relevant execution model too: source of truth, read/write paths, fallback behavior, runtime constraints, integrity invariants, and validation hooks when those dimensions matter.
+
 ## When to ask questions
 
 Ask only if the missing answer would materially change:
