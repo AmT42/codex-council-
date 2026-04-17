@@ -3502,6 +3502,9 @@ reviewer_reset_mode = "wrong"
         self.assertIn("outer coding agent", readme)
         self.assertIn("source of truth", architecture.lower())
         self.assertIn("artifact-driven", architecture)
+        self.assertIn("planner / intent critic preparation", architecture)
+        self.assertIn("## Planning Stage", readme)
+        self.assertIn("## Planning Stage", instructs)
         self.assertIn("harness operator", readme)
         self.assertIn("harness operator", instructs)
         self.assertIn("Do not implement the target-repo feature directly", instructs)
@@ -3514,11 +3517,14 @@ reviewer_reset_mode = "wrong"
         self.assertIn("editing the canonical files directly", readme)
         self.assertIn("fill the canonical files directly", instructs)
         self.assertIn("Decision-Complete Specs", instructs)
+        self.assertIn("hard` mode", readme)
+        self.assertIn("hard` mode", instructs)
         self.assertIn("false_approved", readme)
         self.assertIn("requirements_changed_after_approval", readme)
         self.assertIn("false_approved", instructs)
         self.assertIn("requirements_changed_after_approval", instructs)
         self.assertIn("`reopen`", skill)
+        self.assertIn("planning stage", skill)
         self.assertIn("false_approved", run_lifecycle)
         self.assertIn("requirements_changed_after_approval", run_lifecycle)
         self.assertIn("`reopen`", failure_recovery)
@@ -3534,6 +3540,10 @@ reviewer_reset_mode = "wrong"
         expected_refs = (
             "references/routing.md",
             "references/novice-normalization.md",
+            "references/planning-stage.md",
+            "references/planner-authoring.md",
+            "references/intent-critic.md",
+            "references/hard-mode.md",
             "references/operator-boundary.md",
             "references/supervisor-lifetime.md",
             "references/task-doc.md",
@@ -3554,6 +3564,7 @@ reviewer_reset_mode = "wrong"
         self.assertIn("dedicated `tmux` session", skill_text)
         self.assertIn("prefer editing the canonical files directly", skill_text)
         self.assertIn("decision-complete", skill_text)
+        self.assertIn("planning stage", skill_text)
 
     def test_scaffold_templates_and_role_instructions_emphasize_brief_quality(self) -> None:
         repo_root = MODULE_PATH.parents[1]
@@ -3561,24 +3572,37 @@ reviewer_reset_mode = "wrong"
         review_template = (repo_root / "templates" / "scaffold" / "review.md").read_text(encoding="utf-8")
         spec_template = (repo_root / "templates" / "scaffold" / "spec.md").read_text(encoding="utf-8")
         contract_template = (repo_root / "templates" / "scaffold" / "contract.md").read_text(encoding="utf-8")
+        planner_instructions = (repo_root / "templates" / "scaffold" / "planner.instructions.md").read_text(encoding="utf-8")
+        intent_critic_instructions = (repo_root / "templates" / "scaffold" / "intent_critic.instructions.md").read_text(encoding="utf-8")
         generator_instructions = (repo_root / "templates" / "scaffold" / "generator.instructions.md").read_text(encoding="utf-8")
         reviewer_instructions = (repo_root / "templates" / "scaffold" / "reviewer.instructions.md").read_text(encoding="utf-8")
 
         self.assertIn("default starting point for most execution requests", task_template)
         self.assertIn("pair this file with `contract.md`", review_template)
         self.assertIn("pair this file with `contract.md`", task_template)
+        self.assertIn("planning stage", task_template)
         self.assertIn("deeper structure than `task.md`", spec_template)
         self.assertIn("keep `contract.md` alongside this file", spec_template)
+        self.assertIn("planning-stage `hard` mode", spec_template)
         self.assertIn("### Source of Truth / Ownership", spec_template)
         self.assertIn("Not applicable because", spec_template)
         self.assertIn("default acceptance and approval checklist", contract_template)
         self.assertIn("Skip it only for ultra-trivial tasks", contract_template)
         self.assertIn("regression / integrity / fallback / state guardrail", contract_template)
+        self.assertIn("prompts, instructions, tools, schemas", contract_template)
+        self.assertIn("decision-complete spec", planner_instructions)
+        self.assertIn("tool descriptions, tool schemas", planner_instructions)
+        self.assertIn("execution-safe", planner_instructions)
+        self.assertIn("strict external evaluator", intent_critic_instructions)
+        self.assertIn("hidden assumptions presented as facts", intent_critic_instructions)
+        self.assertIn("toy-like prompt / tool / schema descriptions", intent_critic_instructions)
         self.assertIn("do not compensate by inventing missing requirements", generator_instructions)
+        self.assertIn("prompt, system-instruction, tool-description, and schema contracts", generator_instructions)
         self.assertIn("vague or aspirational `contract.md` items", reviewer_instructions)
         self.assertIn("decision-complete", generator_instructions)
         self.assertIn("missing implementation-critical decisions", reviewer_instructions)
         self.assertIn("Passing tests or a satisfied-looking contract are not enough for approval", reviewer_instructions)
+        self.assertIn("weak planning-authored docs", reviewer_instructions)
         self.assertIn("Code paths inspected", reviewer_instructions)
 
 

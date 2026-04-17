@@ -48,11 +48,13 @@ User:
 Route:
 
 - mode: broad feature or spec work
+- preparation: planner + intent critic before execution docs are locked
 - docs: `task.md` + `spec.md` + `contract.md`
 - questions: only the minimum blocking questions needed to make the spec executable
-- commands: `init` if needed, fill the docs directly, then `start`
+- commands: `init` if needed, run the planning stage, then `start`
 - do not add harness-side glue unless the user explicitly asked for a harness feature
 - spec bar: decision-complete for the relevant runtime/state/fallback/integrity dimensions, not just a high-level design sketch
+- hard-mode note: for agentic, prompt-sensitive, tool/schema-heavy, or operationally risky work, use planning-stage `hard` mode
 
 ## Broad feature with risky adjacent helper path
 
@@ -63,13 +65,17 @@ User:
 Route:
 
 - mode: broad feature or spec work
+- preparation: planner + intent critic before execution docs are locked
 - docs: `task.md` + `spec.md` + `contract.md`
 - questions: only if repo inspection cannot determine the main user-facing workflow
-- commands: `init` if needed, fill the docs directly, then `start`
+- commands: `init` if needed, run the planning stage, then `start`
 - spec bar:
   - define the primary user-facing “remember/store this now” path
   - define any maintenance/background/curation paths
   - state forbidden substitutions so the generator does not implement only a helper path and call the feature done
+- planning bar:
+  - intent critic rejects toy-like prompt/tool/schema descriptions
+  - if the planner cannot make the policy explicit, stop with `needs_human`
 - review bar:
   - reviewer must check the obvious user interaction directly, not only internals or passing tests
 

@@ -41,6 +41,11 @@ Bad contract items:
 
 Those phrases are acceptable only after decomposition into something concrete.
 
+Planning-stage note:
+
+- when broad or agentic work goes through the planning stage, the intent critic should reject any contract that still relies on vague aspirational language
+- in planning-stage `hard` mode, a contract that cannot justify approval without interpretation is a hard fail
+
 ## Quality bar
 
 A strong contract usually contains:
@@ -66,6 +71,8 @@ Useful categories:
 When the spec introduces runtime, fallback, state, persistence, or compatibility guarantees, ensure at least one checklist item makes those guarantees auditable.
 
 If the task has both a primary user-facing path and a maintenance/background/helper path, ensure at least one checklist item makes it auditable that the primary behavior is satisfied by the correct path and not merely by an adjacent helper mechanism.
+
+When prompts, system instructions, tool descriptions, schemas, approvals, or evaluator behavior are part of the product surface, ensure at least one checklist item makes their required behavior auditable.
 
 ## Example seed
 

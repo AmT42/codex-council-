@@ -89,13 +89,20 @@ Use when the request spans multiple surfaces or would be unsafe to execute from 
 
 Default docs:
 
-- `task.md`
-- `spec.md`
-- `contract.md`
+- planning stage first
+- then `task.md`
+- then `spec.md`
+- then `contract.md`
 
 Question policy:
 
 - ask only the minimum blocking questions needed to make `spec.md` and `contract.md` executable
+
+Planning-stage policy:
+
+- broad/spec-driven work should default to planner + intent critic preparation before execution docs are treated as locked
+- use `hard` mode when the work is agentic, prompt-sensitive, tool/schema-heavy, workflow-heavy, or otherwise unusually rigorous
+- do not move to `start` until the planning-stage critic has approved the authored docs
 
 ## Route summary format
 
@@ -114,4 +121,4 @@ When several modes seem plausible:
 2. Inspect or resume if a suitable run already exists
 3. Findings-driven fix if the input is already review-shaped
 4. Concrete execution request for specific implementation/debug work
-5. Broad feature or spec work only when the work genuinely needs structured expansion
+5. Broad feature or spec work only when the work genuinely needs structured expansion, and then route it through the planning stage before execution

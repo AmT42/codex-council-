@@ -14,6 +14,7 @@
 If the docs are not strong enough for safe execution:
 
 - do not launch
+- route broad, vague, or agentic work back through the planning stage before locking execution docs
 - improve the docs first
 - ask the smallest blocking question only if repo inspection cannot resolve the ambiguity
 

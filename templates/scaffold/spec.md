@@ -6,6 +6,8 @@ Reach for `spec.md` when the work spans multiple surfaces, needs explicit in-sco
 
 For most non-trivial spec-driven tasks, keep `contract.md` alongside this file so approval stays auditable.
 
+If this spec was produced in a planning-stage `hard` mode, treat it as a decision-complete execution contract. Do not rely on the generator or reviewer to silently fill in omitted policy later.
+
 ## Goal
 
 Describe the main thing that should be built or changed.
@@ -84,6 +86,8 @@ When relevant, make explicit:
 - what the model must not guess
 - what the prompt/runtime combination must force or forbid
 - what user-visible behavior would be wrong even if internal helpers appear to work
+- what tool descriptions or schema semantics must and must not communicate
+- what evaluator or approval behavior materially changes correctness
 
 ## Technical Boundaries
 

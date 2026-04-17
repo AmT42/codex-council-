@@ -31,11 +31,14 @@ These are not executable council briefs.
 ## Normalization pattern
 
 1. Inspect the repo for the most likely surfaces.
-2. Rewrite the request in concrete engineering terms.
-3. Add just enough context to make the work safer.
-4. Add a concrete success signal.
-5. Create `contract.md` with auditable checks.
-6. Decide whether the work is still too broad and needs `spec.md`.
+2. Preserve the primary user intent in plain language before translating it into implementation terms.
+3. For broad, vague, or agentic work, run a planner pass instead of hand-writing the first draft directly.
+4. Rewrite the request in concrete engineering terms.
+5. Add just enough context to make the work safer.
+6. Add a concrete success signal.
+7. Create `contract.md` with auditable checks.
+8. Decide whether the work is still too broad and needs `spec.md`.
+9. If planning-stage `hard` mode is warranted, require the intent critic to reject omissions instead of letting the planner hand-wave them away.
 
 If the user is reporting a blocker, hang, timeout, or “it got stuck” symptom:
 
@@ -78,6 +81,7 @@ Stronger:
 - write `task.md` as a short brief
 - add `spec.md` for desired behavior, scope, and constraints
 - add `contract.md` for auditable completion
+- for broad or agentic work, run planner + intent critic before treating those docs as ready for execution
 
 ## Failure condition
 

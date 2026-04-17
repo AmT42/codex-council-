@@ -47,9 +47,11 @@ User:
 Route:
 
 - mode: broad feature or spec work
+- preparation: planner + intent critic before execution docs are locked
 - docs: `task.md` + `spec.md` + `contract.md`
 - questions: only the minimum blocking questions needed to make the spec executable
-- commands: `init` if needed, fill the docs directly, then `start`
+- commands: `init` if needed, run the planning stage, lock the docs, then `start`
+- note: use planning-stage `hard` mode when the work is agentic, prompt-sensitive, or otherwise unusually rigorous
 
 ## Example: resume
 

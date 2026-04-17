@@ -83,6 +83,7 @@ This surface teaches the outer agent:
 
 - when to answer directly
 - when to inspect and resume
+- when to run a planning stage before execution docs are locked
 - when to scaffold `task.md`, `review.md`, `spec.md`, and `contract.md`
 - when to ask clarifying questions
 - when not to ask them
@@ -123,6 +124,25 @@ For agentic or prompt-driven products, decision-complete also means:
 - state forbidden substitutions between them when those substitutions would create a product bug
 - state any prompt or system-design implications that the generator should not be left to improvise
 
+## Planning Stage
+
+For broad, vague, novice-described, or agentic work, the harness should not jump straight from raw user wording to execution docs.
+
+The preferred route is a planning stage:
+
+- outer agent inspects the repo and preserves the raw user intent
+- planner authors the draft `task.md`, `spec.md`, and `contract.md`
+- intent critic checks whether those docs are faithful to the real intent and strong enough for execution
+- only after that review passes should the execution docs be treated as locked inputs for the generator/reviewer loop
+
+This planning stage is a preparation layer, not a replacement for the runtime council.
+
+`hard` mode belongs here:
+
+- it means planning-stage rigor, not mere verbosity
+- it requires a decision-complete spec for the relevant task class
+- it is especially appropriate for workflow-heavy, prompt-sensitive, tool/schema-heavy, or operationally risky work
+
 ## What The Harness Does
 
 Codex Council runs a two-role loop inside a target repo:
@@ -137,6 +157,7 @@ The control plane is file-based. The council reads canonical task documents from
 This is not a one-shot prompt wrapper. It is a harness for:
 
 - briefing
+- planning for broad or high-rigor work
 - implementation
 - review
 - pause/resume
@@ -162,7 +183,9 @@ The council workspace inside a target repo is:
 .codex-council/<task_name>/
   AGENTS.md
   generator.instructions.md
+  planner.instructions.md
   reviewer.instructions.md
+  intent_critic.instructions.md
   task.md
   review.md
   spec.md
@@ -183,6 +206,15 @@ Canonical documents:
 - `AGENTS.md`
   - stable council behavior only, not feature requirements
 
+Future-facing planning-prep instructions:
+
+- `planner.instructions.md`
+  - task-local planner role guidance for authoring strong execution docs
+- `intent_critic.instructions.md`
+  - task-local planning critic guidance for rejecting weak or non-faithful docs
+
+These planning files are preparation surfaces. They are not yet required runtime inputs for `start`.
+
 Optional supporting context:
 
 - `branch_northstar_summary.md`
@@ -199,7 +231,7 @@ Recommended defaults for outer-agent routing:
   - use the PR plus current-head GitHub review findings as the effective brief
   - add `branch_northstar_summary.md` when the branch/worktree intent needs durable context
 - broad feature or complex design
-  - `task.md` + `spec.md` + `contract.md`
+  - planning stage first, then `task.md` + `spec.md` + `contract.md`
 - meta question about the harness
   - answer directly, do not scaffold docs
 
@@ -245,8 +277,10 @@ Use when the user provides review comments, logs, repro notes, or debugging find
 Use when the work spans multiple surfaces or would be unsafe to execute from a short task brief.
 
 - ask only minimum blocking questions
-- default to `task.md` + `spec.md` + `contract.md`
+- default to a planning stage before locking `task.md` + `spec.md` + `contract.md`
+- use planner + intent critic to reach an execution-safe brief
 - make `spec.md` decision-complete for the relevant runtime/state/fallback/integrity dimensions
+- use `hard` mode when the work is especially agentic, workflow-heavy, prompt-sensitive, or operationally risky
 
 ## For Novices vs Experts
 

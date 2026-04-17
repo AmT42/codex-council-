@@ -20,11 +20,12 @@ The harness is intentionally layered.
 User
   -> Outer agent
     -> codex-council skill
-      -> Canonical docs in target repo
-        -> codex_tui_supervisor.py
-          -> generator / reviewer role sessions
-            -> turn artifacts
-              -> status / continue / reopen / approval
+      -> planner / intent critic preparation (when needed)
+        -> Canonical docs in target repo
+          -> codex_tui_supervisor.py
+            -> generator / reviewer role sessions
+              -> turn artifacts
+                -> status / continue / reopen / approval
 ```
 
 ### User
@@ -63,10 +64,31 @@ It does not replace the runtime. It encodes:
 
 - routing
 - novice-input normalization
+- planning-stage invocation
 - doc selection
 - lifecycle rules
 - recovery rules
 - operator-vs-implementer boundary
+
+### Planning preparation
+
+For broad, vague, or unusually rigorous work, the outer agent should not go directly from user prompt to locked execution docs.
+
+Instead, it should use a planning preparation stage:
+
+- `planner`
+  - authors draft `task.md`, `spec.md`, and `contract.md`
+- `intent critic`
+  - verifies fidelity to user intent, repo plausibility, and document quality before execution
+
+This stage is where `hard` mode belongs.
+
+`hard` mode means:
+
+- require a decision-complete spec for the relevant task class
+- require explicit coverage of prompt/tool/schema behavior when the product is agentic
+- reject omissions, toy-like abstractions, and hidden assumptions
+- optimize for execution safety and intent fidelity rather than brevity
 
 ### Canonical docs
 
@@ -86,6 +108,10 @@ Optional supporting context may also exist under the task workspace:
 
 - `branch_northstar_summary.md`
   - non-canonical branch/worktree context used to preserve intent for branch-driven work such as `github_pr_codex`
+- `planner.instructions.md`
+  - future-facing task-local planner guidance used during preparation
+- `intent_critic.instructions.md`
+  - future-facing task-local planning-critic guidance used during preparation
 
 ### Runtime supervisor
 
@@ -180,8 +206,20 @@ Outer-agent responsibilities:
 
 - infer what can be learned from the repo
 - ask only the minimum blocking questions
+- for broad/vague/agentic work, run planner/intent-critic preparation before locking execution docs
 - produce strong `task.md`, `review.md`, `spec.md`, and `contract.md`
 - preserve the primary user-facing intent instead of translating it into a nearby but non-equivalent maintenance/helper path
+
+### 1a. Planning-stage robustness
+
+For work that needs a true spec, the outer agent should use a two-role authoring loop before execution:
+
+- planner drafts the execution docs plus explicit assumptions/open questions
+- intent critic reviews those docs against raw user intent, repo facts, and the planning quality bar
+- planner revises the docs directly instead of arguing around omissions
+- unresolved ambiguity escalates to `needs_human`
+
+The critic should cite exact missing dimensions, not vague “add more detail” requests.
 
 ### 2. Brief quality enforcement
 
@@ -203,6 +241,12 @@ Generator and reviewer have different jobs and different approval semantics.
 The generator does not decide approval.
 The reviewer does not silently invent requirements.
 The reviewer should not silently backfill missing implementation-critical policy from vague specs; that is a doc-quality failure, not reviewer discretion.
+
+The same discipline should hold in the planning stage:
+
+- planner authors the docs
+- intent critic evaluates them
+- the critic should not silently author missing policy on the planner’s behalf
 
 ### 3a. Evidence before diagnosis
 

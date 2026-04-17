@@ -37,6 +37,7 @@ That includes:
 - classifying the request
 - discovering missing repo facts
 - normalizing novice input into strong documents
+- invoking a planning stage before execution docs are locked when the work needs it
 - choosing the smallest sufficient document set
 - deciding between direct answer, `start`, `continue`, and `reopen`
 
@@ -48,9 +49,13 @@ Read these first:
 - [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)
 - [`references/routing.md`](./references/routing.md)
 - [`references/novice-normalization.md`](./references/novice-normalization.md)
+- [`references/planning-stage.md`](./references/planning-stage.md)
 
 Then load only the references needed for the chosen route:
 
+- [`references/planner-authoring.md`](./references/planner-authoring.md)
+- [`references/intent-critic.md`](./references/intent-critic.md)
+- [`references/hard-mode.md`](./references/hard-mode.md)
 - [`references/task-doc.md`](./references/task-doc.md)
 - [`references/review-doc.md`](./references/review-doc.md)
 - [`references/spec-doc.md`](./references/spec-doc.md)
@@ -70,6 +75,8 @@ Then load only the references needed for the chosen route:
 - Prefer `status` + `continue` over restarting a healthy paused run, but use `reopen` when an approved run must be superseded explicitly.
 - Do not pass vague user wording directly into the council docs.
 - Do not do the target-repo implementation work yourself when the harness is the requested tool.
+- For broad/spec-driven/vague/agentic work, run a planning stage before locking execution docs.
+- In that planning stage, use the planner to author docs and the intent critic to reject weak or non-faithful drafts before execution begins.
 - For broad/spec-driven work, do not stop at architecture shape. Write a **decision-complete** `spec.md` that covers the relevant runtime, state, fallback, performance, and validation consequences so the generator does not need to invent policy.
 - When the task is agentic, workflow-driven, or prompt-sensitive, make the brief explicit about:
   - the primary user-facing path or intent
@@ -104,10 +111,11 @@ Instead:
 - inspect the repo
 - infer likely affected surfaces
 - extract the real engineering problem
-- write stronger docs than the user could have written directly
+- use the planning stage to write stronger docs than the user could have written directly
 - escalate to `spec.md` when needed
 - when using `spec.md`, cover not just what is being built, but the relevant source-of-truth, read/write flow, failure/fallback, runtime cost, integrity/concurrency, and observability decisions unless they are explicitly not applicable
 - explicitly preserve the primary user-facing intent so the generator does not solve the wrong adjacent workflow
+- use `hard` mode in the planning stage when the spec must be unusually rigorous; `hard` means decision-complete rigor, not mere length
 
 Use [`references/novice-normalization.md`](./references/novice-normalization.md) before handling vague or under-specified requests.
 

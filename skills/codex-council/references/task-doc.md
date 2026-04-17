@@ -15,6 +15,11 @@ It is the default brief for:
 
 - when the operator already has an existing PR and wants the live PR review loop to drive the work, `task.md` can be omitted if the PR plus current-head review findings already provide a concrete brief
 
+Planning-stage note:
+
+- for broad, vague, or agentic work, prefer authoring `task.md` through the planning stage rather than drafting it ad hoc
+- once the planning-stage critic approves the task brief, treat it as the locked execution summary rather than reopening intent casually during coding
+
 ## Writing rules
 
 Keep it short and executable.
@@ -47,6 +52,7 @@ It should:
 - If verification matters, say what should pass or be observable.
 - Pair `task.md` with `contract.md` for most non-trivial runs.
 - If the request is about a user capability, name the path that must satisfy that capability instead of assuming any adjacent helper path is good enough.
+- If prompts, system instructions, tool descriptions, or schemas are part of the real product surface, name that explicitly in the brief.
 
 ## Escalate to `spec.md` when
 

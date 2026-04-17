@@ -33,6 +33,7 @@
 - If you change a state, metadata, cache, checkpoint, fallback, or health/coverage contract, inspect both the writers and the downstream readers/consumers before ending the turn.
 - If `spec.md` includes decision-completeness subsections, verify the implementation follows those concrete decisions rather than solving the problem a different way.
 - If `spec.md` describes prompt or system-design implications, treat them as implementation requirements rather than background prose.
+- Treat prompt, system-instruction, tool-description, and schema contracts in `spec.md` as first-class product requirements when they materially shape runtime behavior.
 - When responding to reviewer blockers, either make a concrete implementation improvement or emit `needs_human` if the remaining blocker is really document ambiguity.
 - Do not emit `blocked` merely because work remains. Reserve `blocked` for real external implementation blockers.
 - If you emit `blocked`, diagnose by evidence rather than by symptom-shaped guesses. State the last confirmed progress point, the first unconfirmed next step, and the direct observation that supports the blocker wording.

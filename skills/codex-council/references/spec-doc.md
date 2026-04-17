@@ -17,6 +17,11 @@ Common triggers:
 - a PR-driven run can still omit `spec.md` entirely when the PR plus current-head review findings are specific enough
 - add `spec.md` only when the branch/worktree change remains too broad to execute safely from the PR context alone
 
+Planning-stage note:
+
+- for broad, vague, or agentic work, prefer generating `spec.md` through the planning stage rather than writing it ad hoc
+- if `hard` mode is active, the spec must be decision-complete for every relevant dimension and the intent critic must approve it before execution
+
 ## Writing rules
 
 `spec.md` should make complex work executable without becoming a dumping ground.
@@ -51,6 +56,13 @@ When the product is agentic, prompt-driven, or workflow-heavy, also decide:
 - any forbidden substitutions between those paths
 - prompt/system-design implications that materially affect runtime behavior
 
+When the product is agentic, also make explicit:
+
+- system-prompt and instruction-layer responsibilities
+- tool descriptions and schema semantics
+- evaluator/reviewer behavior when it materially affects correctness
+- approval, sandbox, or user-input policy when the product behavior depends on those controls
+
 If a dimension is relevant, decide it. If it truly does not apply, say so explicitly with a short reason.
 
 ## Quality bar
@@ -79,6 +91,7 @@ Use `## Open Questions` only for uncertainty that does not prevent safe executio
 - Pair `spec.md` with `contract.md`.
 - Prefer explicit defaults or assumptions over leaving the generator to choose policy during implementation.
 - If a “helper” or “background” path exists near the primary workflow, state whether it supports the primary path or is forbidden as a replacement for it.
+- If planning-stage `hard` mode is active, optimize for execution safety and intent fidelity rather than brevity.
 
 ## Example uses
 

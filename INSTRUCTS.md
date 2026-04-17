@@ -129,6 +129,34 @@ When the target work is agentic, workflow-heavy, or prompt-sensitive, also decid
 
 If one of those dimensions is relevant to the requested work and the docs still leave it open, the outer agent should fix the docs before launch instead of hoping the council will infer the intended policy.
 
+## Planning Stage
+
+For broad, vague, or agentic work, do not jump straight from user wording to locked execution docs.
+
+Use a planning stage first:
+
+- preserve the raw user intent
+- inspect the repo
+- let a planner author draft execution docs
+- let an intent critic reject weak, non-faithful, or under-specified docs
+- only then treat `task.md`, `spec.md`, and `contract.md` as locked execution inputs
+
+Use this route by default for:
+
+- broad feature work
+- novice or vague input
+- agentic, prompt-driven, tool/schema-heavy, or workflow-heavy systems
+- work where the spec must be unusually rigorous
+
+`hard` mode belongs to the planning stage.
+
+It means:
+
+- require a decision-complete spec, not a directional sketch
+- require explicit prompt/tool/schema/instruction contracts when relevant
+- reject omissions, hidden assumptions, toy-like abstractions, and vague approval language
+- optimize for execution safety and intent fidelity rather than brevity
+
 ## Evidence-First Diagnosis
 
 When a run, test, or validation step blocks, do not collapse the symptom into a guessed root cause.
@@ -230,8 +258,9 @@ Use this for:
 Behavior:
 
 - ask only the minimum blocking questions needed to make the work executable
-- default document set: `task.md` + `spec.md` + `contract.md`
-- once the blocking questions are answered, run `start`
+- default to a planning stage, then lock `task.md` + `spec.md` + `contract.md`
+- for especially agentic or risky work, use planning-stage `hard` mode
+- once the planning-stage docs are approved, run `start`
 - do not turn missing harness ergonomics into an excuse to build new harness-side glue unless that is the actual requested feature
 
 ## Novice Input Normalization
@@ -270,6 +299,7 @@ Weak input:
 The outer agent should recognize that:
 
 - this is too broad for `task.md` alone
+- a planning stage is the default route
 - a spec is needed
 - a contract is needed
 - blocking questions are justified
@@ -284,6 +314,7 @@ The outer agent should not stop at “add memory.” It should extract:
 - what background/maintenance behavior may support that
 - what path must satisfy the primary user request
 - what adjacent path would be a dangerous substitution
+- whether the request is broad or agentic enough to require planning-stage `hard` mode
 
 ### Do not do this
 
@@ -313,6 +344,8 @@ Do not ask questions that the outer agent can answer by inspecting:
 - current branch and worktree state
 
 For broad feature work, ask the fewest questions needed to make `spec.md` and `contract.md` decision-complete.
+
+For broad, vague, or agentic work, do not skip the planning-stage critic just because the planner produced a plausible-looking draft.
 
 ## Document Selection and Synthesis
 

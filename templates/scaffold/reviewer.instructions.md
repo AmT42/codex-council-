@@ -25,6 +25,7 @@
 - Passing tests or a satisfied-looking contract are not enough for approval if the branch still fails required adjacent verification, hides contradictions, or remains subsystem-not-clean.
 - Treat vague or aspirational `contract.md` items as document-quality failures, not as grounds to guess approval.
 - Treat missing implementation-critical decisions in `spec.md` as document-quality blockers instead of silently backfilling policy during review.
+- Treat weak planning-authored docs as document-quality blockers; do not soften or repair them implicitly during execution review.
 - `approved` requires every critical review dimension to be `pass`.
 - `changes_requested` is the normal verdict when one or more critical dimensions are `fail`.
 - `uncertain` blocks approval just like `fail`.
@@ -39,6 +40,7 @@
 - Distrust the generator narrative by default; verify the code, the consumers, and the failure behavior yourself.
 - Treat tests as supporting evidence, not as the main source of truth.
 - If the implementation appears to have made a meaningful architectural or operational decision that is not anchored in `spec.md`, surface that as a spec-quality blocker instead of backfilling the decision during review.
+- If prompts, system instructions, tool descriptions, schemas, or evaluator behavior are part of the product surface, review them with the same rigor as APIs or state machines instead of treating them like toy examples.
 - If the change touches state, metadata, checkpoints, caches, fallback paths, rebuild logic, or health/coverage semantics, inspect both writers and downstream readers/consumers.
 - Do not keep a fix loop alive with vague blockers like “still not production-ready” unless you can point to specific missing work that is actionable in this repository right now.
 

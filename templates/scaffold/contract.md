@@ -17,6 +17,7 @@ Rules:
   - one regression / integrity / fallback / state guardrail
   - one explicit verification item
 - When relevant, include one item that proves the main user-visible behavior is satisfied by the correct path rather than by an adjacent helper or maintenance path.
+- When prompts, instructions, tools, schemas, approvals, or evaluator behavior are part of the product surface, include at least one item that makes those requirements auditable.
 
 Bad examples:
 - [ ] ready to go viral
