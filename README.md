@@ -35,6 +35,11 @@ It does that by combining:
 - artifact-driven `continue` rather than guessing from stale state
 - explicit `reopen` when a historical approval must be superseded audibly
 
+It also depends on one discipline that is easy to miss in agentic applications:
+
+- the **primary user-facing intent** must survive translation into the brief
+- maintenance, curation, background, or repair paths must not silently replace that primary user path unless the task explicitly says they should
+
 For broad or risky work, the reviewer is expected to act as a deeper forensic code auditor rather than a shallow checklist gate:
 
 - passing tests are supporting evidence, not primary truth
@@ -110,6 +115,13 @@ Typical dimensions that should be decided, when relevant:
 - observability / validation hooks
 
 If a dimension truly does not apply, the spec should say so explicitly instead of leaving the section vague.
+
+For agentic or prompt-driven products, decision-complete also means:
+
+- state the primary user-facing path or intent
+- state any maintenance/background paths that support it
+- state forbidden substitutions between them when those substitutions would create a product bug
+- state any prompt or system-design implications that the generator should not be left to improvise
 
 ## What The Harness Does
 

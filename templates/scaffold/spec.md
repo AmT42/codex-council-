@@ -34,6 +34,18 @@ Describe the current product or technical context the council should know.
 
 Describe the required behavior in concrete terms.
 
+### Primary User Path / Intents
+
+State the main user-facing intent or workflow this task must satisfy. If this does not apply, write `Not applicable because ...`.
+
+### Maintenance / Background Paths
+
+State any maintenance, background, curation, migration, or repair paths that support the main behavior. If this does not apply, write `Not applicable because ...`.
+
+### Forbidden Substitutions
+
+State any nearby paths that must not be treated as replacements for the primary user-facing path. If this does not apply, write `Not applicable because ...`.
+
 ### Source of Truth / Ownership
 
 State which data, docs, services, or systems are authoritative for this work, who writes them, and what is derived or cached. If this dimension truly does not apply, write `Not applicable because ...`.
@@ -61,6 +73,17 @@ Describe the invariants that must stay true across retries, restarts, overlappin
 ### Observability / Validation Hooks
 
 Describe what must be testable, inspectable, or measurable so the reviewer can verify the implementation without guessing. If this dimension truly does not apply, write `Not applicable because ...`.
+
+### Prompt / System Design Implications
+
+If prompts, instruction layers, or system-design text materially shape runtime behavior, describe what they must and must not imply. If this dimension truly does not apply, write `Not applicable because ...`.
+
+When relevant, make explicit:
+
+- what the model should do
+- what the model must not guess
+- what the prompt/runtime combination must force or forbid
+- what user-visible behavior would be wrong even if internal helpers appear to work
 
 ## Technical Boundaries
 

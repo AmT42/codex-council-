@@ -181,6 +181,7 @@ Outer-agent responsibilities:
 - infer what can be learned from the repo
 - ask only the minimum blocking questions
 - produce strong `task.md`, `review.md`, `spec.md`, and `contract.md`
+- preserve the primary user-facing intent instead of translating it into a nearby but non-equivalent maintenance/helper path
 
 ### 2. Brief quality enforcement
 
@@ -202,6 +203,19 @@ Generator and reviewer have different jobs and different approval semantics.
 The generator does not decide approval.
 The reviewer does not silently invent requirements.
 The reviewer should not silently backfill missing implementation-critical policy from vague specs; that is a doc-quality failure, not reviewer discretion.
+
+### 3a. Evidence before diagnosis
+
+The council should not turn a surface symptom into a confident root-cause claim without direct support.
+
+Expected discipline:
+
+- localize where execution stopped
+- state the last confirmed progress point
+- distinguish observed facts from inference
+- use the narrowest proven blocker wording until stronger evidence exists
+
+This is important because blocked turns often happen near shared dependencies or setup boundaries, and a vague summary can send the next turn down the wrong path even when the implementation itself is fine.
 
 ### 4. Artifact-driven continuation
 
@@ -250,6 +264,13 @@ Findings input for debugging, review comments, and externally supplied issues.
 Detailed design layer when the task is too broad or ambiguous.
 
 For broad/spec-driven work, this layer should be decision-complete rather than directional. Relevant execution dimensions such as source of truth, read/write flow, fallback, runtime expectations, integrity invariants, and validation hooks should be decided explicitly or marked not applicable.
+
+For agentic applications, `spec.md` should also make clear:
+
+- the primary user-facing path
+- any maintenance/background paths that support it
+- forbidden substitutions between those paths
+- prompt/system-design implications when they materially shape runtime behavior
 
 ### `contract.md`
 

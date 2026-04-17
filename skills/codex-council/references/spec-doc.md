@@ -44,6 +44,13 @@ For broad/spec-driven work, the spec should also make the relevant execution dim
 - state / integrity / concurrency invariants
 - observability / validation hooks
 
+When the product is agentic, prompt-driven, or workflow-heavy, also decide:
+
+- the primary user-facing path or intent
+- any maintenance/background/curation/supporting paths
+- any forbidden substitutions between those paths
+- prompt/system-design implications that materially affect runtime behavior
+
 If a dimension is relevant, decide it. If it truly does not apply, say so explicitly with a short reason.
 
 ## Quality bar
@@ -57,6 +64,7 @@ At minimum, it should make clear:
 - what constraints matter
 - what validation the reviewer should expect
 - what implementation-critical runtime or state policy should happen, when relevant
+- what path should satisfy the main user need, when multiple adjacent paths exist
 
 ## Question policy
 
@@ -70,6 +78,7 @@ Use `## Open Questions` only for uncertainty that does not prevent safe executio
 - Name important boundaries explicitly so the reviewer can enforce them.
 - Pair `spec.md` with `contract.md`.
 - Prefer explicit defaults or assumptions over leaving the generator to choose policy during implementation.
+- If a “helper” or “background” path exists near the primary workflow, state whether it supports the primary path or is forbidden as a replacement for it.
 
 ## Example uses
 

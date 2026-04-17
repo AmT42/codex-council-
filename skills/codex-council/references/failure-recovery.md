@@ -61,6 +61,27 @@ If the runtime or reviewer previously emitted `needs_human`:
 - update the canonical docs or gather the missing clarification
 - continue the run in place rather than starting a new one unless the user truly wants a fresh task
 
+## Blocker-diagnosis failure
+
+If a prior run reported a blocker with a confident root-cause label, do not assume that label is true.
+
+Instead:
+
+1. inspect the blocker artifact
+2. identify the last confirmed progress point
+3. identify what direct observation actually supports
+4. continue or rewrite docs using the narrowest proven claim
+
+Prefer:
+
+- “blocked during DB-backed fixture setup”
+
+over:
+
+- “Postgres is broken”
+
+unless the latter is directly proven.
+
 ## Broad-input failure
 
 If the user keeps describing a broad aspiration instead of an executable change:

@@ -541,7 +541,53 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn(str(task_root / MODULE.REVIEW_FILENAME), prompt)
             self.assertIn(str(task_root / MODULE.SPEC_FILENAME), prompt)
             self.assertIn("classify each review point as `agree`, `disagree`, or `uncertain`", prompt)
+            self.assertIn("diagnose by evidence rather than by symptom-shaped guesses", prompt)
+            self.assertIn("last confirmed progress point", prompt)
+            self.assertIn("Use the narrowest proven claim", prompt)
             self.assertNotIn("Shared council brief from", prompt)
+
+    def test_build_generator_followup_prompt_includes_evidence_first_blocker_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0002"
+            prev_turn_dir = Path(tmp_dir) / "turns" / "0001"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix the parser bug.")
+            (task_root / MODULE.REVIEW_FILENAME).write_text("# Review\n\n## Findings\n\n- Fix fallback logic\n", encoding="utf-8")
+            (prev_turn_dir / "reviewer").mkdir(parents=True)
+            (prev_turn_dir / "reviewer" / "message.md").write_text("review", encoding="utf-8")
+            (prev_turn_dir / "reviewer" / "status.json").write_text(
+                json.dumps(
+                    {
+                        "verdict": "changes_requested",
+                        "summary": "Need more evidence.",
+                        "blocking_issues": ["example"],
+                        "critical_dimensions": {
+                            "correctness_vs_intent": "fail",
+                            "regression_risk": "pass",
+                            "failure_mode_and_fallback": "uncertain",
+                            "state_and_metadata_integrity": "pass",
+                            "test_adequacy": "uncertain",
+                            "maintainability": "pass",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            prompt = MODULE.build_generator_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                2,
+                "demo-task",
+                state={"review_bridge": {"mode": "internal"}},
+                inspection=inspection,
+                inline_context=False,
+            )
+            self.assertIn("diagnose by evidence rather than by symptom-shaped guesses", prompt)
+            self.assertIn("last confirmed progress point", prompt)
+            self.assertIn("first unconfirmed next step", prompt)
+            self.assertIn("Use the narrowest proven claim", prompt)
 
     def test_build_generator_prompt_mentions_github_review_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -625,8 +671,43 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             self.assertIn("Contract checklist copied from `contract.md`", prompt)
             self.assertIn("Disagreement Adjudication", prompt)
             self.assertIn("Do not repeat the same blocker without stronger evidence", prompt)
+            self.assertIn("directly supported by evidence or only inferred from symptoms", prompt)
+            self.assertIn("narrowest justified blocker wording", prompt)
             self.assertIn("Code paths inspected", prompt)
             self.assertIn("Verification reviewed", prompt)
+
+    def test_build_reviewer_followup_prompt_includes_blocker_diagnosis_check_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0002"
+            prev_turn_dir = Path(tmp_dir) / "turns" / "0001"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            (task_root / MODULE.CONTRACT_FILENAME).write_text("# Definition of Done\n\n- [ ] One check\n", encoding="utf-8")
+            (prev_turn_dir / "generator").mkdir(parents=True)
+            (prev_turn_dir / "generator" / "message.md").write_text("generator", encoding="utf-8")
+            (prev_turn_dir / "generator" / "status.json").write_text(
+                json.dumps(
+                    {
+                        "result": "implemented",
+                        "summary": "Made a change.",
+                        "changed_files": ["src/example.py"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            prompt = MODULE.build_reviewer_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                2,
+                state={"review_bridge": {"mode": "internal"}},
+                inspection=inspection,
+                inline_context=False,
+            )
+            self.assertIn("directly supported by evidence or only inferred from symptoms", prompt)
+            self.assertIn("narrowest justified blocker wording", prompt)
+            self.assertIn("Blocker Diagnosis Check", prompt)
 
     def test_reviewer_posture_is_forensic_when_spec_is_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

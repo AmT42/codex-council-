@@ -2775,7 +2775,7 @@ def format_reviewer_message_requirements_block(task_root: Path, inspection: dict
     has_review = inspection["doc_paths"]["review"] is not None
     has_contract = inspection["doc_paths"]["contract"] is not None
     posture = reviewer_posture_for_task_root(task_root, inspection, state)
-    lines = ["- Verdict summary"]
+    lines = ["- Verdict summary", "- Primary User Path Check", "- Blocker Diagnosis Check when the generator emitted `blocked` or made a root-cause blocker claim"]
     if has_review:
         lines.append("- Disagreement Adjudication")
     if has_contract:

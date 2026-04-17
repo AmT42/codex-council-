@@ -37,6 +37,12 @@ These are not executable council briefs.
 5. Create `contract.md` with auditable checks.
 6. Decide whether the work is still too broad and needs `spec.md`.
 
+If the user is reporting a blocker, hang, timeout, or “it got stuck” symptom:
+
+7. rewrite the finding in evidence-first form
+8. separate observed fact from inferred cause
+9. preserve uncertainty when the root cause is not directly proven
+
 If the work needs `spec.md`, do not stop at “what feature are we building?”. Normalize the request into explicit decisions about the relevant execution model too: source of truth, read/write paths, fallback behavior, runtime constraints, integrity invariants, and validation hooks when those dimensions matter.
 
 ## When to ask questions

@@ -14,6 +14,10 @@ Read these files directly for the review:
 
 {{reviewer_focus_block}}
 
+Verify the primary user-facing behavior directly when the task is workflow-heavy, agentic, or easy to satisfy through the wrong adjacent path. Do not approve code that only makes a helper, maintenance, curation, or background path work unless that is the intended product behavior.
+If a simple obvious smoke interaction would reveal whether the branch solves the right user problem, prefer that check before trusting deeper internal architecture reasoning.
+If the generator reports a blocker or names a root cause, verify whether the claim is directly supported by evidence or only inferred from symptoms. Prefer the narrowest justified blocker wording.
+
 When the review is complete, write exactly these files:
 - {{reviewer_message_path}}
 - {{reviewer_status_path}}

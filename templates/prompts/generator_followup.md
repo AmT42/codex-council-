@@ -22,6 +22,9 @@ Before making changes, read the previous reviewer artifacts carefully:
 
 {{generator_objective_block}}
 
+Preserve the primary user-facing path described in the task documents. Do not treat a maintenance, helper, curation, migration, or repair path as an acceptable replacement unless the docs explicitly say so.
+If you hit a blocker, diagnose by evidence rather than by symptom-shaped guesses. State the last confirmed progress point, the first unconfirmed next step, and the direct observation supporting your blocker wording. Use the narrowest proven claim.
+
 If you changed repo-tracked files in this turn, create a git commit before writing the generator artifacts for this turn.
 
 When the implementation is complete, write exactly these files:

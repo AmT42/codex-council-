@@ -23,6 +23,10 @@ Under `## Findings`:
 - list concrete issues
 - keep one finding per bullet when possible
 - describe the observable problem or code-level mismatch
+- if relevant, say whether the issue is:
+  - wrong user-facing path
+  - wrong maintenance/background path
+  - wrong substitution between the two
 
 Under `## Context`:
 
@@ -44,6 +48,9 @@ Strong findings:
 - describe the behavior mismatch
 - mention likely surfaces
 - point at the repro or evidence
+- make it clear when the code implements a nearby helper/maintenance path but misses the primary user intent
+- distinguish observed fact from inferred cause when the issue involves a blocker, stall, or timeout
+- prefer the narrowest justified blocker wording rather than naming a guessed root cause
 
 ## Good defaults
 
@@ -51,6 +58,7 @@ Strong findings:
 - Avoid mixing broad product requirements into `review.md`.
 - Pair `review.md` with `contract.md` for most non-trivial runs.
 - Add `task.md` only if the generator would otherwise lack a useful short brief.
+- Prefer product-sanity findings over purely architectural vibes when a simple user workflow should obviously work.
 
 ## Example seed
 

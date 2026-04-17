@@ -120,7 +120,35 @@ Typical dimensions that must be either decided or marked explicitly not applicab
 - state / integrity / concurrency invariants
 - observability / validation hooks
 
+When the target work is agentic, workflow-heavy, or prompt-sensitive, also decide:
+
+- the primary user-facing path or intent
+- any background, maintenance, or curation paths
+- which of those paths must **not** be substituted for each other
+- any prompt or system-design implications that materially change behavior
+
 If one of those dimensions is relevant to the requested work and the docs still leave it open, the outer agent should fix the docs before launch instead of hoping the council will infer the intended policy.
+
+## Evidence-First Diagnosis
+
+When a run, test, or validation step blocks, do not collapse the symptom into a guessed root cause.
+
+The outer agent should prefer this order:
+
+1. identify the last confirmed progress point
+2. identify the first unconfirmed next step
+3. collect at least one direct observation about the boundary or dependency involved
+4. separate:
+   - observed fact
+   - inference
+   - conclusion
+
+Rules:
+
+- Prefer the narrowest proven claim.
+- Do not name a dependency, service, or subsystem as the root cause unless there is a direct observation supporting that claim.
+- “It blocked during X” is better than “X is broken” when the evidence only proves the first statement.
+- This applies across all blocker types: infrastructure, locks, queues, workers, file state, subprocesses, and application code.
 
 ## Request Classification
 
@@ -245,6 +273,17 @@ The outer agent should recognize that:
 - a spec is needed
 - a contract is needed
 - blocking questions are justified
+
+Weak input:
+
+> It should remember things better.
+
+The outer agent should not stop at “add memory.” It should extract:
+
+- what the user should be able to do directly
+- what background/maintenance behavior may support that
+- what path must satisfy the primary user request
+- what adjacent path would be a dangerous substitution
 
 ### Do not do this
 

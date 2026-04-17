@@ -54,6 +54,25 @@ Route:
 - do not add harness-side glue unless the user explicitly asked for a harness feature
 - spec bar: decision-complete for the relevant runtime/state/fallback/integrity dimensions, not just a high-level design sketch
 
+## Broad feature with risky adjacent helper path
+
+User:
+
+> Add a memory system so the agent can remember something when I ask it directly.
+
+Route:
+
+- mode: broad feature or spec work
+- docs: `task.md` + `spec.md` + `contract.md`
+- questions: only if repo inspection cannot determine the main user-facing workflow
+- commands: `init` if needed, fill the docs directly, then `start`
+- spec bar:
+  - define the primary user-facing “remember/store this now” path
+  - define any maintenance/background/curation paths
+  - state forbidden substitutions so the generator does not implement only a helper path and call the feature done
+- review bar:
+  - reviewer must check the obvious user interaction directly, not only internals or passing tests
+
 ## Resume
 
 User:

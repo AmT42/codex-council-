@@ -53,3 +53,21 @@ Behavior:
 - do not stop at the feature headline
 - decide the relevant source-of-truth, read/write flow, fallback, runtime, integrity, and validation policy in `spec.md`
 - if one of those dimensions is still open and would materially change implementation, ask a blocking question or stop instead of launching
+
+## User-intent preservation example
+
+User:
+
+> Make the system remember this fact when I ask it to.
+
+Behavior:
+
+- do not stop at “memory architecture”
+- identify the primary user-facing intent:
+  - a normal foreground “remember/store this now” path
+- identify any nearby maintenance/curation/background paths:
+  - periodic promotion
+  - pre-compaction flush
+  - repair jobs
+- make the spec say which path must satisfy the request
+- make the spec say which nearby paths are supporting only and must not silently substitute for the main interaction

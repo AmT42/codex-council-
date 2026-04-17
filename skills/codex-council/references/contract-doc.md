@@ -30,6 +30,7 @@ Good contract items usually cover:
 - the required behavior
 - an important risk or regression guardrail
 - required validation
+- when relevant, the correct path for the user-visible behavior
 
 Bad contract items:
 
@@ -63,6 +64,8 @@ Useful categories:
 - verification requirement such as tests, repro, or manual validation
 
 When the spec introduces runtime, fallback, state, persistence, or compatibility guarantees, ensure at least one checklist item makes those guarantees auditable.
+
+If the task has both a primary user-facing path and a maintenance/background/helper path, ensure at least one checklist item makes it auditable that the primary behavior is satisfied by the correct path and not merely by an adjacent helper mechanism.
 
 ## Example seed
 

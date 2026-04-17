@@ -71,6 +71,12 @@ Then load only the references needed for the chosen route:
 - Do not pass vague user wording directly into the council docs.
 - Do not do the target-repo implementation work yourself when the harness is the requested tool.
 - For broad/spec-driven work, do not stop at architecture shape. Write a **decision-complete** `spec.md` that covers the relevant runtime, state, fallback, performance, and validation consequences so the generator does not need to invent policy.
+- When the task is agentic, workflow-driven, or prompt-sensitive, make the brief explicit about:
+  - the primary user-facing path or intent
+  - any maintenance/background/curation paths
+  - forbidden substitutions between those paths
+  - prompt/system-design consequences that must not be improvised in code
+- When the current run or prior findings include a blocker, timeout, or stall report, normalize that report into the strongest evidence-backed form rather than passing through a guessed root cause. Prefer the narrowest proven claim.
 - Do not launch `start`, `continue`, or `reopen` and then abandon the supervisor process.
 - This is a process-lifetime rule, not a special built-in Codex background feature.
 - A plain foreground command is fine only when you will stay attached and wait for the supervisor.
@@ -101,6 +107,7 @@ Instead:
 - write stronger docs than the user could have written directly
 - escalate to `spec.md` when needed
 - when using `spec.md`, cover not just what is being built, but the relevant source-of-truth, read/write flow, failure/fallback, runtime cost, integrity/concurrency, and observability decisions unless they are explicitly not applicable
+- explicitly preserve the primary user-facing intent so the generator does not solve the wrong adjacent workflow
 
 Use [`references/novice-normalization.md`](./references/novice-normalization.md) before handling vague or under-specified requests.
 

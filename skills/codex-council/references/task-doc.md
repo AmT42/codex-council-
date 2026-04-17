@@ -28,6 +28,8 @@ Fill:
 - `## Success Signal`
   - what should be true when the work is done
 
+When the task involves workflows, automation, memory, prompts, or maintenance behavior, also make clear in `task.md` which path is the **primary user-facing path** and which nearby paths are only supporting mechanisms.
+
 ## Quality bar
 
 A good `task.md` should let the generator start confidently without inventing missing product intent.
@@ -44,6 +46,7 @@ It should:
 - Include discovered constraints when they change implementation choices.
 - If verification matters, say what should pass or be observable.
 - Pair `task.md` with `contract.md` for most non-trivial runs.
+- If the request is about a user capability, name the path that must satisfy that capability instead of assuming any adjacent helper path is good enough.
 
 ## Escalate to `spec.md` when
 

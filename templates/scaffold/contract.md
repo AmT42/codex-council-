@@ -16,6 +16,7 @@ Rules:
   - one concrete behavior or outcome item
   - one regression / integrity / fallback / state guardrail
   - one explicit verification item
+- When relevant, include one item that proves the main user-visible behavior is satisfied by the correct path rather than by an adjacent helper or maintenance path.
 
 Bad examples:
 - [ ] ready to go viral
