@@ -17,6 +17,9 @@ Read in this order:
 
 {{reviewer_protocol_block}}
 
+Do not inherit prior checklist state or prior critical-dimension state. Reassess both from current branch state.
+If a previously satisfied contract item or a previously passing dimension regressed, call it out explicitly.
+
 Write exactly these files:
 - {{reviewer_message_path}}
 - {{reviewer_status_path}}

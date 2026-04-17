@@ -854,6 +854,19 @@ def coerce_string_list(value, default: list[str], field_name: str) -> list[str]:
     return normalized
 
 
+def coerce_enum_str(value, default: str, allowed: set[str], field_name: str) -> str:
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise SystemExit(f"invalid config value for {field_name}: expected string")
+    normalized = value.strip()
+    if normalized not in allowed:
+        raise SystemExit(
+            f"invalid config value for {field_name}: expected one of {', '.join(sorted(allowed))}"
+        )
+    return normalized
+
+
 def read_text_arg(value: str | None, file_path: str | None, default: str = "") -> str:
     if value and file_path:
         raise SystemExit("pass either a literal value or a file, not both")
@@ -1467,6 +1480,12 @@ def load_council_config(repo_root: Path) -> dict:
                 True,
                 "review.fresh_reviewer_session_per_turn",
             ),
+            "reviewer_reset_mode": coerce_enum_str(
+                review_cfg.get("reviewer_reset_mode"),
+                "clear",
+                {"clear", "restart"},
+                "review.reviewer_reset_mode",
+            ),
             "allow_reviewer_test_edits": coerce_bool(
                 review_cfg.get("allow_reviewer_test_edits"),
                 True,
@@ -1787,6 +1806,45 @@ def restart_role_session(
         tmux_name,
         repo_root,
         command,
+        role=role,
+    )
+
+
+def clear_role_session(
+    tmux_name: str,
+    *,
+    timeout_seconds: float,
+    role: str,
+) -> None:
+    before_pane = tmux_capture_pane(tmux_name)
+    if classify_tmux_pane(before_pane) != "ready":
+        raise SupervisorRuntimeError(
+            "reviewer_session_clear_not_ready",
+            f"tmux session {tmux_name} was not ready for /clear",
+            role=role,
+            details={"pane_excerpt": before_pane[-4000:], "tmux_session": tmux_name},
+        )
+    try:
+        run_subprocess(["tmux", "send-keys", "-t", tmux_name, "/clear"])
+        time.sleep(TMUX_PASTE_SETTLE_SECONDS)
+        run_subprocess(["tmux", "send-keys", "-t", tmux_name, "Enter"])
+    except subprocess.CalledProcessError as exc:
+        raise SupervisorRuntimeError(
+            "reviewer_session_clear_send_failed",
+            f"failed to send /clear to tmux session {tmux_name}: {exc.stderr.strip() or exc}",
+            role=role,
+            details={
+                "command": exc.cmd,
+                "stderr": exc.stderr,
+                "stdout": exc.stdout,
+                "tmux_session": tmux_name,
+            },
+        ) from exc
+    time.sleep(TMUX_PASTE_SETTLE_SECONDS)
+    wait_for_tmux_prompt(
+        tmux_name,
+        timeout_seconds,
+        phase="reviewer_session_clear_ready",
         role=role,
     )
 
@@ -3032,7 +3090,7 @@ def reviewer_posture_for_task_root(task_root: Path, inspection: dict, state: dic
     return "standard"
 
 
-def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict) -> str:
+def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict, *, has_prior_reviewer_history: bool) -> str:
     has_task = inspection["doc_paths"]["task"] is not None
     has_review = inspection["doc_paths"]["review"] is not None
     has_spec = inspection["doc_paths"]["spec"] is not None
@@ -3068,6 +3126,14 @@ def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict) 
                 "Use the review document as the starting findings set and verify fixes against current code.",
                 "If the generator disputes a blocker, adjudicate it by direct evidence.",
                 "Do not repeat the same blocker without stronger evidence. If you cannot add stronger evidence, use `needs_human` instead of looping.",
+            ]
+        )
+    if has_prior_reviewer_history:
+        lines.extend(
+            [
+                "Do not inherit prior contract checklist state. Reassess each contract item from current branch state.",
+                "Do not inherit prior critical-dimension state. Reassess each dimension from current branch state.",
+                "If a previously satisfied contract item or previously passing dimension regressed, call that regression out explicitly.",
             ]
         )
     if has_task and has_spec:
@@ -3107,6 +3173,14 @@ def format_reviewer_protocol_block(turn_dir: Path, state: dict) -> str:
         lines.extend(["", "Initial review surface:", *[f"- {item}" for item in changed_files]])
     lines.extend(["", "Required verification commands:", *[f"- {item}" for item in required_commands]])
     return "\n".join(lines).rstrip()
+
+
+def previous_turn_dir_for(turn_dir: Path) -> Path | None:
+    turn_number = int(turn_dir.name)
+    if turn_number <= 1:
+        return None
+    previous_turn_dir = turn_dir.parent / turn_name(turn_number - 1)
+    return previous_turn_dir if previous_turn_dir.exists() else None
 
 
 def fallback_inspection_required_for_turn(
@@ -3194,6 +3268,8 @@ def format_reviewer_message_requirements_block(task_root: Path, inspection: dict
             format_review_dimensions_block(),
             "- Blocking issues",
             "- Why the branch is or is not subsystem-clean",
+            "- Regressions From Prior Turn, if any",
+            "- Dimension Regressions, if any",
             "- Reviewer-authored tests or fixtures, if any, and why they were needed",
             "- Residual risks or follow-up notes",
         ]
@@ -3360,6 +3436,7 @@ def build_reviewer_turn_prompt(
     fork_context_block: str = "",
     bootstrap_review_block: str = "",
 ) -> str:
+    previous_turn_dir = previous_turn_dir_for(turn_dir)
     docs_to_read_block = (
         format_bootstrap_reviewer_input_files_block(repo_root, task_root, inspection)
         if bootstrap_review_block
@@ -3378,7 +3455,12 @@ def build_reviewer_turn_prompt(
         "reopen_context_block": format_reopen_context_block(state),
         "fork_context_block": fork_context_block,
         "docs_to_read_block": docs_to_read_block,
-        "reviewer_focus_block": format_reviewer_focus_block(task_root, inspection, state),
+        "reviewer_focus_block": format_reviewer_focus_block(
+            task_root,
+            inspection,
+            state,
+            has_prior_reviewer_history=bool(previous_turn_dir and role_status_path(previous_turn_dir, "reviewer").exists()),
+        ),
         "reviewer_protocol_block": format_reviewer_protocol_block(turn_dir, state),
         "reviewer_message_requirements_block": format_reviewer_message_requirements_block(task_root, inspection, state),
         "bootstrap_review_block": bootstrap_review_block,
@@ -6001,18 +6083,44 @@ def enforce_fresh_reviewer_session_for_turn(run_dir: Path, state: dict, turn_num
     had_resume_state = bool(role_state.get("codex_session_id"))
     if not had_existing_session and not had_resume_state:
         return
+    reset_mode = review_cfg.get("reviewer_reset_mode", "clear")
+    if reset_mode == "clear" and had_existing_session:
+        try:
+            clear_role_session(
+                tmux_name,
+                timeout_seconds=float(state["council_config"]["council"]["launch_timeout_seconds"]),
+                role="reviewer",
+            )
+            role_state["last_session_reset_reason"] = "fresh_reviewer_session_clear"
+            save_run_state(run_dir, state)
+            append_run_event(
+                run_dir,
+                "reviewer_session_cleared_for_fresh_turn",
+                turn_number=turn_number,
+                role="reviewer",
+                details={"reset_mode": reset_mode, "had_existing_session": had_existing_session},
+            )
+            return
+        except SupervisorRuntimeError as error:
+            append_run_event(
+                run_dir,
+                "reviewer_session_clear_failed_fallback_restart",
+                turn_number=turn_number,
+                role="reviewer",
+                details={"reset_mode": reset_mode, "error": str(error)},
+            )
     if had_existing_session:
         tmux_kill_session(tmux_name)
     role_state["codex_session_id"] = None
     role_state["codex_thread_name"] = None
-    role_state["last_session_reset_reason"] = "fresh_reviewer_session_per_turn"
+    role_state["last_session_reset_reason"] = "fresh_reviewer_session_restart"
     save_run_state(run_dir, state)
     append_run_event(
         run_dir,
         "reviewer_session_reset_for_fresh_turn",
         turn_number=turn_number,
         role="reviewer",
-        details={"had_existing_session": had_existing_session, "had_resume_state": had_resume_state},
+        details={"had_existing_session": had_existing_session, "had_resume_state": had_resume_state, "reset_mode": reset_mode},
     )
 
 
@@ -6432,8 +6540,35 @@ def run_reviewer_phase(
         turn_number=turn_number,
         role="reviewer",
     )
+    state["roles"]["reviewer"]["last_wait_phase"] = "reviewer_session_reset_started"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "reviewer_session_reset_started", role="reviewer")
+    append_run_event(
+        run_dir,
+        "reviewer_session_reset_started",
+        turn_number=turn_number,
+        role="reviewer",
+    )
     enforce_fresh_reviewer_session_for_turn(run_dir, state, turn_number)
+    state["roles"]["reviewer"]["last_wait_phase"] = "reviewer_session_reset_completed"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "reviewer_session_reset_completed", role="reviewer")
+    append_run_event(
+        run_dir,
+        "reviewer_session_reset_completed",
+        turn_number=turn_number,
+        role="reviewer",
+    )
     ensure_role_session_ready(run_dir, state, "reviewer")
+    state["roles"]["reviewer"]["last_wait_phase"] = "reviewer_session_ready"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "reviewer_session_ready", role="reviewer")
+    append_run_event(
+        run_dir,
+        "reviewer_session_ready",
+        turn_number=turn_number,
+        role="reviewer",
+    )
     wait_for_tmux_prompt(
         state["roles"]["reviewer"]["tmux_session"],
         turn_timeout_seconds,
@@ -6446,6 +6581,8 @@ def run_reviewer_phase(
         phase="reviewer_turn",
         role="reviewer",
     )
+    state["roles"]["reviewer"]["last_wait_phase"] = "reviewer_prompt_sent"
+    save_run_state(run_dir, state)
     save_turn_metadata(current_turn_dir, turn_number, "reviewer_prompt_sent", role="reviewer")
     append_run_event(
         run_dir,
@@ -7324,6 +7461,20 @@ def show_status(args: argparse.Namespace) -> int:
     state = load_json(state_path)
     continuation = inspect_continuation_plan(run_dir, state)
     payload = dict(state)
+    events: list[dict] = []
+    events_path = events_path_for(run_dir)
+    if events_path.exists():
+        try:
+            events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        except Exception:
+            events = []
+
+    latest_role_events: dict[str, dict] = {}
+    for role_name in ("generator", "reviewer"):
+        matching = [event for event in events if event.get("role") == role_name]
+        if matching:
+            latest_role_events[role_name] = matching[-1]
+
     derived_payload = {
         "mode": continuation["mode"],
         "reason": continuation["reason"],
@@ -7345,6 +7496,15 @@ def show_status(args: argparse.Namespace) -> int:
     elif continuation["mode"] == "error":
         derived_payload["details"] = continuation["details"]
     payload["derived_continuation"] = derived_payload
+    if latest_role_events:
+        payload["latest_role_milestones"] = {
+            role_name: {
+                "event": event.get("event"),
+                "turn": event.get("turn"),
+                "details": event.get("details"),
+            }
+            for role_name, event in latest_role_events.items()
+        }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
 
@@ -7759,11 +7919,24 @@ def resolve_turn_continuation(
                 f"turn {turn_label} still needs reviewer work, but later turns already contain conflicting activity",
                 details={"turn": turn_label, "conflicts": conflicts},
             )
-        reason = (
-            f"generator finished on turn {turn_label}, but reviewer has not started yet."
-            if continuation_state == "generator_complete_waiting_reviewer"
-            else f"turn {turn_label} still has incomplete or invalid reviewer artifacts."
-        )
+        if continuation_state == "generator_complete_waiting_reviewer":
+            reason = f"generator finished on turn {turn_label}, but reviewer has not started yet."
+        elif continuation_state == "reviewer_pending":
+            reviewer_phase = turn["metadata"].get("phase")
+            if reviewer_phase == "reviewer_prompt_prepared":
+                reason = f"turn {turn_label} has a prepared reviewer prompt, but the reviewer prompt was not sent yet."
+            elif reviewer_phase == "reviewer_session_reset_started":
+                reason = f"turn {turn_label} started resetting the reviewer session, but the handoff did not complete."
+            elif reviewer_phase == "reviewer_session_reset_completed":
+                reason = f"turn {turn_label} finished resetting the reviewer session, but the reviewer prompt was not sent."
+            elif reviewer_phase == "reviewer_session_ready":
+                reason = f"turn {turn_label} has a ready reviewer session, but the reviewer prompt was not sent."
+            elif reviewer_phase == "reviewer_prompt_sent":
+                reason = f"turn {turn_label} sent the reviewer prompt and is still waiting for reviewer artifacts."
+            else:
+                reason = f"turn {turn_label} still has incomplete reviewer work."
+        else:
+            reason = f"turn {turn_label} still has incomplete or invalid reviewer artifacts."
         return continuation_plan(
             turn_dir=turn["turn_dir"],
             turn_number=turn["turn_number"],

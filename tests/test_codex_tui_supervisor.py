@@ -119,11 +119,9 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 """
 [review]
 fresh_reviewer_session_per_turn = false
+reviewer_reset_mode = "restart"
 allow_reviewer_test_edits = true
 allow_reviewer_production_edits = false
-require_primary_path_smoke = true
-require_branch_health_gate = true
-require_changed_file_coverage = true
 baseline_commands = ["git diff --check", "pytest -q tests/test_example.py"]
 
 [[review.path_rule]]
@@ -135,11 +133,27 @@ commands = ["pytest -q tests/test_workspace.py"]
             )
             config = MODULE.load_council_config(repo_root)
             self.assertFalse(config["review"]["fresh_reviewer_session_per_turn"])
+            self.assertEqual(config["review"]["reviewer_reset_mode"], "restart")
             self.assertEqual(
                 config["review"]["baseline_commands"],
                 ["git diff --check", "pytest -q tests/test_example.py"],
             )
             self.assertEqual(config["review"]["path_rules"][0]["name"], "workspace")
+
+    def test_load_council_config_rejects_unknown_reviewer_reset_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            council_root = repo_root / MODULE.COUNCIL_DIRNAME
+            council_root.mkdir()
+            (council_root / "config.toml").write_text(
+                """
+[review]
+reviewer_reset_mode = "wrong"
+""".strip(),
+                encoding="utf-8",
+            )
+            with self.assertRaises(SystemExit):
+                MODULE.load_council_config(repo_root)
 
     def test_review_required_commands_for_changed_files_includes_matching_rules(self) -> None:
         council_config = self.build_council_config()
@@ -787,6 +801,8 @@ commands = ["pytest -q tests/test_workspace.py"]
             self.assertIn("directly supported by evidence or only inferred from symptoms", prompt)
             self.assertIn("narrowest justified blocker wording", prompt)
             self.assertIn("Blocker Diagnosis Check", prompt)
+            self.assertIn("Do not inherit prior checklist state", prompt)
+            self.assertIn("previously satisfied contract item", prompt)
 
     def test_build_reviewer_prompt_includes_required_commands_and_evidence_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -913,6 +929,56 @@ commands = ["pytest -q tests/test_workspace.py"]
                 MODULE.enforce_fresh_reviewer_session_for_turn(Path(tmp_dir), run_state, 3)
         self.assertIsNone(run_state["roles"]["reviewer"]["codex_session_id"])
         self.assertIsNone(run_state["roles"]["reviewer"]["codex_thread_name"])
+        self.assertEqual(append_event.call_args.args[1], "reviewer_session_reset_for_fresh_turn")
+
+    def test_enforce_fresh_reviewer_session_for_turn_uses_clear_mode_when_ready(self) -> None:
+        run_state = {
+            "council_config": self.build_council_config(),
+            "roles": {
+                "reviewer": {
+                    "tmux_session": "reviewer-tmux",
+                    "codex_session_id": "session-123",
+                    "codex_thread_name": "thread-name",
+                }
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch.object(MODULE, "tmux_session_exists", return_value=True), mock.patch.object(
+                MODULE, "clear_role_session", return_value=None
+            ) as clear_session, mock.patch.object(MODULE, "save_run_state", return_value=None), mock.patch.object(
+                MODULE, "append_run_event", return_value=None
+            ) as append_event:
+                MODULE.enforce_fresh_reviewer_session_for_turn(Path(tmp_dir), run_state, 3)
+        clear_session.assert_called_once()
+        self.assertEqual(run_state["roles"]["reviewer"]["codex_session_id"], "session-123")
+        self.assertEqual(run_state["roles"]["reviewer"]["last_session_reset_reason"], "fresh_reviewer_session_clear")
+        self.assertEqual(append_event.call_args.args[1], "reviewer_session_cleared_for_fresh_turn")
+
+    def test_enforce_fresh_reviewer_session_for_turn_honors_restart_mode(self) -> None:
+        run_state = {
+            "council_config": self.build_council_config(),
+            "roles": {
+                "reviewer": {
+                    "tmux_session": "reviewer-tmux",
+                    "codex_session_id": "session-123",
+                    "codex_thread_name": "thread-name",
+                }
+            },
+        }
+        run_state["council_config"]["review"]["reviewer_reset_mode"] = "restart"
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch.object(MODULE, "tmux_session_exists", return_value=True), mock.patch.object(
+                MODULE, "tmux_kill_session", return_value=None
+            ) as kill_session, mock.patch.object(MODULE, "clear_role_session", return_value=None) as clear_session, mock.patch.object(
+                MODULE, "save_run_state", return_value=None
+            ), mock.patch.object(
+                MODULE, "append_run_event", return_value=None
+            ) as append_event:
+                MODULE.enforce_fresh_reviewer_session_for_turn(Path(tmp_dir), run_state, 3)
+        kill_session.assert_called_once()
+        clear_session.assert_not_called()
+        self.assertIsNone(run_state["roles"]["reviewer"]["codex_session_id"])
+        self.assertEqual(run_state["roles"]["reviewer"]["last_session_reset_reason"], "fresh_reviewer_session_restart")
         self.assertEqual(append_event.call_args.args[1], "reviewer_session_reset_for_fresh_turn")
 
     def test_build_prompts_include_reopen_context(self) -> None:
@@ -2680,6 +2746,8 @@ commands = ["pytest -q tests/test_workspace.py"]
                 run_dir / "state.json",
                 {"status": "blocked", "review_bridge": {"mode": "internal"}},
             )
+            MODULE.append_run_event(run_dir, "generator_prompt_sent", turn_number=1, role="generator")
+            MODULE.append_run_event(run_dir, "reviewer_session_ready", turn_number=1, role="reviewer")
 
             args = argparse.Namespace(
                 task_name="demo-task",
@@ -2695,6 +2763,104 @@ commands = ["pytest -q tests/test_workspace.py"]
             self.assertEqual(payload["derived_continuation"]["mode"], "continue")
             self.assertEqual(payload["derived_continuation"]["role"], "reviewer")
             self.assertEqual(payload["derived_continuation"]["continuation_state"], "generator_complete_waiting_reviewer")
+            self.assertEqual(payload["latest_role_milestones"]["generator"]["event"], "generator_prompt_sent")
+            self.assertEqual(payload["latest_role_milestones"]["reviewer"]["event"], "reviewer_session_ready")
+
+    def test_determine_continue_target_explains_reviewer_reset_handoff_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            MODULE.write_text(turn_one / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_one / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.write_text(turn_one / "reviewer" / "prompt.md", "reviewer prompt")
+            MODULE.save_turn_metadata(turn_one, 1, "reviewer_session_reset_completed", role="reviewer")
+            result = MODULE.determine_continue_target(run_dir, {"review_bridge": {"mode": "internal"}})
+            self.assertEqual(result[:4], (turn_one, 1, "reviewer", False))
+            self.assertEqual(result[4], "reviewer_pending")
+
+    def test_run_reviewer_phase_records_handoff_milestones(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix bug\n\n## Context\n\nctx\n\n## Success Signal\n\nworks\n",
+                encoding="utf-8",
+            )
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            self.write_generator_status(turn_one, changed_files=["src/example.py"])
+            state = {
+                "status": "booting",
+                "current_turn": 1,
+                "pending_turn": None,
+                "pending_role": None,
+                "transition_source_verdict": None,
+                "task_root": str(task_root),
+                "run_dir": str(run_dir),
+                "review_bridge": {"mode": "internal"},
+                "roles": {
+                    "generator": {"tmux_session": "gen", "last_wait_phase": None},
+                    "reviewer": {"tmux_session": "rev", "last_wait_phase": None},
+                },
+                "council_config": self.build_council_config(),
+                "repo_root": str(repo_root),
+            }
+            with mock.patch.object(MODULE, "enforce_fresh_reviewer_session_for_turn", return_value=None), mock.patch.object(
+                MODULE, "ensure_role_session_ready", return_value=None
+            ), mock.patch.object(
+                MODULE, "wait_for_tmux_prompt", return_value=None
+            ), mock.patch.object(
+                MODULE, "tmux_send_prompt", return_value=None
+            ), mock.patch.object(
+                MODULE, "write_raw_final_output_artifact", return_value=None
+            ), mock.patch.object(
+                MODULE, "wait_for_role_artifacts",
+                return_value=(turn_one / "reviewer" / "message.md", turn_one / "reviewer" / "status.json", {
+                    "verdict": "changes_requested",
+                    "summary": "need more work",
+                    "blocking_issues": ["x"],
+                    "critical_dimensions": {
+                        "correctness_vs_intent": "fail",
+                        "regression_risk": "fail",
+                        "failure_mode_and_fallback": "pass",
+                        "state_and_metadata_integrity": "pass",
+                        "test_adequacy": "fail",
+                        "maintainability": "pass",
+                    },
+                    "human_message": None,
+                    "human_source": None,
+                    "reviewed_commit_sha": None,
+                })
+            ):
+                MODULE.write_text(turn_one / "reviewer" / "message.md", "review")
+                MODULE.save_json(
+                    turn_one / "reviewer" / "status.json",
+                    {
+                        "verdict": "changes_requested",
+                        "summary": "need more work",
+                        "blocking_issues": ["x"],
+                        "critical_dimensions": {
+                            "correctness_vs_intent": "fail",
+                            "regression_risk": "fail",
+                            "failure_mode_and_fallback": "pass",
+                            "state_and_metadata_integrity": "pass",
+                            "test_adequacy": "fail",
+                            "maintainability": "pass",
+                        },
+                    },
+                )
+                reviewer_status = MODULE.run_reviewer_phase(run_dir, state, task_root, 1, turn_one, inline_context=True)
+            self.assertEqual(reviewer_status["verdict"], "changes_requested")
+            self.assertEqual(state["roles"]["reviewer"]["last_wait_phase"], "reviewer_prompt_sent")
+            metadata = MODULE.load_turn_metadata(turn_one)
+            self.assertEqual(metadata["phase"], "reviewer_prompt_sent")
 
     def test_save_run_state_rejects_waiting_reviewer_without_reviewer_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
