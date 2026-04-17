@@ -14,6 +14,8 @@ Read these files directly for the review:
 
 {{reviewer_focus_block}}
 
+{{reviewer_protocol_block}}
+
 Verify the primary user-facing behavior directly when the task is workflow-heavy, agentic, or easy to satisfy through the wrong adjacent path. Do not approve code that only makes a helper, maintenance, curation, or background path work unless that is the intended product behavior.
 If a simple obvious smoke interaction would reveal whether the branch solves the right user problem, prefer that check before trusting deeper internal architecture reasoning.
 If the generator reports a blocker or names a root cause, verify whether the claim is directly supported by evidence or only inferred from symptoms. Prefer the narrowest justified blocker wording.
@@ -21,6 +23,7 @@ If the generator reports a blocker or names a root cause, verify whether the cla
 When the review is complete, write exactly these files:
 - {{reviewer_message_path}}
 - {{reviewer_status_path}}
+- {{reviewer_evidence_path}}
 
 In `reviewer/message.md`, include at minimum:
 {{reviewer_message_requirements_block}}
@@ -37,6 +40,7 @@ Use `approved` only when no blocking issues remain and every critical review dim
 Use `changes_requested` only for concrete, repo-actionable fixes.
 Use `blocked` only for external blockers.
 Use `needs_human` when the task documents themselves require clarification.
+`reviewer/evidence.json` must be valid. On `approved`, it must show that every required command ran and passed, changed-file coverage is complete, the primary-path smoke requirement was satisfied, and every approval gate is true.
 
 After writing the required files, print exactly:
 - `COUNCIL_TERMINAL_SUMMARY_BEGIN`

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import fnmatch
 import hashlib
 import json
 from pathlib import Path
@@ -36,6 +37,7 @@ CONTRACT_FILENAME = "contract.md"
 BRANCH_NORTHSTAR_SUMMARY_FILENAME = "branch_northstar_summary.md"
 GITHUB_REVIEW_INPUT_MARKDOWN_FILENAME = "github_review_input.md"
 GITHUB_REVIEW_INPUT_JSON_FILENAME = "github_review_input.json"
+REVIEWER_EVIDENCE_FILENAME = "evidence.json"
 INPUT_DOC_ORDER = ("task", "review", "spec", "contract")
 INPUT_DOC_FILENAMES = {
     "task": TASK_FILENAME,
@@ -831,6 +833,20 @@ def coerce_int(value, default: int, field_name: str) -> int:
     return value
 
 
+def coerce_string_list(value, default: list[str], field_name: str) -> list[str]:
+    if value is None:
+        return list(default)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise SystemExit(f"invalid config value for {field_name}: expected list of strings")
+    normalized: list[str] = []
+    for item in value:
+        stripped = item.strip()
+        if not stripped:
+            raise SystemExit(f"invalid config value for {field_name}: entries must be non-empty strings")
+        normalized.append(stripped)
+    return normalized
+
+
 def read_text_arg(value: str | None, file_path: str | None, default: str = "") -> str:
     if value and file_path:
         raise SystemExit("pass either a literal value or a file, not both")
@@ -955,6 +971,10 @@ def role_message_path(turn_dir: Path, role: str) -> Path:
 
 def role_status_path(turn_dir: Path, role: str) -> Path:
     return role_dir_for(turn_dir, role) / "status.json"
+
+
+def role_evidence_path(turn_dir: Path, role: str) -> Path:
+    return role_dir_for(turn_dir, role) / REVIEWER_EVIDENCE_FILENAME
 
 
 def github_review_input_markdown_path(turn_dir: Path) -> Path:
@@ -1372,6 +1392,30 @@ def load_council_config(repo_root: Path) -> dict:
 
     codex_cfg = data.get("codex", {})
     council_cfg = data.get("council", {})
+    review_cfg = data.get("review", {})
+    review_path_rules = review_cfg.get("path_rule", [])
+    if review_path_rules is None:
+        review_path_rules = []
+    if not isinstance(review_path_rules, list):
+        raise SystemExit("invalid config value for review.path_rule: expected array of tables")
+    normalized_path_rules: list[dict[str, object]] = []
+    for index, item in enumerate(review_path_rules):
+        if not isinstance(item, dict):
+            raise SystemExit("invalid config value for review.path_rule: expected array of tables")
+        rule_name = coerce_str(item.get("name"), f"path-rule-{index + 1}", f"review.path_rule[{index}].name").strip()
+        globs = coerce_string_list(item.get("globs"), [], f"review.path_rule[{index}].globs")
+        if not globs:
+            raise SystemExit(f"invalid config value for review.path_rule[{index}].globs: expected at least one glob")
+        commands = coerce_string_list(item.get("commands"), [], f"review.path_rule[{index}].commands")
+        if not commands:
+            raise SystemExit(f"invalid config value for review.path_rule[{index}].commands: expected at least one command")
+        normalized_path_rules.append(
+            {
+                "name": rule_name,
+                "globs": globs,
+                "commands": commands,
+            }
+        )
 
     return {
         "codex": {
@@ -1413,6 +1457,44 @@ def load_council_config(repo_root: Path) -> dict:
                 1800,
                 "council.turn_timeout_seconds",
             ),
+        },
+        "review": {
+            "fresh_reviewer_session_per_turn": coerce_bool(
+                review_cfg.get("fresh_reviewer_session_per_turn"),
+                True,
+                "review.fresh_reviewer_session_per_turn",
+            ),
+            "allow_reviewer_test_edits": coerce_bool(
+                review_cfg.get("allow_reviewer_test_edits"),
+                True,
+                "review.allow_reviewer_test_edits",
+            ),
+            "allow_reviewer_production_edits": coerce_bool(
+                review_cfg.get("allow_reviewer_production_edits"),
+                False,
+                "review.allow_reviewer_production_edits",
+            ),
+            "require_primary_path_smoke": coerce_bool(
+                review_cfg.get("require_primary_path_smoke"),
+                True,
+                "review.require_primary_path_smoke",
+            ),
+            "require_branch_health_gate": coerce_bool(
+                review_cfg.get("require_branch_health_gate"),
+                True,
+                "review.require_branch_health_gate",
+            ),
+            "require_changed_file_coverage": coerce_bool(
+                review_cfg.get("require_changed_file_coverage"),
+                True,
+                "review.require_changed_file_coverage",
+            ),
+            "baseline_commands": coerce_string_list(
+                review_cfg.get("baseline_commands"),
+                ["git diff --check"],
+                "review.baseline_commands",
+            ),
+            "path_rules": normalized_path_rules,
         },
     }
 
@@ -2075,6 +2157,224 @@ def role_artifact_paths(current_turn_dir: Path, role: str) -> tuple[Path, Path]:
     )
 
 
+def normalize_repo_relative_paths(value, *, field_name: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field_name} must be a list of strings")
+    normalized: list[str] = []
+    for item in value:
+        path_text = item.strip()
+        if not path_text:
+            raise ValueError(f"{field_name} entries must be non-empty strings")
+        normalized.append(path_text)
+    return normalized
+
+
+def normalize_string_list(value, *, field_name: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field_name} must be a list of strings")
+    return [item.strip() for item in value if item.strip()]
+
+
+def normalize_command_results(value, *, field_name: str) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list")
+    normalized: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError(f"{field_name} entries must be objects")
+        command = normalize_required_text(item.get("command"), field_name=f"{field_name} command")
+        result = normalize_required_text(item.get("result"), field_name=f"{field_name} result")
+        if result not in {"passed", "failed"}:
+            raise ValueError(f"{field_name} result must be `passed` or `failed`")
+        normalized.append({"command": command, "result": result})
+    return normalized
+
+
+def normalize_smoke_checks(value, *, field_name: str) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be a list")
+    normalized: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError(f"{field_name} entries must be objects")
+        name = normalize_required_text(item.get("name"), field_name=f"{field_name} name")
+        result = normalize_required_text(item.get("result"), field_name=f"{field_name} result")
+        if result not in {"passed", "failed"}:
+            raise ValueError(f"{field_name} result must be `passed` or `failed`")
+        normalized.append({"name": name, "result": result})
+    return normalized
+
+
+def normalize_approval_gates(value) -> dict[str, bool]:
+    required_keys = {
+        "scope_gate",
+        "verification_gate",
+        "primary_path_gate",
+        "fallback_gate",
+        "regression_gate",
+        "evidence_gate",
+    }
+    if not isinstance(value, dict):
+        raise ValueError("reviewer approval_gates must be an object")
+    normalized: dict[str, bool] = {}
+    for key in required_keys:
+        gate_value = value.get(key)
+        if not isinstance(gate_value, bool):
+            raise ValueError(f"reviewer approval_gates.{key} must be a boolean")
+        normalized[key] = gate_value
+    return normalized
+
+
+def normalize_path_for_match(path_text: str) -> str:
+    return path_text.replace("\\", "/")
+
+
+def path_matches_rule(path_text: str, glob_pattern: str) -> bool:
+    normalized_path = normalize_path_for_match(path_text)
+    normalized_pattern = normalize_path_for_match(glob_pattern)
+    return fnmatch.fnmatch(normalized_path, normalized_pattern)
+
+
+def dedupe_preserving_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
+def review_required_commands_for_changed_files(council_config: dict, changed_files: list[str]) -> list[str]:
+    review_cfg = council_config.get("review", {})
+    commands = list(review_cfg.get("baseline_commands", []))
+    for rule in review_cfg.get("path_rules", []):
+        globs = rule.get("globs", [])
+        if any(path_matches_rule(path_text, glob_text) for path_text in changed_files for glob_text in globs):
+            commands.extend(rule.get("commands", []))
+    return dedupe_preserving_order(commands)
+
+
+def load_reviewer_evidence(turn_dir: Path) -> dict:
+    evidence_path = role_evidence_path(turn_dir, "reviewer")
+    if not evidence_path.exists():
+        raise FileNotFoundError(f"missing reviewer evidence file: {evidence_path}")
+    data = load_json(evidence_path)
+    if not isinstance(data, dict):
+        raise ValueError("reviewer evidence must be a JSON object")
+    return data
+
+
+def validate_reviewer_evidence(
+    evidence: dict,
+    *,
+    changed_files: list[str],
+    council_config: dict,
+    verdict: str,
+    critical_dimensions: dict[str, str],
+) -> dict:
+    normalized_changed_files = normalize_repo_relative_paths(
+        evidence.get("changed_files"),
+        field_name="reviewer evidence changed_files",
+    )
+    if normalized_changed_files != changed_files:
+        raise ValueError("reviewer evidence changed_files must match generator changed_files exactly")
+    inspected_paths = normalize_repo_relative_paths(
+        evidence.get("inspected_paths"),
+        field_name="reviewer evidence inspected_paths",
+    )
+    primary_user_path = normalize_required_text(
+        evidence.get("primary_user_path"),
+        field_name="reviewer evidence primary_user_path",
+    )
+    fallback_paths_checked = normalize_string_list(
+        evidence.get("fallback_paths_checked", []),
+        field_name="reviewer evidence fallback_paths_checked",
+    )
+    required_commands = normalize_string_list(
+        evidence.get("required_commands"),
+        field_name="reviewer evidence required_commands",
+    )
+    expected_required_commands = review_required_commands_for_changed_files(council_config, changed_files)
+    if required_commands != expected_required_commands:
+        raise ValueError("reviewer evidence required_commands must match the runtime-computed required commands")
+    commands_run = normalize_command_results(
+        evidence.get("commands_run"),
+        field_name="reviewer evidence commands_run",
+    )
+    commands_run_by_command = {item["command"]: item["result"] for item in commands_run}
+    failing_commands = normalize_string_list(
+        evidence.get("failing_commands", []),
+        field_name="reviewer evidence failing_commands",
+    )
+    reviewer_authored_tests = normalize_string_list(
+        evidence.get("reviewer_authored_tests", []),
+        field_name="reviewer evidence reviewer_authored_tests",
+    )
+    smoke_checks = normalize_smoke_checks(
+        evidence.get("smoke_checks", []),
+        field_name="reviewer evidence smoke_checks",
+    )
+    contradictions_found = normalize_string_list(
+        evidence.get("contradictions_found", []),
+        field_name="reviewer evidence contradictions_found",
+    )
+    approval_gates = normalize_approval_gates(evidence.get("approval_gates"))
+
+    review_cfg = council_config.get("review", {})
+    if review_cfg.get("require_changed_file_coverage", True):
+        missing_coverage = [path_text for path_text in changed_files if path_text not in inspected_paths]
+        if missing_coverage:
+            raise ValueError(
+                f"reviewer evidence inspected_paths must cover all changed_files; missing: {', '.join(missing_coverage)}"
+            )
+    missing_commands = [command for command in required_commands if command not in commands_run_by_command]
+    if missing_commands:
+        raise ValueError(
+            f"reviewer evidence commands_run must include every required command; missing: {', '.join(missing_commands)}"
+        )
+    normalized_failing = sorted(command for command, result in commands_run_by_command.items() if result == "failed")
+    if sorted(failing_commands) != normalized_failing:
+        raise ValueError("reviewer evidence failing_commands must match commands_run failures exactly")
+    if review_cfg.get("require_primary_path_smoke", True) and not smoke_checks:
+        raise ValueError("reviewer evidence must include at least one primary-path smoke check")
+
+    if verdict == "approved":
+        failed_required_commands = [
+            command for command in required_commands if commands_run_by_command.get(command) != "passed"
+        ]
+        if failed_required_commands:
+            raise ValueError(
+                f"reviewer approved verdict requires all required commands to pass: {', '.join(failed_required_commands)}"
+            )
+        if review_cfg.get("require_primary_path_smoke", True) and not any(
+            smoke_check["result"] == "passed" for smoke_check in smoke_checks
+        ):
+            raise ValueError("reviewer approved verdict requires at least one passing primary-path smoke check")
+        failing_gates = [key for key, gate_value in approval_gates.items() if not gate_value]
+        if failing_gates:
+            raise ValueError(
+                f"reviewer approved verdict requires all approval gates to be true: {', '.join(failing_gates)}"
+            )
+        if any(value != "pass" for value in critical_dimensions.values()):
+            raise ValueError("reviewer approved verdict requires all critical review dimensions to be `pass`")
+
+    return {
+        "changed_files": normalized_changed_files,
+        "inspected_paths": inspected_paths,
+        "primary_user_path": primary_user_path,
+        "fallback_paths_checked": fallback_paths_checked,
+        "required_commands": required_commands,
+        "commands_run": commands_run,
+        "failing_commands": failing_commands,
+        "reviewer_authored_tests": reviewer_authored_tests,
+        "smoke_checks": smoke_checks,
+        "contradictions_found": contradictions_found,
+        "approval_gates": approval_gates,
+    }
+
+
 def load_status_file(path: Path, validator) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"missing status file: {path}")
@@ -2418,6 +2718,24 @@ def validate_reviewer_status(data: dict) -> dict:
     }
 
 
+def validate_reviewer_artifacts_for_turn(current_turn_dir: Path, council_config: dict, data: dict) -> dict:
+    status = validate_reviewer_status(data)
+    generator_status_path = role_status_path(current_turn_dir, "generator")
+    generator_changed_files: list[str] = []
+    if generator_status_path.exists():
+        generator_status = validate_generator_status(load_json(generator_status_path))
+        generator_changed_files = generator_status["changed_files"]
+    evidence = validate_reviewer_evidence(
+        load_reviewer_evidence(current_turn_dir),
+        changed_files=generator_changed_files,
+        council_config=council_config,
+        verdict=status["verdict"],
+        critical_dimensions=status["critical_dimensions"],
+    )
+    status["evidence"] = evidence
+    return status
+
+
 def format_review_dimensions_block() -> str:
     return "\n".join(
         f"- [pass|fail|uncertain] {item['label']}"
@@ -2473,6 +2791,17 @@ def format_reviewer_input_files_block(task_root: Path, inspection: dict, turn_di
             f"- {role_status_path(turn_dir, 'generator')}",
         ]
     )
+    previous_turn_dir = turn_dir.parent / turn_name(int(turn_dir.name) - 1)
+    if previous_turn_dir.exists():
+        previous_message = role_message_path(previous_turn_dir, "reviewer")
+        previous_status = role_status_path(previous_turn_dir, "reviewer")
+        if previous_message.exists() and previous_status.exists():
+            lines.extend(
+                [
+                    f"- {previous_message} (historical context only)",
+                    f"- {previous_status} (historical context only)",
+                ]
+            )
     return "\n".join(lines).rstrip()
 
 
@@ -2771,11 +3100,52 @@ def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict) 
     return "\n".join(lines).rstrip()
 
 
+def format_reviewer_protocol_block(turn_dir: Path, state: dict) -> str:
+    generator_status_path = role_status_path(turn_dir, "generator")
+    changed_files: list[str] = []
+    if generator_status_path.exists():
+        generator_status = validate_generator_status(load_json(generator_status_path))
+        changed_files = generator_status["changed_files"]
+    required_commands = review_required_commands_for_changed_files(state["council_config"], changed_files)
+    review_cfg = state["council_config"]["review"]
+    lines = [
+        "Follow this protocol in order:",
+        "1. Reconstruct scope from the current generator artifacts, changed files, and task documents.",
+        "2. Read every changed file deeply before deciding anything.",
+        "3. Read the subsystem closure for the changed behavior: primary user-facing entrypoint, downstream readers/consumers, fallback/degraded path, relevant state writers/readers, and adjacent tests for touched subsystems.",
+        "4. Execute the required verification commands below and record them in `reviewer/evidence.json`.",
+    ]
+    if review_cfg["require_primary_path_smoke"]:
+        lines.append("5. Perform at least one primary user-path smoke or falsification check and record it in `reviewer/evidence.json`.")
+        next_step_number = 6
+    else:
+        next_step_number = 5
+    if review_cfg["allow_reviewer_test_edits"]:
+        lines.append(
+            f"{next_step_number}. You may add or tighten tests/fixtures only when needed to expose a risky invariant; record any reviewer-authored tests in `reviewer/evidence.json`."
+        )
+        next_step_number += 1
+    if not review_cfg["allow_reviewer_production_edits"]:
+        lines.append(f"{next_step_number}. Never edit production code during review.")
+        next_step_number += 1
+    lines.append(f"{next_step_number}. Approve only if every approval gate passes and the branch is subsystem-clean, not merely task-correct.")
+    if changed_files:
+        lines.extend(["", "Generator changed files:", *[f"- {item}" for item in changed_files]])
+    lines.extend(["", "Required verification commands:", *[f"- {item}" for item in required_commands]])
+    return "\n".join(lines).rstrip()
+
+
 def format_reviewer_message_requirements_block(task_root: Path, inspection: dict, state: dict) -> str:
     has_review = inspection["doc_paths"]["review"] is not None
     has_contract = inspection["doc_paths"]["contract"] is not None
     posture = reviewer_posture_for_task_root(task_root, inspection, state)
-    lines = ["- Verdict summary", "- Primary User Path Check", "- Blocker Diagnosis Check when the generator emitted `blocked` or made a root-cause blocker claim"]
+    lines = [
+        "- Verdict summary",
+        "- Branch Health Verdict",
+        "- Required Checks Selected And Why",
+        "- Primary User Path Check",
+        "- Blocker Diagnosis Check when the generator emitted `blocked` or made a root-cause blocker claim",
+    ]
     if has_review:
         lines.append("- Disagreement Adjudication")
     if has_contract:
@@ -2791,6 +3161,8 @@ def format_reviewer_message_requirements_block(task_root: Path, inspection: dict
             "- Verification reviewed",
             "- Reviewer-authored tests or fixtures, if any, and why they were needed",
             "- Independent verification performed",
+            "- Adjacent suite failures outside the generator verification slice, if any",
+            "- Whether the branch is only task-correct or also subsystem-clean",
             "- Residual risks or follow-up notes",
         ]
     )
@@ -2875,6 +3247,7 @@ def build_generator_turn_prompt(
 ) -> str:
     previous_turn_dir = turn_dir.parent / turn_name(turn_number - 1)
     previous_reviewer_status_path = role_status_path(previous_turn_dir, "reviewer")
+    previous_reviewer_evidence_path = role_evidence_path(previous_turn_dir, "reviewer")
     previous_reviewer_status = None
     previous_reviewer_focus = ""
     if previous_reviewer_status_path.exists():
@@ -2903,6 +3276,12 @@ def build_generator_turn_prompt(
             {joined_issues}
             """
         ).rstrip()
+        if previous_reviewer_evidence_path.exists():
+            previous_reviewer_focus = (
+                previous_reviewer_focus
+                + "\n\nUse the previous reviewer evidence artifact as source-of-truth review telemetry:\n"
+                + f"- {previous_reviewer_evidence_path}"
+            )
     values = {
         "repo_root": str(repo_root),
         "task_name": task_name,
@@ -2964,12 +3343,14 @@ def build_reviewer_turn_prompt(
         "fork_context_block": fork_context_block,
         "docs_to_read_block": docs_to_read_block,
         "reviewer_focus_block": format_reviewer_focus_block(task_root, inspection, state),
+        "reviewer_protocol_block": format_reviewer_protocol_block(turn_dir, state),
         "reviewer_message_requirements_block": format_reviewer_message_requirements_block(task_root, inspection, state),
         "bootstrap_review_block": bootstrap_review_block,
         "generator_message_path": str(role_message_path(turn_dir, "generator")),
         "generator_status_path": str(role_status_path(turn_dir, "generator")),
         "reviewer_message_path": str(role_message_path(turn_dir, "reviewer")),
         "reviewer_status_path": str(role_status_path(turn_dir, "reviewer")),
+        "reviewer_evidence_path": str(role_evidence_path(turn_dir, "reviewer")),
     }
     if bootstrap_review_block:
         template_name = "reviewer_fork_bootstrap.md"
@@ -3068,6 +3449,9 @@ def build_artifact_repair_prompt(
     turn_number: int,
     error_message: str,
 ) -> str:
+    extra_paths = ""
+    if role == "reviewer":
+        extra_paths = f"\n- {role_evidence_path(turn_dir, role)}"
     return render_template_text(
         read_template("prompts", "artifact_repair.md"),
         {
@@ -3075,6 +3459,7 @@ def build_artifact_repair_prompt(
             "turn_name": turn_name(turn_number),
             "message_path": str(role_message_path(turn_dir, role)),
             "status_path": str(role_status_path(turn_dir, role)),
+            "extra_paths": extra_paths,
             "validation_error": error_message,
         },
         template_name="prompts/artifact_repair.md",
@@ -5533,6 +5918,32 @@ def ensure_role_session_ready(run_dir: Path, state: dict, role: str) -> None:
     assign_recent_codex_session_ids(run_dir, state)
 
 
+def enforce_fresh_reviewer_session_for_turn(run_dir: Path, state: dict, turn_number: int) -> None:
+    review_cfg = state["council_config"].get("review", {})
+    if not review_cfg.get("fresh_reviewer_session_per_turn", True):
+        return
+    role_state = state["roles"]["reviewer"]
+    tmux_name = role_state.get("tmux_session")
+    if not isinstance(tmux_name, str) or not tmux_name:
+        return
+    had_existing_session = tmux_session_exists(tmux_name)
+    had_resume_state = bool(role_state.get("codex_session_id"))
+    if not had_existing_session and not had_resume_state:
+        return
+    if had_existing_session:
+        tmux_kill_session(tmux_name)
+    role_state["codex_session_id"] = None
+    role_state["codex_thread_name"] = None
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "reviewer_session_reset_for_fresh_turn",
+        turn_number=turn_number,
+        role="reviewer",
+        details={"had_existing_session": had_existing_session, "had_resume_state": had_resume_state},
+    )
+
+
 def wait_for_tmux_sessions_ready(run_dir: Path, state: dict) -> None:
     launch_timeout_seconds = float(state["council_config"]["council"]["launch_timeout_seconds"])
     for role in active_tmux_roles(state):
@@ -5743,6 +6154,7 @@ def run_reviewer_phase(
         turn_number=turn_number,
         role="reviewer",
     )
+    enforce_fresh_reviewer_session_for_turn(run_dir, state, turn_number)
     ensure_role_session_ready(run_dir, state, "reviewer")
     wait_for_tmux_prompt(
         state["roles"]["reviewer"]["tmux_session"],
@@ -5766,7 +6178,11 @@ def run_reviewer_phase(
     reviewer_artifact_path, _, reviewer_status = wait_for_role_artifacts(
         current_turn_dir,
         "reviewer",
-        validator=validate_reviewer_status,
+        validator=lambda data: validate_reviewer_artifacts_for_turn(
+            current_turn_dir,
+            state["council_config"],
+            data,
+        ),
         timeout_seconds=turn_timeout_seconds,
         phase="reviewer_artifacts",
         tmux_name=state["roles"]["reviewer"]["tmux_session"],

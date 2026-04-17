@@ -9,3 +9,17 @@ max_turns = 6
 launch_timeout_seconds = 60
 turn_timeout_seconds = 1800
 require_git = true
+
+[review]
+fresh_reviewer_session_per_turn = true
+allow_reviewer_test_edits = true
+allow_reviewer_production_edits = false
+require_primary_path_smoke = true
+require_branch_health_gate = true
+require_changed_file_coverage = true
+baseline_commands = ["git diff --check"]
+
+#[[review.path_rule]]
+#name = "workspace_index"
+#globs = ["eve_app/src/tools/core/workspace_index.py", "tests/test_workspace_indexer.py"]
+#commands = ["pytest -q tests/test_workspace_indexer.py"]

@@ -17,6 +17,7 @@ Read these files directly before materializing the local review:
 When the bootstrap review is complete, write exactly these files:
 - {{reviewer_message_path}}
 - {{reviewer_status_path}}
+- {{reviewer_evidence_path}}
 
 In `reviewer/message.md`, include at minimum:
 - Bootstrap summary
