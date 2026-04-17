@@ -81,50 +81,6 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             },
         )
 
-    def build_reviewer_evidence(
-        self,
-        *,
-        changed_files: list[str] | None = None,
-        required_commands: list[str] | None = None,
-        inspected_paths: list[str] | None = None,
-        failing_commands: list[str] | None = None,
-        smoke_checks: list[dict[str, str]] | None = None,
-        approval_gates: dict[str, bool] | None = None,
-        reviewer_authored_tests: list[str] | None = None,
-    ) -> dict:
-        changed = changed_files or ["src/example.py"]
-        commands = required_commands or ["git diff --check"]
-        failing = failing_commands or []
-        command_results = [
-            {"command": command, "result": "failed" if command in failing else "passed"}
-            for command in commands
-        ]
-        return {
-            "changed_files": changed,
-            "inspected_paths": inspected_paths or list(changed),
-            "primary_user_path": "CLI path -> service path",
-            "fallback_paths_checked": ["fallback/path.py"],
-            "required_commands": commands,
-            "commands_run": command_results,
-            "failing_commands": failing,
-            "reviewer_authored_tests": reviewer_authored_tests or [],
-            "smoke_checks": (
-                [{"name": "primary path smoke", "result": "passed"}]
-                if smoke_checks is None
-                else smoke_checks
-            ),
-            "contradictions_found": [],
-            "approval_gates": approval_gates
-            or {
-                "scope_gate": True,
-                "verification_gate": True,
-                "primary_path_gate": True,
-                "fallback_gate": True,
-                "regression_gate": True,
-                "evidence_gate": True,
-            },
-        }
-
     def test_validate_generator_status_accepts_valid_payload(self) -> None:
         status = MODULE.validate_generator_status(
             {
@@ -207,152 +163,6 @@ commands = ["pytest -q tests/test_workspace.py"]
             commands,
             ["git diff --check", "pytest -q tests/test_workspace.py"],
         )
-
-    def test_validate_reviewer_artifacts_rejects_missing_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            turn_dir = Path(tmp_dir) / "turns" / "0001"
-            self.write_generator_status(turn_dir)
-            with self.assertRaisesRegex(FileNotFoundError, "missing reviewer evidence file"):
-                MODULE.validate_reviewer_artifacts_for_turn(
-                    turn_dir,
-                    self.build_council_config(),
-                    {
-                        "verdict": "approved",
-                        "summary": "ok",
-                        "blocking_issues": [],
-                        "critical_dimensions": {
-                            "correctness_vs_intent": "pass",
-                            "regression_risk": "pass",
-                            "failure_mode_and_fallback": "pass",
-                            "state_and_metadata_integrity": "pass",
-                            "test_adequacy": "pass",
-                            "maintainability": "pass",
-                        },
-                    },
-                )
-
-    def test_validate_reviewer_artifacts_rejects_missing_required_command_record(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            turn_dir = Path(tmp_dir) / "turns" / "0001"
-            self.write_generator_status(turn_dir, changed_files=["src/example.py"])
-            council_config = self.build_council_config()
-            council_config["review"]["path_rules"] = [
-                {"name": "src", "globs": ["src/**"], "commands": ["pytest -q tests/test_example.py"]}
-            ]
-            MODULE.save_json(
-                turn_dir / "reviewer" / MODULE.REVIEWER_EVIDENCE_FILENAME,
-                self.build_reviewer_evidence(
-                    changed_files=["src/example.py"],
-                    required_commands=["git diff --check", "pytest -q tests/test_example.py"],
-                    failing_commands=[],
-                ),
-            )
-            # Drop the mapped command from commands_run to force rejection.
-            evidence = MODULE.load_json(turn_dir / "reviewer" / MODULE.REVIEWER_EVIDENCE_FILENAME)
-            evidence["commands_run"] = [{"command": "git diff --check", "result": "passed"}]
-            MODULE.save_json(turn_dir / "reviewer" / MODULE.REVIEWER_EVIDENCE_FILENAME, evidence)
-            with self.assertRaisesRegex(ValueError, "must include every required command"):
-                MODULE.validate_reviewer_artifacts_for_turn(
-                    turn_dir,
-                    council_config,
-                    {
-                        "verdict": "changes_requested",
-                        "summary": "not clean",
-                        "blocking_issues": ["x"],
-                        "critical_dimensions": {
-                            "correctness_vs_intent": "fail",
-                            "regression_risk": "fail",
-                            "failure_mode_and_fallback": "fail",
-                            "state_and_metadata_integrity": "pass",
-                            "test_adequacy": "fail",
-                            "maintainability": "pass",
-                        },
-                    },
-                )
-
-    def test_validate_reviewer_artifacts_rejects_approved_with_failed_required_command(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            turn_dir = Path(tmp_dir) / "turns" / "0001"
-            self.write_generator_status(turn_dir)
-            MODULE.save_json(
-                turn_dir / "reviewer" / MODULE.REVIEWER_EVIDENCE_FILENAME,
-                self.build_reviewer_evidence(failing_commands=["git diff --check"]),
-            )
-            with self.assertRaisesRegex(ValueError, "requires all required commands to pass"):
-                MODULE.validate_reviewer_artifacts_for_turn(
-                    turn_dir,
-                    self.build_council_config(),
-                    {
-                        "verdict": "approved",
-                        "summary": "ok",
-                        "blocking_issues": [],
-                        "critical_dimensions": {
-                            "correctness_vs_intent": "pass",
-                            "regression_risk": "pass",
-                            "failure_mode_and_fallback": "pass",
-                            "state_and_metadata_integrity": "pass",
-                            "test_adequacy": "pass",
-                            "maintainability": "pass",
-                        },
-                    },
-                )
-
-    def test_validate_reviewer_artifacts_rejects_missing_changed_file_coverage(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            turn_dir = Path(tmp_dir) / "turns" / "0001"
-            self.write_generator_status(turn_dir, changed_files=["src/example.py", "tests/test_example.py"])
-            MODULE.save_json(
-                turn_dir / "reviewer" / MODULE.REVIEWER_EVIDENCE_FILENAME,
-                self.build_reviewer_evidence(
-                    changed_files=["src/example.py", "tests/test_example.py"],
-                    inspected_paths=["src/example.py"],
-                ),
-            )
-            with self.assertRaisesRegex(ValueError, "must cover all changed_files"):
-                MODULE.validate_reviewer_artifacts_for_turn(
-                    turn_dir,
-                    self.build_council_config(),
-                    {
-                        "verdict": "changes_requested",
-                        "summary": "missing coverage",
-                        "blocking_issues": ["coverage"],
-                        "critical_dimensions": {
-                            "correctness_vs_intent": "fail",
-                            "regression_risk": "fail",
-                            "failure_mode_and_fallback": "fail",
-                            "state_and_metadata_integrity": "pass",
-                            "test_adequacy": "fail",
-                            "maintainability": "pass",
-                        },
-                    },
-                )
-
-    def test_validate_reviewer_artifacts_rejects_missing_primary_smoke(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            turn_dir = Path(tmp_dir) / "turns" / "0001"
-            self.write_generator_status(turn_dir)
-            MODULE.save_json(
-                turn_dir / "reviewer" / MODULE.REVIEWER_EVIDENCE_FILENAME,
-                self.build_reviewer_evidence(smoke_checks=[]),
-            )
-            with self.assertRaisesRegex(ValueError, "must include at least one primary-path smoke check"):
-                MODULE.validate_reviewer_artifacts_for_turn(
-                    turn_dir,
-                    self.build_council_config(),
-                    {
-                        "verdict": "changes_requested",
-                        "summary": "missing smoke",
-                        "blocking_issues": ["smoke"],
-                        "critical_dimensions": {
-                            "correctness_vs_intent": "fail",
-                            "regression_risk": "fail",
-                            "failure_mode_and_fallback": "fail",
-                            "state_and_metadata_integrity": "pass",
-                            "test_adequacy": "fail",
-                            "maintainability": "pass",
-                        },
-                    },
-                )
 
     def test_normalize_reopen_reason_kind_rejects_unknown_value(self) -> None:
         with self.assertRaises(SystemExit):
@@ -803,9 +613,9 @@ commands = ["pytest -q tests/test_workspace.py"]
                 inline_context=True,
             )
             self.assertIn("Read these files directly before coding:", prompt)
-            self.assertIn(str(task_root / MODULE.TASK_FILENAME), prompt)
-            self.assertIn(str(task_root / MODULE.REVIEW_FILENAME), prompt)
-            self.assertIn(str(task_root / MODULE.SPEC_FILENAME), prompt)
+            self.assertIn(".codex-council/demo-task/task.md", prompt)
+            self.assertIn(".codex-council/demo-task/review.md", prompt)
+            self.assertIn(".codex-council/demo-task/spec.md", prompt)
             self.assertIn("classify each review point as `agree`, `disagree`, or `uncertain`", prompt)
             self.assertIn("diagnose by evidence rather than by symptom-shaped guesses", prompt)
             self.assertIn("last confirmed progress point", prompt)
@@ -839,10 +649,6 @@ commands = ["pytest -q tests/test_workspace.py"]
                 ),
                 encoding="utf-8",
             )
-            MODULE.save_json(
-                prev_turn_dir / "reviewer" / MODULE.REVIEWER_EVIDENCE_FILENAME,
-                self.build_reviewer_evidence(reviewer_authored_tests=["tests/test_review_added.py"]),
-            )
             inspection = MODULE.inspect_task_workspace(task_root)
             prompt = MODULE.build_generator_turn_prompt(
                 Path("/repo"),
@@ -858,7 +664,6 @@ commands = ["pytest -q tests/test_workspace.py"]
             self.assertIn("last confirmed progress point", prompt)
             self.assertIn("first unconfirmed next step", prompt)
             self.assertIn("Use the narrowest proven claim", prompt)
-            self.assertIn(str(prev_turn_dir / "reviewer" / MODULE.REVIEWER_EVIDENCE_FILENAME), prompt)
 
     def test_build_generator_prompt_mentions_github_review_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -945,10 +750,9 @@ commands = ["pytest -q tests/test_workspace.py"]
             self.assertIn("Do not repeat the same blocker without stronger evidence", prompt)
             self.assertIn("directly supported by evidence or only inferred from symptoms", prompt)
             self.assertIn("narrowest justified blocker wording", prompt)
-            self.assertIn("Code paths inspected", prompt)
-            self.assertIn("Verification reviewed", prompt)
+            self.assertIn("Key Code Paths Inspected", prompt)
+            self.assertIn("Verification Performed", prompt)
             self.assertIn("Branch Health Verdict", prompt)
-            self.assertIn(str(turn_dir / "reviewer" / MODULE.REVIEWER_EVIDENCE_FILENAME), prompt)
 
     def test_build_reviewer_followup_prompt_includes_blocker_diagnosis_check_rules(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1006,7 +810,6 @@ commands = ["pytest -q tests/test_workspace.py"]
             )
             self.assertIn("Follow this protocol in order:", prompt)
             self.assertIn("pytest -q tests/test_example.py", prompt)
-            self.assertIn(str(turn_dir / "reviewer" / MODULE.REVIEWER_EVIDENCE_FILENAME), prompt)
 
     def test_reviewer_posture_is_forensic_when_spec_is_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1049,7 +852,7 @@ commands = ["pytest -q tests/test_workspace.py"]
             )
             self.assertIn("Reviewer posture: forensic.", prompt)
             self.assertIn("Treat passing tests as supporting evidence only", prompt)
-            self.assertIn("You may edit repo-tracked files only to add or tighten tests or fixtures", prompt)
+            self.assertIn("You may add or tighten tests/fixtures only when needed", prompt)
 
     def test_reviewer_initial_prompt_uses_standard_posture_for_narrow_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1089,7 +892,6 @@ commands = ["pytest -q tests/test_workspace.py"]
             self.assertIn("distill the current fork/session context", prompt)
             self.assertIn(str(task_root / MODULE.REVIEW_FILENAME), prompt)
             self.assertNotIn(str(role_message_path := turn_dir / "generator" / "message.md"), prompt)
-            self.assertIn(str(turn_dir / "reviewer" / MODULE.REVIEWER_EVIDENCE_FILENAME), prompt)
 
     def test_enforce_fresh_reviewer_session_for_turn_resets_resume_state(self) -> None:
         run_state = {

@@ -37,7 +37,6 @@ CONTRACT_FILENAME = "contract.md"
 BRANCH_NORTHSTAR_SUMMARY_FILENAME = "branch_northstar_summary.md"
 GITHUB_REVIEW_INPUT_MARKDOWN_FILENAME = "github_review_input.md"
 GITHUB_REVIEW_INPUT_JSON_FILENAME = "github_review_input.json"
-REVIEWER_EVIDENCE_FILENAME = "evidence.json"
 INPUT_DOC_ORDER = ("task", "review", "spec", "contract")
 INPUT_DOC_FILENAMES = {
     "task": TASK_FILENAME,
@@ -51,7 +50,15 @@ CANONICAL_FILE_LABELS = {
     "reviewer": "reviewer.instructions.md",
     **INPUT_DOC_FILENAMES,
 }
-CANONICAL_FILE_ORDER = ("task", "review", "spec", "contract", "agents", "generator", "reviewer")
+CANONICAL_FILE_ORDER = (
+    "task",
+    "review",
+    "spec",
+    "contract",
+    "agents",
+    "generator",
+    "reviewer",
+)
 GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked", "needs_human"}
 REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
 HUMAN_SOURCES = {
@@ -973,10 +980,6 @@ def role_status_path(turn_dir: Path, role: str) -> Path:
     return role_dir_for(turn_dir, role) / "status.json"
 
 
-def role_evidence_path(turn_dir: Path, role: str) -> Path:
-    return role_dir_for(turn_dir, role) / REVIEWER_EVIDENCE_FILENAME
-
-
 def github_review_input_markdown_path(turn_dir: Path) -> Path:
     return turn_dir / GITHUB_REVIEW_INPUT_MARKDOWN_FILENAME
 
@@ -1834,7 +1837,16 @@ def wait_for_tmux_prompt(
     )
 
 
-def tmux_send_prompt(tmux_name: str, prompt: str, *, phase: str, role: str) -> None:
+def tmux_send_prompt(
+    tmux_name: str,
+    prompt: str,
+    *,
+    phase: str,
+    role: str,
+    turn_dir: Path | None = None,
+    dispatch_reason: str = "initial",
+    session_reset_reason: str | None = None,
+) -> None:
     buffer_name = f"codex-council-{uuid.uuid4().hex}"
     try:
         before_pane = tmux_capture_pane(tmux_name)
@@ -1873,6 +1885,14 @@ def tmux_send_prompt(tmux_name: str, prompt: str, *, phase: str, role: str) -> N
             after_pane = tmux_capture_pane(tmux_name)
             after_state = classify_tmux_pane(after_pane)
             if pane_fingerprint(after_pane) != before_fingerprint or after_state != "ready":
+                if turn_dir is not None:
+                    record_prompt_dispatch_artifact(
+                        turn_dir,
+                        role,
+                        prompt=prompt,
+                        dispatch_reason=dispatch_reason,
+                        session_reset_reason=session_reset_reason,
+                    )
                 return
         raise SupervisorRuntimeError(
             phase,
@@ -1953,6 +1973,31 @@ def canonical_file_label(key: str) -> str:
 
 def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def repo_relative_path(repo_root: Path, path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(repo_root.resolve()))
+    except ValueError:
+        parts = path.resolve().parts
+        for marker in (COUNCIL_DIRNAME, "turns"):
+            if marker in parts:
+                index = parts.index(marker)
+                return str(Path(*parts[index:]))
+        return str(path)
+
+
+def format_path_group(title: str, repo_root: Path, paths: list[Path]) -> str:
+    filtered = [path for path in paths if path.exists()]
+    if not filtered:
+        return ""
+    lines = [f"{title}:"]
+    lines.extend(f"- {repo_relative_path(repo_root, path)}" for path in filtered)
+    return "\n".join(lines)
+
+
+def compact_repo_root_label() -> str:
+    return "."
 
 
 def build_context_manifest(task_root: Path, *, extra_files: dict[str, Path] | None = None) -> dict:
@@ -2157,72 +2202,11 @@ def role_artifact_paths(current_turn_dir: Path, role: str) -> tuple[Path, Path]:
     )
 
 
-def normalize_repo_relative_paths(value, *, field_name: str) -> list[str]:
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError(f"{field_name} must be a list of strings")
-    normalized: list[str] = []
-    for item in value:
-        path_text = item.strip()
-        if not path_text:
-            raise ValueError(f"{field_name} entries must be non-empty strings")
-        normalized.append(path_text)
-    return normalized
-
-
-def normalize_string_list(value, *, field_name: str) -> list[str]:
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError(f"{field_name} must be a list of strings")
-    return [item.strip() for item in value if item.strip()]
-
-
-def normalize_command_results(value, *, field_name: str) -> list[dict[str, str]]:
-    if not isinstance(value, list):
-        raise ValueError(f"{field_name} must be a list")
-    normalized: list[dict[str, str]] = []
-    for item in value:
-        if not isinstance(item, dict):
-            raise ValueError(f"{field_name} entries must be objects")
-        command = normalize_required_text(item.get("command"), field_name=f"{field_name} command")
-        result = normalize_required_text(item.get("result"), field_name=f"{field_name} result")
-        if result not in {"passed", "failed"}:
-            raise ValueError(f"{field_name} result must be `passed` or `failed`")
-        normalized.append({"command": command, "result": result})
-    return normalized
-
-
-def normalize_smoke_checks(value, *, field_name: str) -> list[dict[str, str]]:
-    if not isinstance(value, list):
-        raise ValueError(f"{field_name} must be a list")
-    normalized: list[dict[str, str]] = []
-    for item in value:
-        if not isinstance(item, dict):
-            raise ValueError(f"{field_name} entries must be objects")
-        name = normalize_required_text(item.get("name"), field_name=f"{field_name} name")
-        result = normalize_required_text(item.get("result"), field_name=f"{field_name} result")
-        if result not in {"passed", "failed"}:
-            raise ValueError(f"{field_name} result must be `passed` or `failed`")
-        normalized.append({"name": name, "result": result})
-    return normalized
-
-
-def normalize_approval_gates(value) -> dict[str, bool]:
-    required_keys = {
-        "scope_gate",
-        "verification_gate",
-        "primary_path_gate",
-        "fallback_gate",
-        "regression_gate",
-        "evidence_gate",
-    }
-    if not isinstance(value, dict):
-        raise ValueError("reviewer approval_gates must be an object")
-    normalized: dict[str, bool] = {}
-    for key in required_keys:
-        gate_value = value.get(key)
-        if not isinstance(gate_value, bool):
-            raise ValueError(f"reviewer approval_gates.{key} must be a boolean")
-        normalized[key] = gate_value
-    return normalized
+def generator_chunk_contract_artifact_paths(current_turn_dir: Path) -> tuple[Path, Path]:
+    return (
+        generator_chunk_contract_message_path(current_turn_dir),
+        generator_chunk_contract_status_path(current_turn_dir),
+    )
 
 
 def normalize_path_for_match(path_text: str) -> str:
@@ -2246,133 +2230,24 @@ def dedupe_preserving_order(items: list[str]) -> list[str]:
     return ordered
 
 
+def default_review_config() -> dict:
+    return {
+        "fresh_reviewer_session_per_turn": True,
+        "allow_reviewer_test_edits": True,
+        "allow_reviewer_production_edits": False,
+        "baseline_commands": ["git diff --check"],
+        "path_rules": [],
+    }
+
+
 def review_required_commands_for_changed_files(council_config: dict, changed_files: list[str]) -> list[str]:
-    review_cfg = council_config.get("review", {})
+    review_cfg = council_config.get("review", default_review_config()) if council_config else default_review_config()
     commands = list(review_cfg.get("baseline_commands", []))
     for rule in review_cfg.get("path_rules", []):
         globs = rule.get("globs", [])
         if any(path_matches_rule(path_text, glob_text) for path_text in changed_files for glob_text in globs):
             commands.extend(rule.get("commands", []))
     return dedupe_preserving_order(commands)
-
-
-def load_reviewer_evidence(turn_dir: Path) -> dict:
-    evidence_path = role_evidence_path(turn_dir, "reviewer")
-    if not evidence_path.exists():
-        raise FileNotFoundError(f"missing reviewer evidence file: {evidence_path}")
-    data = load_json(evidence_path)
-    if not isinstance(data, dict):
-        raise ValueError("reviewer evidence must be a JSON object")
-    return data
-
-
-def validate_reviewer_evidence(
-    evidence: dict,
-    *,
-    changed_files: list[str],
-    council_config: dict,
-    verdict: str,
-    critical_dimensions: dict[str, str],
-) -> dict:
-    normalized_changed_files = normalize_repo_relative_paths(
-        evidence.get("changed_files"),
-        field_name="reviewer evidence changed_files",
-    )
-    if normalized_changed_files != changed_files:
-        raise ValueError("reviewer evidence changed_files must match generator changed_files exactly")
-    inspected_paths = normalize_repo_relative_paths(
-        evidence.get("inspected_paths"),
-        field_name="reviewer evidence inspected_paths",
-    )
-    primary_user_path = normalize_required_text(
-        evidence.get("primary_user_path"),
-        field_name="reviewer evidence primary_user_path",
-    )
-    fallback_paths_checked = normalize_string_list(
-        evidence.get("fallback_paths_checked", []),
-        field_name="reviewer evidence fallback_paths_checked",
-    )
-    required_commands = normalize_string_list(
-        evidence.get("required_commands"),
-        field_name="reviewer evidence required_commands",
-    )
-    expected_required_commands = review_required_commands_for_changed_files(council_config, changed_files)
-    if required_commands != expected_required_commands:
-        raise ValueError("reviewer evidence required_commands must match the runtime-computed required commands")
-    commands_run = normalize_command_results(
-        evidence.get("commands_run"),
-        field_name="reviewer evidence commands_run",
-    )
-    commands_run_by_command = {item["command"]: item["result"] for item in commands_run}
-    failing_commands = normalize_string_list(
-        evidence.get("failing_commands", []),
-        field_name="reviewer evidence failing_commands",
-    )
-    reviewer_authored_tests = normalize_string_list(
-        evidence.get("reviewer_authored_tests", []),
-        field_name="reviewer evidence reviewer_authored_tests",
-    )
-    smoke_checks = normalize_smoke_checks(
-        evidence.get("smoke_checks", []),
-        field_name="reviewer evidence smoke_checks",
-    )
-    contradictions_found = normalize_string_list(
-        evidence.get("contradictions_found", []),
-        field_name="reviewer evidence contradictions_found",
-    )
-    approval_gates = normalize_approval_gates(evidence.get("approval_gates"))
-
-    review_cfg = council_config.get("review", {})
-    if review_cfg.get("require_changed_file_coverage", True):
-        missing_coverage = [path_text for path_text in changed_files if path_text not in inspected_paths]
-        if missing_coverage:
-            raise ValueError(
-                f"reviewer evidence inspected_paths must cover all changed_files; missing: {', '.join(missing_coverage)}"
-            )
-    missing_commands = [command for command in required_commands if command not in commands_run_by_command]
-    if missing_commands:
-        raise ValueError(
-            f"reviewer evidence commands_run must include every required command; missing: {', '.join(missing_commands)}"
-        )
-    normalized_failing = sorted(command for command, result in commands_run_by_command.items() if result == "failed")
-    if sorted(failing_commands) != normalized_failing:
-        raise ValueError("reviewer evidence failing_commands must match commands_run failures exactly")
-    if review_cfg.get("require_primary_path_smoke", True) and not smoke_checks:
-        raise ValueError("reviewer evidence must include at least one primary-path smoke check")
-
-    if verdict == "approved":
-        failed_required_commands = [
-            command for command in required_commands if commands_run_by_command.get(command) != "passed"
-        ]
-        if failed_required_commands:
-            raise ValueError(
-                f"reviewer approved verdict requires all required commands to pass: {', '.join(failed_required_commands)}"
-            )
-        if review_cfg.get("require_primary_path_smoke", True) and not any(
-            smoke_check["result"] == "passed" for smoke_check in smoke_checks
-        ):
-            raise ValueError("reviewer approved verdict requires at least one passing primary-path smoke check")
-        failing_gates = [key for key, gate_value in approval_gates.items() if not gate_value]
-        if failing_gates:
-            raise ValueError(
-                f"reviewer approved verdict requires all approval gates to be true: {', '.join(failing_gates)}"
-            )
-        if any(value != "pass" for value in critical_dimensions.values()):
-            raise ValueError("reviewer approved verdict requires all critical review dimensions to be `pass`")
-
-    return {
-        "changed_files": normalized_changed_files,
-        "inspected_paths": inspected_paths,
-        "primary_user_path": primary_user_path,
-        "fallback_paths_checked": fallback_paths_checked,
-        "required_commands": required_commands,
-        "commands_run": commands_run,
-        "failing_commands": failing_commands,
-        "reviewer_authored_tests": reviewer_authored_tests,
-        "smoke_checks": smoke_checks,
-        "contradictions_found": contradictions_found,
-        "approval_gates": approval_gates,
-    }
 
 
 def load_status_file(path: Path, validator) -> dict:
@@ -2382,10 +2257,13 @@ def load_status_file(path: Path, validator) -> dict:
     return validator(data)
 
 
-def wait_for_role_artifacts(
+def wait_for_artifact_pair(
     current_turn_dir: Path,
     role: str,
     *,
+    artifact_path: Path,
+    status_path: Path,
+    repair_paths: list[Path],
     validator,
     timeout_seconds: float,
     phase: str,
@@ -2393,8 +2271,8 @@ def wait_for_role_artifacts(
     turn_number: int,
     repo_root: Path,
     council_config: dict,
+    resend_reason: str,
 ) -> tuple[Path, Path, dict]:
-    artifact_path, status_path = role_artifact_paths(current_turn_dir, role)
     run_dir = current_turn_dir.parents[1]
     deadline = time.time() + timeout_seconds
     last_error = ""
@@ -2412,7 +2290,7 @@ def wait_for_role_artifacts(
                 save_turn_metadata(
                     current_turn_dir,
                     turn_number,
-                    f"{role}_artifacts_valid",
+                    f"{phase}_valid",
                     role=role,
                     details={
                         "message_path": str(artifact_path),
@@ -2421,7 +2299,7 @@ def wait_for_role_artifacts(
                 )
                 append_run_event(
                     run_dir,
-                    f"{role}_artifacts_valid",
+                    f"{phase}_valid",
                     turn_number=turn_number,
                     role=role,
                     details={"status_path": str(status_path)},
@@ -2432,13 +2310,13 @@ def wait_for_role_artifacts(
                 save_turn_metadata(
                     current_turn_dir,
                     turn_number,
-                    f"{role}_artifacts_invalid",
+                    f"{phase}_invalid",
                     role=role,
                     details={"error": last_error},
                 )
                 append_run_event(
                     run_dir,
-                    f"{role}_artifacts_invalid",
+                    f"{phase}_invalid",
                     turn_number=turn_number,
                     role=role,
                     details={"error": last_error},
@@ -2454,11 +2332,11 @@ def wait_for_role_artifacts(
                         message_path=artifact_path,
                         status_path=status_path,
                     )
-                    repair_prompt = build_artifact_repair_prompt(
-                        current_turn_dir,
-                        role,
+                    repair_prompt = build_artifact_repair_prompt_for_paths(
+                        role=role,
                         turn_number=turn_number,
                         error_message=last_error,
+                        output_paths=repair_paths,
                     )
                     wait_for_tmux_prompt(
                         tmux_name,
@@ -2471,6 +2349,8 @@ def wait_for_role_artifacts(
                         repair_prompt,
                         phase=f"{phase}_repair_prompt",
                         role=role,
+                        turn_dir=current_turn_dir,
+                        dispatch_reason=resend_reason,
                     )
                     append_run_event(
                         run_dir,
@@ -2530,6 +2410,8 @@ def wait_for_role_artifacts(
                 repair_prompt,
                 phase=f"{phase}_session_restart_prompt",
                 role=role,
+                turn_dir=current_turn_dir,
+                dispatch_reason="session_restart_after_context_overflow",
             )
             time.sleep(TMUX_PASTE_SETTLE_SECONDS)
             continue
@@ -2545,6 +2427,37 @@ def wait_for_role_artifacts(
         f"timed out waiting for {role} artifacts in {current_turn_dir}",
         role=role,
         details=details,
+    )
+
+
+def wait_for_role_artifacts(
+    current_turn_dir: Path,
+    role: str,
+    *,
+    validator,
+    timeout_seconds: float,
+    phase: str,
+    tmux_name: str,
+    turn_number: int,
+    repo_root: Path,
+    council_config: dict,
+) -> tuple[Path, Path, dict]:
+    artifact_path, status_path = role_artifact_paths(current_turn_dir, role)
+    repair_paths = [artifact_path, status_path]
+    return wait_for_artifact_pair(
+        current_turn_dir,
+        role,
+        artifact_path=artifact_path,
+        status_path=status_path,
+        repair_paths=repair_paths,
+        validator=validator,
+        timeout_seconds=timeout_seconds,
+        phase=phase,
+        tmux_name=tmux_name,
+        turn_number=turn_number,
+        repo_root=repo_root,
+        council_config=council_config,
+        resend_reason="invalid_artifact_repair",
     )
 
 
@@ -2718,24 +2631,6 @@ def validate_reviewer_status(data: dict) -> dict:
     }
 
 
-def validate_reviewer_artifacts_for_turn(current_turn_dir: Path, council_config: dict, data: dict) -> dict:
-    status = validate_reviewer_status(data)
-    generator_status_path = role_status_path(current_turn_dir, "generator")
-    generator_changed_files: list[str] = []
-    if generator_status_path.exists():
-        generator_status = validate_generator_status(load_json(generator_status_path))
-        generator_changed_files = generator_status["changed_files"]
-    evidence = validate_reviewer_evidence(
-        load_reviewer_evidence(current_turn_dir),
-        changed_files=generator_changed_files,
-        council_config=council_config,
-        verdict=status["verdict"],
-        critical_dimensions=status["critical_dimensions"],
-    )
-    status["evidence"] = evidence
-    return status
-
-
 def format_review_dimensions_block() -> str:
     return "\n".join(
         f"- [pass|fail|uncertain] {item['label']}"
@@ -2750,16 +2645,24 @@ def format_duration_label(seconds: int) -> str:
     return f"{seconds} second" if seconds == 1 else f"{seconds} seconds"
 
 
-def format_doc_paths_block(task_root: Path, inspection: dict, role: str) -> str:
+def canonical_doc_group_paths(task_root: Path, inspection: dict, *, role: str) -> list[Path]:
     paths = canonical_task_paths(task_root, inspection)
-    lines = []
+    ordered: list[Path] = []
     for doc_name in INPUT_DOC_ORDER:
         doc_path = inspection["doc_paths"].get(doc_name)
         if doc_path is not None:
-            lines.append(f"- {doc_path}")
-    lines.append(f"- {paths['agents']}")
-    lines.append(f"- {paths[role]}")
-    return "\n".join(lines).rstrip()
+            ordered.append(doc_path)
+    ordered.extend(
+        [
+            paths["agents"],
+            paths[role],
+        ]
+    )
+    return ordered
+
+
+def format_doc_paths_block(task_root: Path, inspection: dict, role: str) -> str:
+    return "\n".join(str(path) for path in canonical_doc_group_paths(task_root, inspection, role=role)).rstrip()
 
 
 def turn_has_github_review_input(turn_dir: Path) -> bool:
@@ -2769,44 +2672,132 @@ def turn_has_github_review_input(turn_dir: Path) -> bool:
     )
 
 
-def format_generator_input_files_block(task_root: Path, inspection: dict, turn_dir: Path) -> str:
-    lines = [format_doc_paths_block(task_root, inspection, "generator")]
+def format_generator_contract_input_files_block(repo_root: Path, task_root: Path, inspection: dict, turn_dir: Path) -> str:
+    groups = [
+        format_path_group(
+            "Canonical docs",
+            repo_root,
+            canonical_doc_group_paths(task_root, inspection, role="generator"),
+        ),
+    ]
     northstar_path = branch_northstar_summary_path(task_root)
     if northstar_path.exists():
-        lines.append(f"- {northstar_path}")
-    review_markdown_path = github_review_input_markdown_path(turn_dir)
-    review_json_path = github_review_input_json_path(turn_dir)
-    if review_markdown_path.exists():
-        lines.append(f"- {review_markdown_path}")
-    if review_json_path.exists():
-        lines.append(f"- {review_json_path}")
-    return "\n".join(lines).rstrip()
-
-
-def format_reviewer_input_files_block(task_root: Path, inspection: dict, turn_dir: Path) -> str:
-    lines = [format_doc_paths_block(task_root, inspection, "reviewer")]
-    lines.extend(
-        [
-            f"- {role_message_path(turn_dir, 'generator')}",
-            f"- {role_status_path(turn_dir, 'generator')}",
-        ]
-    )
+        groups.append(format_path_group("Supporting context", repo_root, [northstar_path]))
     previous_turn_dir = turn_dir.parent / turn_name(int(turn_dir.name) - 1)
     if previous_turn_dir.exists():
-        previous_message = role_message_path(previous_turn_dir, "reviewer")
-        previous_status = role_status_path(previous_turn_dir, "reviewer")
-        if previous_message.exists() and previous_status.exists():
-            lines.extend(
-                [
-                    f"- {previous_message} (historical context only)",
-                    f"- {previous_status} (historical context only)",
-                ]
-            )
-    return "\n".join(lines).rstrip()
+        previous_reviewer_message = role_message_path(previous_turn_dir, "reviewer")
+        previous_reviewer_status = role_status_path(previous_turn_dir, "reviewer")
+        previous_reviewer_evidence = role_evidence_path(previous_turn_dir, "reviewer")
+        historical = [previous_reviewer_message, previous_reviewer_status, previous_reviewer_evidence]
+        group = format_path_group("Prior-turn historical context", repo_root, historical)
+        if group:
+            groups.append(group)
+    return "\n\n".join(item for item in groups if item).rstrip()
 
 
-def format_bootstrap_reviewer_input_files_block(task_root: Path, inspection: dict) -> str:
-    return format_doc_paths_block(task_root, inspection, "reviewer")
+def format_generator_execution_input_files_block(
+    repo_root: Path,
+    task_root: Path,
+    inspection: dict,
+    turn_dir: Path,
+    *,
+    include_previous_reviewer: bool,
+) -> str:
+    groups = [
+        format_path_group(
+            "Canonical docs",
+            repo_root,
+            canonical_doc_group_paths(task_root, inspection, role="generator"),
+        ),
+        format_path_group(
+            "Current turn artifacts",
+            repo_root,
+            [role_message_path(turn_dir, "generator"), role_status_path(turn_dir, "generator")],
+        ) if role_message_path(turn_dir, "generator").exists() or role_status_path(turn_dir, "generator").exists() else "",
+    ]
+    review_markdown_path = github_review_input_markdown_path(turn_dir)
+    review_json_path = github_review_input_json_path(turn_dir)
+    external_review_group = format_path_group("External review input", repo_root, [review_markdown_path, review_json_path])
+    if external_review_group:
+        groups.append(external_review_group)
+    if include_previous_reviewer:
+        previous_turn_dir = turn_dir.parent / turn_name(int(turn_dir.name) - 1)
+        previous = [
+            role_message_path(previous_turn_dir, "reviewer"),
+            role_status_path(previous_turn_dir, "reviewer"),
+        ]
+        group = format_path_group("Prior-turn historical context", repo_root, previous)
+        if group:
+            groups.append(group)
+    return "\n\n".join(item for item in groups if item).rstrip()
+
+
+def format_evaluator_contract_input_files_block(repo_root: Path, task_root: Path, inspection: dict, turn_dir: Path) -> str:
+    groups = [
+        format_path_group(
+            "Canonical docs",
+            repo_root,
+            canonical_doc_group_paths(task_root, inspection, role="reviewer"),
+        ),
+        format_path_group(
+            "Turn contract proposal",
+            repo_root,
+            [
+                chunk_contract_path(turn_dir),
+                generator_chunk_contract_message_path(turn_dir),
+                generator_chunk_contract_status_path(turn_dir),
+            ],
+        ),
+        format_path_group(
+            "Runtime brief",
+            repo_root,
+            [evaluator_brief_path(turn_dir)],
+        ),
+    ]
+    return "\n\n".join(item for item in groups if item).rstrip()
+
+
+def format_evaluator_execution_input_files_block(
+    repo_root: Path,
+    task_root: Path,
+    inspection: dict,
+    turn_dir: Path,
+    *,
+    include_previous_reviewer: bool,
+) -> str:
+    groups = [
+        format_path_group(
+            "Canonical docs",
+            repo_root,
+            canonical_doc_group_paths(task_root, inspection, role="reviewer"),
+        ),
+        format_path_group(
+            "Current turn artifacts",
+            repo_root,
+            [
+                role_message_path(turn_dir, "generator"),
+                role_status_path(turn_dir, "generator"),
+            ],
+        ),
+    ]
+    if include_previous_reviewer:
+        previous_turn_dir = turn_dir.parent / turn_name(int(turn_dir.name) - 1)
+        historical = [
+            role_message_path(previous_turn_dir, "reviewer"),
+            role_status_path(previous_turn_dir, "reviewer"),
+        ]
+        group = format_path_group("Prior-turn historical context", repo_root, historical)
+        if group:
+            groups.append(group)
+    return "\n\n".join(item for item in groups if item).rstrip()
+
+
+def format_bootstrap_reviewer_input_files_block(repo_root: Path, task_root: Path, inspection: dict) -> str:
+    return format_path_group(
+        "Canonical docs",
+        repo_root,
+        canonical_doc_group_paths(task_root, inspection, role="reviewer"),
+    )
 
 
 def generator_requires_findings_triage(
@@ -2934,29 +2925,29 @@ def format_reopen_context_block(state: dict) -> str:
     doc_comparison = reopen.get("doc_comparison", {})
     lines = [
         "Reopen context:",
-        "- This run explicitly supersedes a prior approved run; do not treat that historical approval as the current source of truth.",
-        f"- Reopened from run `{reopened_from.get('run_id', 'unknown')}` turn `{reopened_from.get('turn', 'unknown')}`.",
-        f"- Reopen reason kind: `{reopen.get('reason_kind', 'unknown')}`.",
-        f"- Reopen reason: {reopen.get('reason_message', '')}",
+        f"- Source: run `{reopened_from.get('run_id', 'unknown')}` turn `{reopened_from.get('turn', 'unknown')}`.",
+        f"- Reason kind: `{reopen.get('reason_kind', 'unknown')}`.",
+        f"- Reason: {reopen.get('reason_message', '')}",
     ]
     if reopen.get("reason_kind") == "false_approved":
-        lines.append("- Interpret the earlier approval as incorrect under the intended requirements that were in force at the time.")
+        lines.append("- Treat the earlier approval as historical only; it was incorrect under the intended requirements.")
     elif reopen.get("reason_kind") == "requirements_changed_after_approval":
-        lines.append("- Interpret the earlier approval as historical only; the active canonical docs changed after approval and now supersede it.")
+        lines.append("- Treat the earlier approval as historical only; canonical docs changed after it.")
     docs_changed = doc_comparison.get("docs_changed_since_approval")
     if docs_changed is True:
-        lines.append("- Canonical docs changed since that approval.")
         changed_existing = doc_comparison.get("changed_existing_docs") or []
         added_docs = doc_comparison.get("added_docs") or []
         removed_docs = doc_comparison.get("removed_docs") or []
+        changed_summary: list[str] = []
         if changed_existing:
-            lines.append("- Existing docs changed: " + ", ".join(f"`{name}`" for name in changed_existing))
+            changed_summary.append("changed " + ", ".join(f"`{name}`" for name in changed_existing))
         if added_docs:
-            lines.append("- Docs added since approval: " + ", ".join(f"`{name}`" for name in added_docs))
+            changed_summary.append("added " + ", ".join(f"`{name}`" for name in added_docs))
         if removed_docs:
-            lines.append("- Docs removed since approval: " + ", ".join(f"`{name}`" for name in removed_docs))
+            changed_summary.append("removed " + ", ".join(f"`{name}`" for name in removed_docs))
+        lines.append("- Canonical docs changed since the prior approval." + (f" ({'; '.join(changed_summary)})" if changed_summary else ""))
     elif docs_changed is False:
-        lines.append("- Canonical docs compared against the approved run are unchanged.")
+        lines.append("- Canonical docs are unchanged relative to the earlier approval.")
     return "\n".join(lines).rstrip()
 
 
@@ -2984,6 +2975,7 @@ def format_generator_message_requirements_block(
         )
     lines.extend(
         [
+            "- Which chunk-contract items were implemented",
             "- What changed",
             "- Commit created for this turn, or explicitly say that no repo-tracked files changed",
         ]
@@ -3046,55 +3038,48 @@ def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict) 
     has_spec = inspection["doc_paths"]["spec"] is not None
     has_contract = inspection["doc_paths"]["contract"] is not None
     posture = reviewer_posture_for_task_root(task_root, inspection, state)
-    lines = ["Review the current repository state and the generator artifacts carefully."]
+    lines = ["Audit the current repository state, not just the generator narrative."]
     if posture == "forensic":
         lines.extend(
             [
                 "Reviewer posture: forensic.",
-                "Start by deeply reading the changed code and reconstructing the real execution model before looking at tests or checklist satisfaction.",
-                "Trace the relevant read path, write path, fallback or degraded path, and downstream readers or consumers for the changed behavior.",
-                "Treat passing tests as supporting evidence only; they are not the primary proof that the implementation is correct or production-safe.",
-                "Perform at least one falsification attempt on the riskiest invariant even if the provided verification is green.",
-                "You may edit repo-tracked files only to add or tighten tests or fixtures when that is necessary to falsify or confirm a risky invariant. Do not edit production code.",
+                "Read code and reconstruct the execution model before trusting tests or checklist satisfaction.",
+                "Trace the primary path, fallback/degraded behavior, and direct downstream consumers.",
+                "Treat passing tests as supporting evidence only; they are not the primary proof of correctness.",
             ]
         )
     elif posture == "deep":
         lines.extend(
             [
                 "Reviewer posture: deep.",
-                "Read the changed code before treating tests or checklist satisfaction as evidence of correctness.",
-                "Inspect at least one downstream reader, consumer, or fallback path relevant to the changed behavior.",
-                "Treat passing tests as supporting evidence, not as sufficient proof by themselves.",
-                "You may edit repo-tracked files only to add or tighten tests or fixtures when that materially improves the review evidence. Do not edit production code.",
+                "Read code first and inspect at least one downstream reader, consumer, or fallback path.",
             ]
         )
     else:
         lines.extend(
             [
                 "Reviewer posture: standard.",
-                "Read the changed code and verify the key behavior directly; do not rely on tests alone.",
+                "Read code and verify the key behavior directly before trusting tests.",
             ]
         )
     if has_review:
         lines.extend(
             [
-                "Use the review document as the starting findings set.",
-                "Verify whether the cited issues were fixed, whether the generator rejected any points correctly, and whether new bugs or regressions were introduced while fixing them.",
-                "If the generator disputes a blocker with concrete code evidence, adjudicate that disagreement explicitly.",
+                "Use the review document as the starting findings set and verify fixes against current code.",
+                "If the generator disputes a blocker, adjudicate it by direct evidence.",
                 "Do not repeat the same blocker without stronger evidence. If you cannot add stronger evidence, use `needs_human` instead of looping.",
             ]
         )
     if has_task and has_spec:
-        lines.append("Verify the implementation matches both the brief in `task.md` and the detailed requirements in `spec.md`.")
+        lines.append("Judge implementation against both `task.md` and `spec.md`.")
     elif has_task:
-        lines.append("Verify the implementation matches the brief in `task.md`.")
+        lines.append("Judge implementation against `task.md`.")
     if has_contract:
-        lines.append("Treat `contract.md` as an objective approval bar, but only after you have independently audited the changed code and failure behavior. Contract satisfaction does not excuse weak code, silent regressions, or hidden operational risk.")
+        lines.append("Use `contract.md` as an approval bar only after independent audit of code and failure behavior.")
     lines.extend(
         [
-            "Focus on correctness, unintended behavior, regressions, state integrity, maintainability, test adequacy, tech debt, and unnecessary complexity.",
-            "Look for fragile changes that are likely to cause future errors.",
-            "If the implementation is logically correct but introduces avoidable complexity, fragile coupling, hidden debt, or weaker operational behavior than necessary, treat that as a real review issue rather than letting tests dominate the verdict.",
+            "Look for correctness gaps, regressions, hidden operational risk, and avoidable fragility.",
+            "If the generator reports a blocker or names a root cause, verify whether the claim is directly supported by evidence or only inferred from symptoms. Prefer the narrowest justified blocker wording.",
         ]
     )
     return "\n".join(lines).rstrip()
@@ -3106,32 +3091,81 @@ def format_reviewer_protocol_block(turn_dir: Path, state: dict) -> str:
     if generator_status_path.exists():
         generator_status = validate_generator_status(load_json(generator_status_path))
         changed_files = generator_status["changed_files"]
-    required_commands = review_required_commands_for_changed_files(state["council_config"], changed_files)
-    review_cfg = state["council_config"]["review"]
+    council_config = state.get("council_config", {"review": default_review_config()})
+    required_commands = review_required_commands_for_changed_files(council_config, changed_files)
     lines = [
         "Follow this protocol in order:",
-        "1. Reconstruct scope from the current generator artifacts, changed files, and task documents.",
-        "2. Read every changed file deeply before deciding anything.",
-        "3. Read the subsystem closure for the changed behavior: primary user-facing entrypoint, downstream readers/consumers, fallback/degraded path, relevant state writers/readers, and adjacent tests for touched subsystems.",
-        "4. Execute the required verification commands below and record them in `reviewer/evidence.json`.",
+        "1. Reconstruct scope from the current artifacts and task documents.",
+        "2. Use the initial review surface to find the changed behavior, then expand to subsystem closure.",
+        "3. Audit code before trusting tests or checklist satisfaction.",
+        "4. Execute the required verification commands.",
+        "5. Run at least one targeted smoke or falsification check when the task is workflow-heavy, user-facing, or easy to solve through the wrong adjacent path.",
+        "6. Decide explicitly whether the branch is task-correct, subsystem-clean, and approval-ready.",
     ]
-    if review_cfg["require_primary_path_smoke"]:
-        lines.append("5. Perform at least one primary user-path smoke or falsification check and record it in `reviewer/evidence.json`.")
-        next_step_number = 6
-    else:
-        next_step_number = 5
-    if review_cfg["allow_reviewer_test_edits"]:
-        lines.append(
-            f"{next_step_number}. You may add or tighten tests/fixtures only when needed to expose a risky invariant; record any reviewer-authored tests in `reviewer/evidence.json`."
-        )
-        next_step_number += 1
-    if not review_cfg["allow_reviewer_production_edits"]:
-        lines.append(f"{next_step_number}. Never edit production code during review.")
-        next_step_number += 1
-    lines.append(f"{next_step_number}. Approve only if every approval gate passes and the branch is subsystem-clean, not merely task-correct.")
+    lines.append("7. Never edit production code during review. You may add or tighten tests/fixtures only when needed to expose a risky invariant.")
     if changed_files:
-        lines.extend(["", "Generator changed files:", *[f"- {item}" for item in changed_files]])
+        lines.extend(["", "Initial review surface:", *[f"- {item}" for item in changed_files]])
     lines.extend(["", "Required verification commands:", *[f"- {item}" for item in required_commands]])
+    return "\n".join(lines).rstrip()
+
+
+def fallback_inspection_required_for_turn(
+    task_root: Path,
+    inspection: dict,
+    *,
+    initial_review_surface: list[str],
+) -> bool:
+    combined = "\n".join(
+        text
+        for text in (
+            _optional_doc_text(inspection["doc_paths"].get("task")),
+            _optional_doc_text(inspection["doc_paths"].get("review")),
+            _optional_doc_text(inspection["doc_paths"].get("spec")),
+            _optional_doc_text(inspection["doc_paths"].get("contract")),
+        )
+        if text
+    )
+    if combined and contains_any_phrase(combined, REVIEWER_RISK_HINT_WORDS):
+        return True
+    risk_path_words = ("state", "cache", "checkpoint", "fallback", "search", "worker", "memory", "prompt", "session")
+    return any(any(word in path_text.lower() for word in risk_path_words) for path_text in initial_review_surface)
+
+
+def build_evaluator_brief(
+    repo_root: Path,
+    task_root: Path,
+    inspection: dict,
+    turn_dir: Path,
+    *,
+    state: dict,
+    phase: str,
+    initial_review_surface: list[str],
+    required_commands: list[str],
+) -> str:
+    review_cfg = state.get("council_config", {"review": default_review_config()}).get("review", default_review_config())
+    posture = reviewer_posture_for_task_root(task_root, inspection, state)
+    posture_reason = {
+        "forensic": "Spec work or reopen context makes this a high-risk review.",
+        "deep": "Review/task signals elevated risk or findings-driven follow-up.",
+        "standard": "No spec/reopen risk signals; use the standard audit depth.",
+    }[posture]
+    lines = [
+        f"# Evaluator Brief ({phase})",
+        "",
+        f"- Posture: `{posture}`",
+        f"- Why this posture: {posture_reason}",
+        f"- Primary-path smoke required: {'yes' if review_cfg['require_primary_path_smoke'] else 'no'}",
+        f"- Fallback inspection required: {'yes' if fallback_inspection_required_for_turn(task_root, inspection, initial_review_surface=initial_review_surface) else 'no'}",
+    ]
+    if initial_review_surface:
+        lines.extend(["", "## Initial Review Surface", ""])
+        lines.extend(f"- {path_text}" for path_text in initial_review_surface)
+    if required_commands:
+        lines.extend(["", "## Required Verification", ""])
+        lines.extend(f"- {command}" for command in required_commands)
+    reopen_context = format_reopen_context_block(state)
+    if reopen_context:
+        lines.extend(["", "## Reopen Context", "", reopen_context])
     return "\n".join(lines).rstrip()
 
 
@@ -3141,9 +3175,13 @@ def format_reviewer_message_requirements_block(task_root: Path, inspection: dict
     posture = reviewer_posture_for_task_root(task_root, inspection, state)
     lines = [
         "- Verdict summary",
+        "- What the generator intended to change",
+        "- What actually changed",
         "- Branch Health Verdict",
-        "- Required Checks Selected And Why",
         "- Primary User Path Check",
+        "- Key Code Paths Inspected",
+        "- Subsystem Closure Checked",
+        "- Verification Performed",
         "- Blocker Diagnosis Check when the generator emitted `blocked` or made a root-cause blocker claim",
     ]
     if has_review:
@@ -3155,14 +3193,8 @@ def format_reviewer_message_requirements_block(task_root: Path, inspection: dict
             "- Critical review dimensions, using `[pass]`, `[fail]`, or `[uncertain]`, one line for each of:",
             format_review_dimensions_block(),
             "- Blocking issues",
-            "- Code paths inspected",
-            "- Downstream readers / consumers / fallback paths checked",
-            "- Falsification attempts performed",
-            "- Verification reviewed",
+            "- Why the branch is or is not subsystem-clean",
             "- Reviewer-authored tests or fixtures, if any, and why they were needed",
-            "- Independent verification performed",
-            "- Adjacent suite failures outside the generator verification slice, if any",
-            "- Whether the branch is only task-correct or also subsystem-clean",
             "- Residual risks or follow-up notes",
         ]
     )
@@ -3232,6 +3264,38 @@ def build_continue_context(
     return "\n".join(lines).rstrip()
 
 
+def build_generator_previous_reviewer_focus(
+    previous_turn_dir: Path,
+    *,
+    repo_root: Path,
+) -> tuple[dict | None, str]:
+    previous_reviewer_status_path = role_status_path(previous_turn_dir, "reviewer")
+    previous_reviewer_status = None
+    previous_reviewer_focus = ""
+    if previous_reviewer_status_path.exists():
+        try:
+            previous_reviewer_status = validate_reviewer_status(load_json(previous_reviewer_status_path))
+        except Exception:
+            previous_reviewer_status = None
+    if previous_reviewer_status and previous_reviewer_status["verdict"] == "changes_requested":
+        joined_issues = "\n".join(
+            f"- {item}" for item in previous_reviewer_status["blocking_issues"]
+        ) or "- Address the evaluator blocking issues from the previous turn."
+        previous_reviewer_focus = textwrap.dedent(
+            f"""\
+            The previous evaluator verdict was `changes_requested`.
+            Before proceeding, classify each blocking issue as `agree`, `disagree`, or `uncertain`.
+            - Fix the issues you agree are valid.
+            - If you disagree, explain the disagreement with direct code evidence.
+            - If the remaining blocker comes from ambiguous or unsafe task documents, emit `needs_human`.
+
+            Blocking issues to address:
+            {joined_issues}
+            """
+        ).rstrip()
+    return previous_reviewer_status, previous_reviewer_focus
+
+
 def build_generator_turn_prompt(
     repo_root: Path,
     task_root: Path,
@@ -3246,50 +3310,21 @@ def build_generator_turn_prompt(
     fork_context_block: str = "",
 ) -> str:
     previous_turn_dir = turn_dir.parent / turn_name(turn_number - 1)
-    previous_reviewer_status_path = role_status_path(previous_turn_dir, "reviewer")
-    previous_reviewer_evidence_path = role_evidence_path(previous_turn_dir, "reviewer")
-    previous_reviewer_status = None
-    previous_reviewer_focus = ""
-    if previous_reviewer_status_path.exists():
-        try:
-            previous_reviewer_status = validate_reviewer_status(
-                load_json(previous_reviewer_status_path)
-            )
-        except Exception:
-            previous_reviewer_status = None
-    if previous_reviewer_status and previous_reviewer_status["verdict"] == "changes_requested":
-        joined_issues = "\n".join(
-            f"- {item}" for item in previous_reviewer_status["blocking_issues"]
-        ) or "- Address the reviewer blocking issues from the previous turn."
-        previous_reviewer_focus = textwrap.dedent(
-            f"""\
-            The previous reviewer verdict was `changes_requested`.
-            Before coding, classify each reviewer blocking issue as `agree`, `disagree`, or `uncertain`.
-            - Fix the issues you agree are valid.
-            - If you disagree with a blocker, do not implement it blindly. Explain the disagreement with concrete code evidence in `generator/message.md`.
-            - If you are uncertain, investigate before changing code, and surface the uncertainty explicitly if it remains.
-            - Emit `needs_human` if the remaining blocker comes from ambiguous, contradictory, or unsafe task documents.
-
-            Use `blocked` only for a real external implementation blocker unrelated to clarifying the task itself.
-
-            Reviewer blocking issues to address:
-            {joined_issues}
-            """
-        ).rstrip()
-        if previous_reviewer_evidence_path.exists():
-            previous_reviewer_focus = (
-                previous_reviewer_focus
-                + "\n\nUse the previous reviewer evidence artifact as source-of-truth review telemetry:\n"
-                + f"- {previous_reviewer_evidence_path}"
-            )
+    previous_reviewer_status, previous_reviewer_focus = build_generator_previous_reviewer_focus(previous_turn_dir, repo_root=repo_root)
     values = {
-        "repo_root": str(repo_root),
+        "repo_root": compact_repo_root_label(),
         "task_name": task_name,
         "turn_name": turn_name(turn_number),
         "continue_context_block": continue_context_block,
         "reopen_context_block": format_reopen_context_block(state),
         "fork_context_block": fork_context_block,
-        "docs_to_read_block": format_generator_input_files_block(task_root, inspection, turn_dir),
+        "docs_to_read_block": format_generator_execution_input_files_block(
+            repo_root,
+            task_root,
+            inspection,
+            turn_dir,
+            include_previous_reviewer=bool(previous_reviewer_status and previous_reviewer_status["verdict"] == "changes_requested"),
+        ),
         "review_bridge_block": format_review_bridge_block(state, inspection, turn_dir=turn_dir, role="generator"),
         "generator_objective_block": format_generator_objective_block(
             inspection,
@@ -3302,11 +3337,9 @@ def build_generator_turn_prompt(
             turn_dir=turn_dir,
             previous_reviewer_status=previous_reviewer_status,
         ),
-        "previous_reviewer_message_path": str(role_message_path(previous_turn_dir, "reviewer")),
-        "previous_reviewer_status_path": str(previous_reviewer_status_path),
         "previous_reviewer_focus_block": previous_reviewer_focus,
-        "generator_message_path": str(role_message_path(turn_dir, "generator")),
-        "generator_status_path": str(role_status_path(turn_dir, "generator")),
+        "generator_message_path": repo_relative_path(repo_root, role_message_path(turn_dir, "generator")),
+        "generator_status_path": repo_relative_path(repo_root, role_status_path(turn_dir, "generator")),
     }
     template_name = "generator_initial.md" if inline_context else "generator_followup.md"
     return render_template_text(
@@ -3314,8 +3347,6 @@ def build_generator_turn_prompt(
         values,
         template_name=f"prompts/{template_name}",
     ).rstrip()
-
-
 def build_reviewer_turn_prompt(
     repo_root: Path,
     task_root: Path,
@@ -3330,13 +3361,18 @@ def build_reviewer_turn_prompt(
     bootstrap_review_block: str = "",
 ) -> str:
     docs_to_read_block = (
-        format_bootstrap_reviewer_input_files_block(task_root, inspection)
+        format_bootstrap_reviewer_input_files_block(repo_root, task_root, inspection)
         if bootstrap_review_block
-        else format_reviewer_input_files_block(task_root, inspection, turn_dir)
+        else format_evaluator_execution_input_files_block(
+            repo_root,
+            task_root,
+            inspection,
+            turn_dir,
+            include_previous_reviewer=turn_number > 1,
+        )
     )
     values = {
-        "repo_root": str(repo_root),
-        "task_name": task_root.name,
+        "repo_root": compact_repo_root_label(),
         "turn_name": turn_name(turn_number),
         "continue_context_block": continue_context_block,
         "reopen_context_block": format_reopen_context_block(state),
@@ -3346,11 +3382,8 @@ def build_reviewer_turn_prompt(
         "reviewer_protocol_block": format_reviewer_protocol_block(turn_dir, state),
         "reviewer_message_requirements_block": format_reviewer_message_requirements_block(task_root, inspection, state),
         "bootstrap_review_block": bootstrap_review_block,
-        "generator_message_path": str(role_message_path(turn_dir, "generator")),
-        "generator_status_path": str(role_status_path(turn_dir, "generator")),
-        "reviewer_message_path": str(role_message_path(turn_dir, "reviewer")),
-        "reviewer_status_path": str(role_status_path(turn_dir, "reviewer")),
-        "reviewer_evidence_path": str(role_evidence_path(turn_dir, "reviewer")),
+        "reviewer_message_path": repo_relative_path(repo_root, role_message_path(turn_dir, "reviewer")),
+        "reviewer_status_path": repo_relative_path(repo_root, role_status_path(turn_dir, "reviewer")),
     }
     if bootstrap_review_block:
         template_name = "reviewer_fork_bootstrap.md"
@@ -3405,6 +3438,42 @@ def write_raw_final_output_artifact(turn_dir: Path, role: str, tmux_name: str) -
     )
 
 
+def record_prompt_dispatch_artifact(
+    turn_dir: Path,
+    role: str,
+    *,
+    prompt: str,
+    dispatch_reason: str,
+    session_reset_reason: str | None = None,
+) -> None:
+    dispatch_path = role_dispatch_path(turn_dir, role)
+    existing = load_json(dispatch_path) if dispatch_path.exists() else {}
+    dispatches = existing.get("dispatches", []) if isinstance(existing, dict) else []
+    if not isinstance(dispatches, list):
+        dispatches = []
+    prompt_hash = hash_text(prompt)
+    duplicate_count = sum(1 for item in dispatches if isinstance(item, dict) and item.get("prompt_hash") == prompt_hash)
+    dispatches.append(
+        {
+            "sent_at": now_ts(),
+            "dispatch_reason": dispatch_reason,
+            "prompt_hash": prompt_hash,
+            "duplicate_prompt_hash": duplicate_count > 0,
+            "session_reset_reason": session_reset_reason,
+        }
+    )
+    save_json(
+        dispatch_path,
+        {
+            "prompt_hash": prompt_hash,
+            "dispatch_count": len(dispatches),
+            "dispatches": dispatches,
+            "last_dispatch_reason": dispatch_reason,
+            "last_session_reset_reason": session_reset_reason,
+        },
+    )
+
+
 def write_validation_error_artifacts(
     turn_dir: Path,
     role: str,
@@ -3442,24 +3511,19 @@ def write_validation_error_artifacts(
     )
 
 
-def build_artifact_repair_prompt(
-    turn_dir: Path,
-    role: str,
+def build_artifact_repair_prompt_for_paths(
     *,
+    role: str,
     turn_number: int,
     error_message: str,
+    output_paths: list[Path],
 ) -> str:
-    extra_paths = ""
-    if role == "reviewer":
-        extra_paths = f"\n- {role_evidence_path(turn_dir, role)}"
     return render_template_text(
         read_template("prompts", "artifact_repair.md"),
         {
             "role": role,
             "turn_name": turn_name(turn_number),
-            "message_path": str(role_message_path(turn_dir, role)),
-            "status_path": str(role_status_path(turn_dir, role)),
-            "extra_paths": extra_paths,
+            "output_paths_block": "\n".join(f"- {path}" for path in output_paths),
             "validation_error": error_message,
         },
         template_name="prompts/artifact_repair.md",
@@ -3649,7 +3713,13 @@ def validate_run_state(run_dir: Path, state: dict) -> None:
             },
         )
 
-    if status in {"booting", "approved", "blocked", "paused_needs_human", "max_turns_reached"}:
+    if status in {
+        "booting",
+        "approved",
+        "blocked",
+        "paused_needs_human",
+        "max_turns_reached",
+    }:
         return
 
     current_turn = state.get("current_turn")
@@ -3699,32 +3769,32 @@ def validate_run_state(run_dir: Path, state: dict) -> None:
             )
         return
 
-    if status == "waiting_generator":
+    if status in {"waiting_generator", "waiting_generator_contract"}:
         if not turn_metadata_path(current_turn_dir).exists():
             raise SupervisorRuntimeError(
                 "invalid_run_state",
-                "waiting_generator requires the current turn to be initialized",
+                f"{status} requires the current turn to be initialized",
                 details={"current_turn_dir": str(current_turn_dir)},
             )
         if not role_prompt_path(current_turn_dir, "generator").exists():
             raise SupervisorRuntimeError(
                 "invalid_run_state",
-                "waiting_generator requires a generator prompt artifact for the current turn",
+                f"{status} requires a generator prompt artifact for the current turn",
                 details={"prompt_path": str(role_prompt_path(current_turn_dir, "generator"))},
             )
         return
 
-    if status == "waiting_reviewer":
+    if status in {"waiting_reviewer", "waiting_reviewer_contract"}:
         if not turn_metadata_path(current_turn_dir).exists():
             raise SupervisorRuntimeError(
                 "invalid_run_state",
-                "waiting_reviewer requires the current turn to be initialized",
+                f"{status} requires the current turn to be initialized",
                 details={"current_turn_dir": str(current_turn_dir)},
             )
         if not role_prompt_path(current_turn_dir, "reviewer").exists():
             raise SupervisorRuntimeError(
                 "invalid_run_state",
-                "waiting_reviewer requires a reviewer prompt artifact for the current turn",
+                f"{status} requires a reviewer prompt artifact for the current turn",
                 details={"prompt_path": str(role_prompt_path(current_turn_dir, "reviewer"))},
             )
         return
@@ -5908,6 +5978,7 @@ def ensure_role_session_ready(run_dir: Path, state: dict, role: str) -> None:
             if codex_session_id
             else f"{role}_session_restarted"
         )
+        role_state["last_session_reset_reason"] = "resumed_existing_session" if codex_session_id else "session_restarted"
         append_run_event(run_dir, event_name, role=role)
     wait_for_tmux_prompt(
         tmux_name,
@@ -5919,7 +5990,7 @@ def ensure_role_session_ready(run_dir: Path, state: dict, role: str) -> None:
 
 
 def enforce_fresh_reviewer_session_for_turn(run_dir: Path, state: dict, turn_number: int) -> None:
-    review_cfg = state["council_config"].get("review", {})
+    review_cfg = state["council_config"].get("review", default_review_config())
     if not review_cfg.get("fresh_reviewer_session_per_turn", True):
         return
     role_state = state["roles"]["reviewer"]
@@ -5934,6 +6005,7 @@ def enforce_fresh_reviewer_session_for_turn(run_dir: Path, state: dict, turn_num
         tmux_kill_session(tmux_name)
     role_state["codex_session_id"] = None
     role_state["codex_thread_name"] = None
+    role_state["last_session_reset_reason"] = "fresh_reviewer_session_per_turn"
     save_run_state(run_dir, state)
     append_run_event(
         run_dir,
@@ -6003,6 +6075,212 @@ def seed_generator_github_review_input(
         write_github_review_input_artifacts(run_dir, task_root, current_turn_dir, snapshot)
     else:
         clear_github_review_input_artifacts(run_dir, task_root, current_turn_dir)
+
+
+def run_generator_chunk_contract_phase(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_number: int,
+    current_turn_dir: Path,
+    *,
+    continue_context_block: str = "",
+) -> dict:
+    repo_root = Path(state["repo_root"])
+    inspection = inspect_task_workspace(task_root)
+    state["workspace_profile"] = inspection["profile"]
+    turn_timeout_seconds = float(state["council_config"]["council"]["turn_timeout_seconds"])
+    generator_prompt = build_generator_chunk_contract_prompt(
+        repo_root,
+        task_root,
+        current_turn_dir,
+        turn_number,
+        state=state,
+        inspection=inspection,
+        continue_context_block=continue_context_block,
+        fork_context_block=format_fork_context_block(state["roles"]["generator"]),
+    )
+    write_prompt_artifact(current_turn_dir, "generator", generator_prompt)
+    state["current_turn"] = turn_number
+    state["pending_turn"] = None
+    state["pending_role"] = None
+    state["transition_source_verdict"] = None
+    state["status"] = "waiting_generator_contract"
+    state["roles"]["generator"]["last_wait_phase"] = "generator_contract_prompt_ready"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "generator_chunk_contract_prompt_prepared", role="generator")
+    append_run_event(run_dir, "generator_chunk_contract_prompt_prepared", turn_number=turn_number, role="generator")
+    ensure_role_session_ready(run_dir, state, "generator")
+    wait_for_tmux_prompt(
+        state["roles"]["generator"]["tmux_session"],
+        turn_timeout_seconds,
+        phase="generator_contract_prompt_ready",
+        role="generator",
+    )
+    tmux_send_prompt(
+        state["roles"]["generator"]["tmux_session"],
+        generator_prompt,
+        phase="generator_chunk_contract_turn",
+        role="generator",
+        turn_dir=current_turn_dir,
+        dispatch_reason="generator_chunk_contract_initial",
+        session_reset_reason=state["roles"]["generator"].pop("last_session_reset_reason", None),
+    )
+    save_turn_metadata(current_turn_dir, turn_number, "generator_chunk_contract_prompt_sent", role="generator")
+    append_run_event(run_dir, "generator_chunk_contract_prompt_sent", turn_number=turn_number, role="generator")
+    artifact_path, _, chunk_status = wait_for_artifact_pair(
+        current_turn_dir,
+        "generator",
+        artifact_path=generator_chunk_contract_message_path(current_turn_dir),
+        status_path=generator_chunk_contract_status_path(current_turn_dir),
+        repair_paths=[
+            chunk_contract_path(current_turn_dir),
+            generator_chunk_contract_message_path(current_turn_dir),
+            generator_chunk_contract_status_path(current_turn_dir),
+        ],
+        validator=lambda data: validate_generator_chunk_contract_artifacts_for_turn(current_turn_dir, data),
+        timeout_seconds=turn_timeout_seconds,
+        phase="generator_chunk_contract_artifacts",
+        tmux_name=state["roles"]["generator"]["tmux_session"],
+        turn_number=turn_number,
+        repo_root=repo_root,
+        council_config=state["council_config"],
+        resend_reason="invalid_chunk_contract_repair",
+    )
+    write_text(generator_chunk_contract_message_path(current_turn_dir), artifact_path.read_text(encoding="utf-8"))
+    mirror_chunk_contract_generator_artifacts(current_turn_dir, chunk_status)
+    return chunk_status
+
+
+def mirror_chunk_contract_reviewer_artifacts(turn_dir: Path) -> None:
+    contract_status = validate_chunk_contract_review_status(load_json(reviewer_chunk_contract_status_path(turn_dir)))
+    if contract_status["verdict"] == "changes_requested":
+        critical_dimensions = {
+            key: ("fail" if key == "correctness_vs_intent" else "uncertain")
+            for key in critical_review_dimension_keys()
+        }
+    elif contract_status["verdict"] == "blocked":
+        critical_dimensions = {
+            key: ("fail" if key == "failure_mode_and_fallback" else "uncertain")
+            for key in critical_review_dimension_keys()
+        }
+    else:
+        critical_dimensions = {key: "uncertain" for key in critical_review_dimension_keys()}
+    write_text(
+        role_message_path(turn_dir, "reviewer"),
+        reviewer_chunk_contract_message_path(turn_dir).read_text(encoding="utf-8"),
+    )
+    payload = {
+        "verdict": contract_status["verdict"],
+        "summary": contract_status["summary"],
+        "blocking_issues": contract_status["blocking_issues"],
+        "critical_dimensions": critical_dimensions,
+    }
+    if contract_status["verdict"] == "needs_human":
+        payload["human_source"] = contract_status["human_source"]
+        payload["human_message"] = contract_status["human_message"]
+    save_json(role_status_path(turn_dir, "reviewer"), payload)
+
+
+def mirror_chunk_contract_generator_artifacts(turn_dir: Path, chunk_status: dict) -> None:
+    write_text(
+        role_message_path(turn_dir, "generator"),
+        generator_chunk_contract_message_path(turn_dir).read_text(encoding="utf-8"),
+    )
+    save_json(
+        role_status_path(turn_dir, "generator"),
+        {
+            "result": "proposed_chunk",
+            "summary": chunk_status["summary"],
+            "changed_files": chunk_status["initial_review_surface"],
+        },
+    )
+
+
+def run_reviewer_chunk_contract_phase(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_number: int,
+    current_turn_dir: Path,
+    *,
+    continue_context_block: str = "",
+) -> dict:
+    repo_root = Path(state["repo_root"])
+    inspection = inspect_task_workspace(task_root)
+    state["workspace_profile"] = inspection["profile"]
+    chunk_status = validate_generator_chunk_contract_status(load_json(generator_chunk_contract_status_path(current_turn_dir)))
+    evaluator_brief = build_evaluator_brief(
+        repo_root,
+        task_root,
+        inspection,
+        current_turn_dir,
+        state=state,
+        phase="chunk-contract-review",
+        initial_review_surface=chunk_status["initial_review_surface"],
+        required_commands=chunk_status["required_verification"],
+    )
+    write_text(evaluator_brief_path(current_turn_dir), evaluator_brief)
+    turn_timeout_seconds = float(state["council_config"]["council"]["turn_timeout_seconds"])
+    reviewer_prompt = build_reviewer_chunk_contract_prompt(
+        repo_root,
+        task_root,
+        current_turn_dir,
+        turn_number,
+        state=state,
+        inspection=inspection,
+        continue_context_block=continue_context_block,
+        fork_context_block=format_fork_context_block(state["roles"]["reviewer"]),
+    )
+    write_prompt_artifact(current_turn_dir, "reviewer", reviewer_prompt)
+    state["current_turn"] = turn_number
+    state["pending_turn"] = None
+    state["pending_role"] = None
+    state["transition_source_verdict"] = None
+    state["status"] = "waiting_reviewer_contract"
+    state["roles"]["reviewer"]["last_wait_phase"] = "reviewer_chunk_contract_prompt_ready"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "reviewer_chunk_contract_prompt_prepared", role="reviewer")
+    append_run_event(run_dir, "reviewer_chunk_contract_prompt_prepared", turn_number=turn_number, role="reviewer")
+    enforce_fresh_reviewer_session_for_turn(run_dir, state, turn_number)
+    ensure_role_session_ready(run_dir, state, "reviewer")
+    wait_for_tmux_prompt(
+        state["roles"]["reviewer"]["tmux_session"],
+        turn_timeout_seconds,
+        phase="reviewer_chunk_contract_prompt_ready",
+        role="reviewer",
+    )
+    tmux_send_prompt(
+        state["roles"]["reviewer"]["tmux_session"],
+        reviewer_prompt,
+        phase="reviewer_chunk_contract_turn",
+        role="reviewer",
+        turn_dir=current_turn_dir,
+        dispatch_reason="reviewer_chunk_contract_initial",
+        session_reset_reason=state["roles"]["reviewer"].pop("last_session_reset_reason", None),
+    )
+    save_turn_metadata(current_turn_dir, turn_number, "reviewer_chunk_contract_prompt_sent", role="reviewer")
+    append_run_event(run_dir, "reviewer_chunk_contract_prompt_sent", turn_number=turn_number, role="reviewer")
+    artifact_path, _, reviewer_status = wait_for_artifact_pair(
+        current_turn_dir,
+        "reviewer",
+        artifact_path=reviewer_chunk_contract_message_path(current_turn_dir),
+        status_path=reviewer_chunk_contract_status_path(current_turn_dir),
+        repair_paths=[
+            reviewer_chunk_contract_message_path(current_turn_dir),
+            reviewer_chunk_contract_status_path(current_turn_dir),
+        ],
+        validator=validate_chunk_contract_review_status,
+        timeout_seconds=turn_timeout_seconds,
+        phase="reviewer_chunk_contract_artifacts",
+        tmux_name=state["roles"]["reviewer"]["tmux_session"],
+        turn_number=turn_number,
+        repo_root=repo_root,
+        council_config=state["council_config"],
+        resend_reason="invalid_chunk_contract_repair",
+    )
+    write_text(reviewer_chunk_contract_message_path(current_turn_dir), artifact_path.read_text(encoding="utf-8"))
+    return reviewer_status
 
 
 def run_generator_phase(
@@ -6178,11 +6456,7 @@ def run_reviewer_phase(
     reviewer_artifact_path, _, reviewer_status = wait_for_role_artifacts(
         current_turn_dir,
         "reviewer",
-        validator=lambda data: validate_reviewer_artifacts_for_turn(
-            current_turn_dir,
-            state["council_config"],
-            data,
-        ),
+        validator=validate_reviewer_status,
         timeout_seconds=turn_timeout_seconds,
         phase="reviewer_artifacts",
         tmux_name=state["roles"]["reviewer"]["tmux_session"],
@@ -6515,6 +6789,7 @@ def supervisor_loop_from(
                 turn_number,
                 current_turn_dir,
                 inline_context=turn_number == 1,
+                continue_context_block=continue_context_block,
                 bootstrap_review_phase=state.get("bootstrap_phase") == "fork_to_review",
             )
         else:
@@ -7079,6 +7354,9 @@ ArtifactContinuationState = Literal[
     "generator_invalid",
     "generator_needs_human",
     "generator_blocked",
+    "chunk_contract_waiting_reviewer",
+    "chunk_contract_reviewer_pending",
+    "chunk_contract_approved_waiting_generator",
     "generator_complete_waiting_reviewer",
     "reviewer_pending",
     "reviewer_invalid",
@@ -7093,7 +7371,7 @@ def fallback_continue_role(state: dict) -> str:
     pending_role = state.get("pending_role")
     if pending_role in ROLE_NAMES:
         return pending_role
-    return "reviewer" if state.get("status") == "waiting_reviewer" else "generator"
+    return "reviewer" if state.get("status") in {"waiting_reviewer", "waiting_reviewer_contract"} else "generator"
 
 
 def inspect_role_artifacts(turn_dir: Path, role: str, validator) -> dict:
@@ -7142,6 +7420,7 @@ def inspect_role_runtime(turn_dir: Path, role: str, validator) -> dict:
 def classify_turn_continuation_state(turn: dict) -> str:
     generator = turn["generator"]
     reviewer = turn["reviewer"]
+    metadata = turn["metadata"]
 
     if not generator["activity_exists"] and not reviewer["activity_exists"]:
         return "not_started"
@@ -7155,6 +7434,27 @@ def classify_turn_continuation_state(turn: dict) -> str:
         return "generator_pending"
 
     generator_result = generator["validated_status"]["result"]
+    if generator_result == "proposed_chunk":
+        if reviewer["state"] == "invalid":
+            return "reviewer_invalid"
+        chunk_phase = metadata.get("phase")
+        if chunk_phase == "reviewer_chunk_contract_artifacts_valid":
+            reviewer_contract_status_path = reviewer_chunk_contract_status_path(turn["turn_dir"])
+            if reviewer_contract_status_path.exists():
+                reviewer_contract_status = validate_chunk_contract_review_status(load_json(reviewer_contract_status_path))
+                if reviewer_contract_status["verdict"] == "approved":
+                    return "chunk_contract_approved_waiting_generator"
+        if reviewer["state"] == "valid":
+            reviewer_verdict = reviewer["validated_status"]["verdict"]
+            if reviewer_verdict == "changes_requested":
+                return "reviewer_changes_requested"
+            if reviewer_verdict == "needs_human":
+                return "reviewer_needs_human"
+            if reviewer_verdict == "blocked":
+                return "reviewer_blocked"
+        if reviewer["state"] == "pending" and reviewer["activity_exists"]:
+            return "chunk_contract_reviewer_pending"
+        return "chunk_contract_waiting_reviewer"
     if generator_result == "needs_human":
         return "ambiguous" if reviewer["activity_exists"] else "generator_needs_human"
     if generator_result == "blocked":
@@ -7401,6 +7701,48 @@ def resolve_turn_continuation(
             prior_status=continuation_state,
             continuation_state=continuation_state,
             reason=f"turn {turn_label} still has incomplete or invalid generator artifacts.",
+            reference_turn_dir=turn["turn_dir"],
+            source_turn_number=turn["turn_number"],
+            ignored_turns=ignored_turns,
+        )
+
+    if continuation_state in {"chunk_contract_waiting_reviewer", "chunk_contract_reviewer_pending"}:
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"turn {turn_label} still needs chunk-contract evaluator work, but later turns already contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts},
+            )
+        return continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            role="reviewer",
+            create_new_turn=False,
+            reuse_existing_turn_for_first=True,
+            prior_status=continuation_state,
+            continuation_state=continuation_state,
+            reason=f"turn {turn_label} still needs evaluator chunk-contract review.",
+            reference_turn_dir=turn["turn_dir"],
+            source_turn_number=turn["turn_number"],
+            ignored_turns=ignored_turns,
+        )
+
+    if continuation_state == "chunk_contract_approved_waiting_generator":
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"turn {turn_label} has an approved chunk contract, but later turns already contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts},
+            )
+        return continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            role="generator",
+            create_new_turn=False,
+            reuse_existing_turn_for_first=True,
+            prior_status=continuation_state,
+            continuation_state=continuation_state,
+            reason=f"turn {turn_label} has an approved chunk contract and should continue with generator implementation on the same turn.",
             reference_turn_dir=turn["turn_dir"],
             source_turn_number=turn["turn_number"],
             ignored_turns=ignored_turns,

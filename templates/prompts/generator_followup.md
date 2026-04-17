@@ -1,5 +1,6 @@
-Repository root:
-{{repo_root}}
+Role: Generator
+Phase: implementation
+Repo root: {{repo_root}}
 
 {{continue_context_block}}
 
@@ -14,33 +15,23 @@ Read these files directly before coding:
 
 {{review_bridge_block}}
 
-Before making changes, read the previous reviewer artifacts carefully:
-- {{previous_reviewer_message_path}}
-- {{previous_reviewer_status_path}}
-
 {{previous_reviewer_focus_block}}
 
 {{generator_objective_block}}
 
-Preserve the primary user-facing path described in the task documents. Do not treat a maintenance, helper, curation, migration, or repair path as an acceptable replacement unless the docs explicitly say so.
+Implement only the approved turn contract. Do not widen scope mid-turn.
 If you hit a blocker, diagnose by evidence rather than by symptom-shaped guesses. State the last confirmed progress point, the first unconfirmed next step, and the direct observation supporting your blocker wording. Use the narrowest proven claim.
 
 If you changed repo-tracked files in this turn, create a git commit before writing the generator artifacts for this turn.
 
-When the implementation is complete, write exactly these files:
+Write exactly these files:
 - {{generator_message_path}}
 - {{generator_status_path}}
 
 In `generator/message.md`, include at minimum:
 {{generator_message_requirements_block}}
 
-Use exactly one of these status JSON shapes:
-
-Normal case:
-{"result":"implemented|no_changes_needed|blocked","summary":"short string","changed_files":["relative/path"]}
-
-Human intervention case:
-{"result":"needs_human","summary":"short string","changed_files":["relative/path"],"human_source":"task.md|review.md|spec.md|contract.md|initial_review.md|AGENTS.md|generator.instructions.md|reviewer.instructions.md|repo_state","human_message":"short string"}
+Use the `generator/status.json` schema documented in `generator.instructions.md`.
 
 After writing the required files, print exactly:
 - `COUNCIL_TERMINAL_SUMMARY_BEGIN`

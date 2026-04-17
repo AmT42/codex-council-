@@ -47,6 +47,10 @@
 
 ## Required turn output
 - In your generator turn message artifact, include:
+  - Turn Intent:
+    - what exact chunk this turn attempted
+    - what it deliberately did not touch
+    - what the primary user-facing effect should be
   - What changed
   - Commit created for this turn, or explicitly say that no repo-tracked files changed
   - Which task, review, or spec points were addressed

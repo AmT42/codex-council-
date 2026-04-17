@@ -1,5 +1,6 @@
-Repository root:
-{{repo_root}}
+Role: Evaluator
+Phase: bootstrap review
+Repo root: {{repo_root}}
 
 {{continue_context_block}}
 
@@ -9,15 +10,14 @@ Repository root:
 
 Turn {{turn_name}}.
 
-Read these files directly before materializing the local review:
+Read in this order:
 {{docs_to_read_block}}
 
 {{bootstrap_review_block}}
 
-When the bootstrap review is complete, write exactly these files:
+Write exactly these files:
 - {{reviewer_message_path}}
 - {{reviewer_status_path}}
-- {{reviewer_evidence_path}}
 
 In `reviewer/message.md`, include at minimum:
 - Bootstrap summary
