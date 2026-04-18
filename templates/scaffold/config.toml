@@ -10,6 +10,9 @@ launch_timeout_seconds = 60
 turn_timeout_seconds = 1800
 require_git = true
 
+[planning]
+max_turns = 4
+
 [review]
 fresh_reviewer_session_per_turn = true
 reviewer_reset_mode = "clear"

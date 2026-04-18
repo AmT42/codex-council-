@@ -12,6 +12,20 @@ That stage exists to:
 - produce stronger `task.md`, `spec.md`, and `contract.md`
 - reject weak or misleading document drafts before the generator sees them
 
+## Runtime entrypoint
+
+Use `prepare` as the planning-runtime entrypoint.
+
+- `prepare <task> --intent "..."`
+  - start a fresh planning run from raw intent
+- `prepare <task>`
+  - resume the latest non-terminal planning run when one exists
+  - otherwise start from existing canonical docs if they already exist
+- if the latest planning run is already approved and canonical docs are unchanged, `prepare` may simply report that the docs are already prepared for execution
+- use `--new-run` or pass new `--intent` when you intentionally want a fresh planning pass after an approved run
+- `status <task> --planning`
+  - inspect the latest or chosen planning run
+
 ## When to invoke it
 
 Default to the planning stage when any of these are true:
@@ -39,6 +53,19 @@ Concrete narrow bugfixes can still go straight to execution docs.
 4. Intent critic reviews them against user intent, repo facts, and the planning quality bar.
 5. Planner revises the docs directly.
 6. Only after approval should those docs be treated as locked execution inputs.
+
+Planning artifacts live under:
+
+- `.codex-council/<task>/planning-runs/<run_id>/`
+- `source_intent.md`
+- `turns/<turn>/planner/...`
+- `turns/<turn>/intent_critic/...`
+
+For broad/spec-driven work, the planner should:
+- write `spec.md` first as the full decision-complete truth
+- organize major behavior slices into named sections with acceptance criteria
+- then derive `contract.md` from the approval-critical sections of that spec
+- use [`spec-contract-linking-example.md`](./spec-contract-linking-example.md) as the canonical model
 
 ## Hard mode
 

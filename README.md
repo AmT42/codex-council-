@@ -54,7 +54,7 @@ When a user asks an outer agent to **use this repo or harness** for some task, t
 That means:
 
 - the outer agent should scaffold or update the canonical council docs
-- then `start`, `continue`, or `reopen` the harness as appropriate
+- then `prepare`, `start`, `continue`, or `reopen` the harness as appropriate
 - and let the generator/reviewer council do the actual target-repo implementation work
 
 It must **not**:
@@ -186,10 +186,12 @@ The council workspace inside a target repo is:
   planner.instructions.md
   reviewer.instructions.md
   intent_critic.instructions.md
+  spec-contract-linking-example.md
   task.md
   review.md
   spec.md
   contract.md
+  planning-runs/
   runs/
 ```
 
@@ -206,14 +208,16 @@ Canonical documents:
 - `AGENTS.md`
   - stable council behavior only, not feature requirements
 
-Future-facing planning-prep instructions:
+Standard scaffolded planning-support files:
 
 - `planner.instructions.md`
   - task-local planner role guidance for authoring strong execution docs
 - `intent_critic.instructions.md`
   - task-local planning critic guidance for rejecting weak or non-faithful docs
+- `spec-contract-linking-example.md`
+  - task-local worked example for the spec→acceptance criteria→contract model used by planner, reviewer, and intent critic
 
-These planning files are preparation surfaces. They are not yet required runtime inputs for `start`.
+Planning runs write their own artifacts under `.codex-council/<task_name>/planning-runs/<run_id>/`.
 
 Optional supporting context:
 
@@ -231,7 +235,7 @@ Recommended defaults for outer-agent routing:
   - use the PR plus current-head GitHub review findings as the effective brief
   - add `branch_northstar_summary.md` when the branch/worktree intent needs durable context
 - broad feature or complex design
-  - planning stage first, then `task.md` + `spec.md` + `contract.md`
+  - planning stage first via `prepare`, then `task.md` + `spec.md` + `contract.md`
 - meta question about the harness
   - answer directly, do not scaffold docs
 
@@ -245,7 +249,7 @@ Use when the user is asking about the harness itself.
 
 - answer directly
 - do not scaffold `.codex-council`
-- do not call `start`, `continue`, or `reopen`
+- do not call `prepare`, `start`, `continue`, or `reopen`
 
 ### 2. Inspect or resume an existing run
 
@@ -339,7 +343,7 @@ The system is only robust if the outer agent can normalize weak input into stron
 2. It classifies the user request.
 3. It discovers facts from the target repo.
 4. It fills the minimal canonical document set needed for safe execution, usually by editing the files directly with its normal file tools.
-5. It starts, continues, or reopens the harness with the existing CLI.
+5. It prepares broad work first when needed, then starts, continues, or reopens the harness with the existing CLI.
 
 ### Manual fallback
 
@@ -349,7 +353,7 @@ For a capable outer agent, the recommended path is:
 
 - run `init` if the workspace does not exist
 - fill `task.md`, `review.md`, `spec.md`, and `contract.md` directly with normal file-editing tools
-- then run `start`, `continue`, or `reopen` as appropriate
+- then run `prepare`, `start`, `continue`, or `reopen` as appropriate
 
 From a target repository:
 
@@ -364,7 +368,25 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write task my-tas
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write contract my-task --dir /path/to/target-repo --body "The retry path no longer duplicates rows and relevant verification passes."
 ```
 
-Start the council:
+For broad or vague work, prepare the docs first:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py prepare my-task \
+  --dir /path/to/target-repo \
+  --intent "Build a production-grade billing workflow with an operator dashboard." \
+  --hard
+```
+
+Inspect or resume planning:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --dir /path/to/target-repo --planning
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py prepare my-task --dir /path/to/target-repo
+```
+
+If the latest planning run is already approved and the canonical docs are unchanged, `prepare` may simply report that the docs are already prepared for execution. Use `--new-run` or pass new `--intent` when you intentionally want a fresh planning pass.
+
+Start the execution council:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo
@@ -403,6 +425,8 @@ The public CLI stays intentionally small:
   - scaffold `.codex-council` and a task workspace
 - `write`
   - replace one canonical task document
+- `prepare`
+  - start or resume a planning run for `task.md` / `spec.md` / `contract.md`
 - `start`
   - launch a new council run
 - `status`
@@ -412,7 +436,7 @@ The public CLI stays intentionally small:
 - `reopen`
   - supersede an approved run with a fresh run linked back to the historical approval
 
-The outer-agent skill should orchestrate those commands rather than inventing a parallel interface. For strong agents, that usually means using `init`, then editing the canonical files directly, then calling `start`, `continue`, or `reopen` as appropriate. `write` remains available as a convenience command, not the primary authoring path for agents.
+The outer-agent skill should orchestrate those commands rather than inventing a parallel interface. For strong agents, that usually means using `init`, then editing the canonical files directly, then calling `prepare` for broad work or `start` for concrete execution, and later `continue` or `reopen` as appropriate. `write` remains available as a convenience command, not the primary authoring path for agents.
 
 ## Runtime Notes
 
@@ -448,17 +472,23 @@ The TUI supervisor:
 
 ## Supervisor Lifetime
 
-`start`, `continue`, and `reopen` launch a live supervisor process. They are not fire-and-forget hints.
+`prepare`, `start`, `continue`, and `reopen` are supervisor-facing lifecycle commands.
 
-Important:
+When one of them actually launches or resumes a supervisor process, it is not a fire-and-forget hint.
 
-- the generator and reviewer `tmux` sessions may keep running even if the supervisor dies
+`prepare` has one fast path:
+
+- if the latest planning run is already approved and canonical docs are unchanged, it may exit immediately without launching planner or intent-critic sessions
+
+Important when a supervisor is actually running:
+
+- the generator/reviewer or planner/intent-critic `tmux` sessions may keep running even if the supervisor dies
 - but the council will stop advancing turns without the supervisor
-- this can leave a run stale until someone inspects `status` and resumes with `continue`
+- this can leave a run stale until someone inspects `status` and resumes with `continue`, or inspects `status --planning` and resumes with `prepare`
 
 So an outer agent must do one of these:
 
-- wait for `start`, `continue`, or `reopen` to keep running
+- wait for the command to keep running when it actually launched or resumed a supervisor
 - or launch the supervisor in a truly persistent environment
 
 Practical rule:
@@ -519,12 +549,19 @@ templates/
     contract.md
     AGENTS.md
     generator.instructions.md
+    planner.instructions.md
     reviewer.instructions.md
+    intent_critic.instructions.md
+    spec-contract-linking-example.md
   prompts/
     generator_initial.md
     generator_followup.md
+    planner_initial.md
+    planner_followup.md
     reviewer_initial.md
     reviewer_followup.md
+    intent_critic_initial.md
+    intent_critic_followup.md
     reviewer_fork_bootstrap.md
     artifact_repair.md
   data/

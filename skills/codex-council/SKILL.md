@@ -17,7 +17,7 @@ Your job is to:
 
 - inspect the target repo
 - write or update the canonical council docs
-- choose between direct answer, `start`, `continue`, and `reopen`
+- choose between direct answer, `prepare`, `start`, `continue`, and `reopen`
 - launch or resume the council
 
 Your job is **not** to:
@@ -39,7 +39,7 @@ That includes:
 - normalizing novice input into strong documents
 - invoking a planning stage before execution docs are locked when the work needs it
 - choosing the smallest sufficient document set
-- deciding between direct answer, `start`, `continue`, and `reopen`
+- deciding between direct answer, `prepare`, `start`, `continue`, and `reopen`
 
 ## Read order
 
@@ -84,7 +84,7 @@ Then load only the references needed for the chosen route:
   - forbidden substitutions between those paths
   - prompt/system-design consequences that must not be improvised in code
 - When the current run or prior findings include a blocker, timeout, or stall report, normalize that report into the strongest evidence-backed form rather than passing through a guessed root cause. Prefer the narrowest proven claim.
-- Do not launch `start`, `continue`, or `reopen` and then abandon the supervisor process.
+- Do not launch `prepare`, `start`, `continue`, or `reopen` and then abandon the supervisor process.
 - This is a process-lifetime rule, not a special built-in Codex background feature.
 - A plain foreground command is fine only when you will stay attached and wait for the supervisor.
 - If you need the supervisor to outlive the current outer-agent shell, prefer launching the supervisor command inside a dedicated `tmux` session.
@@ -125,6 +125,7 @@ Do not invent a new interface. Use the existing CLI:
 
 - `init`
 - `write`
+- `prepare`
 - `start`
 - `status`
 - `continue`
@@ -132,9 +133,9 @@ Do not invent a new interface. Use the existing CLI:
 
 For document authoring, prefer editing the canonical files directly with your normal file tools when you already have them. Treat `write --body` as a convenience fallback, not the primary path for a capable outer agent.
 
-Use [`references/run-lifecycle.md`](./references/run-lifecycle.md) for command recipes and continuation policy, including when an approved run should be reopened instead of continued.
+Use [`references/run-lifecycle.md`](./references/run-lifecycle.md) for command recipes and continuation policy, including when to use `prepare`, when an approved planning run is already good enough, and when an approved execution run should be reopened instead of continued.
 
-When using `start`, `continue`, or `reopen`, also read [`references/supervisor-lifetime.md`](./references/supervisor-lifetime.md).
+When using `prepare`, `start`, `continue`, or `reopen`, also read [`references/supervisor-lifetime.md`](./references/supervisor-lifetime.md).
 
 ## Document rules
 

@@ -40,6 +40,14 @@ The council workspace inside a target repo is:
   - generator-specific additions
 - `.codex-council/<task_name>/reviewer.instructions.md`
   - reviewer-specific additions
+- `.codex-council/<task_name>/planner.instructions.md`
+  - planner-specific additions for `prepare`
+- `.codex-council/<task_name>/intent_critic.instructions.md`
+  - planning-critic additions for `prepare`
+- `.codex-council/<task_name>/spec-contract-linking-example.md`
+  - task-local worked example for the spec→acceptance criteria→contract model
+- `.codex-council/<task_name>/planning-runs/`
+  - auditable planning-loop artifacts separate from execution `runs/`
 
 Do not blur these roles.
 
@@ -48,18 +56,27 @@ Do not blur these roles.
 - `spec.md` is for detailed design only when the task needs it.
 - `contract.md` is checklist-only and must stay auditable.
 - `AGENTS.md` is for stable council behavior, not product requirements.
+- `planner.instructions.md`, `intent_critic.instructions.md`, and `spec-contract-linking-example.md` are standard planning-support files scaffolded into the task workspace; they are not product requirements either.
 
 ## Runtime Model
 
 - `init` scaffolds the repo-local council workspace.
+- `write` updates one canonical task document directly.
+- `prepare` starts or resumes a planning run for `task.md` / `spec.md` / `contract.md` authoring, unless the latest planning run is already approved and the canonical docs are unchanged.
 - `start` launches a new run.
 - `continue` resumes an existing run in place.
+- `reopen` supersedes an approved execution run with a fresh linked run.
 - `status` shows run state.
 
 Each run writes role-scoped turn artifacts under:
 
 - `turns/<turn>/generator/`
 - `turns/<turn>/reviewer/`
+
+Planning runs write role-scoped turn artifacts under:
+
+- `planning-runs/<run_id>/turns/<turn>/planner/`
+- `planning-runs/<run_id>/turns/<turn>/intent_critic/`
 
 Important runtime files:
 

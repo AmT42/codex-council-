@@ -8,6 +8,19 @@ For most non-trivial spec-driven tasks, keep `contract.md` alongside this file s
 
 If this spec was produced in a planning-stage `hard` mode, treat it as a decision-complete execution contract. Do not rely on the generator or reviewer to silently fill in omitted policy later.
 
+For broad/spec-driven work, organize the spec into named major sections such as `M1`, `M2`, `M3` when that structure improves traceability.
+Each major section should describe:
+- the behavior or design intent
+- important constraints or boundaries for that slice
+- acceptance criteria for that slice
+
+Those acceptance criteria are the real test of “done right”.
+They live here in `spec.md`, not in `contract.md`.
+
+See the full worked example in:
+
+- `spec-contract-linking-example.md`
+
 ## Goal
 
 Describe the main thing that should be built or changed.
@@ -35,6 +48,25 @@ Describe the current product or technical context the council should know.
 ## Desired Behavior
 
 Describe the required behavior in concrete terms.
+
+For broad/spec-driven work, prefer a structure like:
+
+```md
+## M1. Section Name
+
+Describe the intended behavior and boundaries for this slice.
+
+### Acceptance Criteria
+- ...
+- ...
+- ...
+```
+
+Use as many major sections as needed, but keep them meaningful. Do not make one section per trivial implementation detail.
+
+For a complete worked example of section ids, section-level acceptance criteria, and how those map into `contract.md`, see:
+
+- `spec-contract-linking-example.md`
 
 ### Primary User Path / Intents
 
@@ -96,6 +128,8 @@ Describe known technical boundaries, touched areas, interfaces, or architectural
 ## Validation Expectations
 
 Describe how the work should be validated.
+
+When the spec is broad enough to need `contract.md`, ensure the validation expectations are traceable to the major spec sections so the contract can act as the approval projection of the spec.
 
 ## Open Questions
 

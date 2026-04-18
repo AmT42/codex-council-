@@ -16,13 +16,26 @@ Verify that the authored docs:
 - fit the actual repo and likely implementation surfaces
 - are strong enough to drive execution without guesswork
 
+## Runtime outputs
+
+In the `prepare` loop, the intent critic writes:
+
+- `intent_critic/message.md`
+- `intent_critic/status.json`
+
+It does not edit canonical docs directly.
+
 ## Required review dimensions
 
 Mark each relevant dimension as:
 
 - `pass`
 - `fail`
-- `not applicable` with reason
+- `uncertain`
+
+`uncertain` blocks approval just like `fail`.
+
+If a dimension truly does not apply, explain that explicitly in the review message and mark it `pass` only when that non-applicability is clear and safe. Do not invent a separate status value.
 
 Dimensions:
 
@@ -30,12 +43,10 @@ Dimensions:
 - scope clarity
 - repo fitness / plausibility
 - spec completeness for task risk
+- acceptance criteria quality
 - contract auditability
+- spec-to-contract traceability
 - prompt/tool/schema clarity when relevant
-- workflow/state-machine clarity when relevant
-- failure/recovery clarity when relevant
-- observability/eval clarity when relevant
-- safety/approval/sandbox clarity when relevant
 - validation/test clarity
 
 ## Mandatory fail conditions
@@ -45,6 +56,8 @@ Dimensions:
 - toy-like prompt/tool/schema descriptions for agentic work
 - missing implementation-critical decisions
 - specs that would force the execution council to invent policy
+- broad/spec-driven `spec.md` with no section-level acceptance criteria
+- `contract.md` that is not clearly derived from the approval-critical spec sections
 
 ## Verdict discipline
 

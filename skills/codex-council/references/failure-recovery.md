@@ -15,6 +15,7 @@ If the docs are not strong enough for safe execution:
 
 - do not launch
 - route broad, vague, or agentic work back through the planning stage before locking execution docs
+- prefer `prepare` rather than trying to squeeze broad work into weak execution docs
 - improve the docs first
 - ask the smallest blocking question only if repo inspection cannot resolve the ambiguity
 
@@ -30,18 +31,19 @@ If you notice yourself drifting into “I should just build the feature directly
 
 If a task workspace and run already exist:
 
-1. inspect `status`
+1. inspect `status` or `status --planning`
 2. inspect the current canonical docs
 3. decide whether the user is still talking about the same task
-4. prefer `continue` if the task and run still match
+4. prefer `prepare` for planning runs if the planning task still matches
+5. prefer `continue` for execution runs if the execution task still matches
 
 ## Supervisor-death failure
 
 If the supervisor died mid-run:
 
-- do not assume the generator or reviewer stopped too
-- inspect `status` and especially `derived_continuation`
-- if the artifacts show a clear next role, recover with `continue`
+- do not assume the generator/reviewer or planner/intent-critic stopped too
+- inspect `status` or `status --planning`, especially `derived_continuation`
+- if the artifacts show a clear next role, recover with `continue` for execution runs or `prepare` for planning runs
 - when restarting orchestration, keep the new supervisor process alive
 - if you are not going to wait in the foreground, relaunch that supervisor command inside a dedicated `tmux` session rather than another transient outer-agent shell
 
@@ -60,7 +62,7 @@ If the runtime or reviewer previously emitted `needs_human`:
 
 - inspect the cited source file
 - update the canonical docs or gather the missing clarification
-- continue the run in place rather than starting a new one unless the user truly wants a fresh task
+- resume the same planning run with `prepare` or the same execution run with `continue` rather than starting a new one unless the user truly wants a fresh task
 
 ## Blocker-diagnosis failure
 
@@ -97,4 +99,4 @@ When recovering, explain briefly:
 
 - what went wrong
 - what doc or state you inspected
-- whether you are about to fix the docs, answer directly, `continue`, or `reopen`
+- whether you are about to fix the docs, answer directly, `prepare`, `continue`, or `reopen`

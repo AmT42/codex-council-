@@ -6,6 +6,7 @@ Use the existing CLI:
 
 - `init`
 - `write`
+- `prepare`
 - `start`
 - `status`
 - `continue`
@@ -49,6 +50,33 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py write contract my
 
 Treat these `write --body` examples as a fallback for manual use or simple automation.
 
+## Prepare
+
+Use `prepare` for broad, vague, novice-described, or agentic work before execution:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py prepare my-task --dir /path/to/target-repo --intent "..."
+```
+
+Useful flags:
+
+- `--intent`
+- `--intent-file`
+- `--hard`
+- `--new-run`
+- `--run-id`
+
+Resume or inspect planning later:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --dir /path/to/target-repo --planning
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py prepare my-task --dir /path/to/target-repo
+```
+
+Only after the planning run is approved should the docs be treated as locked execution inputs for `start`.
+
+If the latest planning run is already approved and canonical docs are unchanged, `prepare` may exit immediately and report that the docs are already prepared for execution. Use `--new-run` or new `--intent` when you want a fresh planning pass.
+
 ## Start
 
 Use `start` after the chosen docs are ready:
@@ -58,6 +86,8 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --d
 ```
 
 Before `start`, ensure the docs are strong enough to survive runtime validation.
+
+If planning runs already exist for the task, `start` should only proceed when the latest planning run is approved and still matches the current canonical docs.
 
 Default to the current auto role routing.
 
@@ -95,6 +125,12 @@ Inspect before resuming or rewriting:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --dir /path/to/target-repo
+```
+
+Inspect planning instead:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --dir /path/to/target-repo --planning
 ```
 
 Use `status` whenever you are unsure whether to resume, rewrite docs, or create a new run.

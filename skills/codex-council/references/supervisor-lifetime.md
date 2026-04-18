@@ -2,9 +2,13 @@
 
 ## Core rule
 
-`start`, `continue`, and `reopen` launch a live supervisor process.
+`prepare`, `start`, `continue`, and `reopen` are supervisor-facing lifecycle commands.
 
-That process must remain alive while the council is advancing turns.
+When one of them actually launches or resumes a supervisor, that process must remain alive while the council is advancing turns.
+
+`prepare` has one fast path:
+
+- if the latest planning run is already approved and canonical docs are unchanged, it may exit immediately without launching planner or intent-critic sessions
 
 This is not a special Codex-only background API requirement.
 
@@ -13,7 +17,7 @@ This is not a special Codex-only background API requirement.
 
 ## Why this matters
 
-The generator and reviewer run inside separate `tmux` sessions, but the supervisor is what:
+The generator/reviewer and planner/intent-critic roles run inside separate `tmux` sessions, but the supervisor is what:
 
 - watches for artifacts
 - validates them
@@ -27,7 +31,7 @@ If the supervisor dies:
 
 ## Safe patterns
 
-- wait for the `start`, `continue`, or `reopen` command
+- wait for the `prepare`, `start`, `continue`, or `reopen` command
 - run it inside a dedicated terminal that stays open
 - run it inside a dedicated `tmux` session
 - run it as a truly detached background job
@@ -59,7 +63,8 @@ That can leave the run stale:
 
 If you suspect this happened:
 
-1. run `status`
+1. run `status` or `status --planning`
 2. inspect `derived_continuation`
-3. run `continue` if the next role is now derivable from the artifacts, or `reopen` if the selected run is already approved but must be superseded
-4. keep the new supervisor process alive this time
+3. run `continue` for execution runs, or `prepare` for planning runs, if the next role is now derivable from the artifacts
+4. use `reopen` only when the selected execution run is already approved but must be superseded
+5. keep the new supervisor process alive this time

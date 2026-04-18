@@ -10,7 +10,7 @@ The correct route matters because it determines:
 - whether you should inspect an existing run
 - which canonical docs to write
 - whether to ask questions
-- whether to use `start`, `continue`, or `reopen`
+- whether to use `prepare`, `start`, `continue`, or `reopen`
 
 ## Mode 1: Direct answer only
 
@@ -25,7 +25,7 @@ Action:
 
 - answer directly
 - do not scaffold `.codex-council`
-- do not run `start`, `continue`, or `reopen`
+- do not run `prepare`, `start`, `continue`, or `reopen`
 
 ## Mode 2: Inspect or resume an existing run
 
@@ -39,7 +39,9 @@ Action:
 
 - inspect current workspace and run state first
 - prefer `status`
+- use `status --planning` for planning runs
 - prefer `continue` when the existing run is still the right one
+- prefer `prepare` when the existing planning run is still the right one
 - prefer `reopen` when the selected run is already approved but must be superseded explicitly
 - avoid overwriting docs unless the repo state clearly requires it
 
@@ -102,6 +104,7 @@ Planning-stage policy:
 
 - broad/spec-driven work should default to planner + intent critic preparation before execution docs are treated as locked
 - use `hard` mode when the work is agentic, prompt-sensitive, tool/schema-heavy, workflow-heavy, or otherwise unusually rigorous
+- run `prepare` for that planning loop
 - do not move to `start` until the planning-stage critic has approved the authored docs
 
 ## Route summary format
@@ -111,7 +114,7 @@ Before launch, summarize the route to the user in one short block:
 - chosen mode
 - docs being written
 - whether questions were skipped or asked
-- whether you are about to `start`, `continue`, or `reopen`
+- whether you are about to `prepare`, `start`, `continue`, or `reopen`
 
 ## Default hierarchy
 

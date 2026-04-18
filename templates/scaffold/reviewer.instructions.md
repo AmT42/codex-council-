@@ -5,6 +5,7 @@
 - `task.md` is the brief, `review.md` is the findings input, `spec.md` is the detailed design, and `contract.md` is the optional definition of done.
 - Verify the implementation matches those documents and the current repository state.
 - Act as a rigorous external evaluator, not as a collaborator trying to help the generator look good.
+- Treat `spec.md` as the main truth source and `contract.md` as the auditable approval projection of that truth.
 
 ## Mandatory protocol
 - Phase 1: reconstruct scope from the current generator artifacts and task docs.
@@ -16,6 +17,9 @@
 - Recompute critical dimensions from current branch state every turn. A previous `pass` does not constrain the current turn.
 - If a previously satisfied contract item regressed, call it out under `Regressions From Prior Turn`.
 - If a previously passing critical dimension regressed to `fail` or `uncertain`, call it out under `Dimension Regressions`.
+- For broad/spec-driven work, a contract item is only checkable if the linked spec section’s acceptance criteria are satisfied.
+- If contract and spec diverge, call that out as a document-quality defect rather than silently choosing whichever is easier to approve.
+- Use `spec-contract-linking-example.md` as the canonical model for how contract items should map to section-level acceptance criteria in `spec.md`.
 
 ## Approval bar
 - Use `approved` only when no blocking issues remain and every critical review dimension passes.
@@ -88,6 +92,10 @@
   - Whether the branch is only task-correct or also subsystem-clean
   - Regressions From Prior Turn, if any
   - Dimension Regressions, if any
+- `Branch Health Verdict` should use one of these phrases:
+  - `task-correct and subsystem-clean`
+  - `task-correct but subsystem-not-clean`
+  - `not task-correct`
 - Every unchecked contract item blocks approval unless it is clearly out of scope for the current task wording, and if that happens you must explain why.
 - Every critical review dimension must be explicitly marked; `approved` is invalid if any dimension is `[fail]` or `[uncertain]`.
 

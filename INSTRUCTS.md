@@ -25,7 +25,7 @@ That means:
 
 - inspect the target repo
 - synthesize strong council docs
-- decide between direct answer, `start`, `continue`, and `reopen`
+- decide between direct answer, `prepare`, `start`, `continue`, and `reopen`
 - launch or resume the council
 
 That does **not** mean:
@@ -42,7 +42,9 @@ If the user says “use this repo to add feature X”, interpret that as:
 
 ## Non-Negotiable Process Boundary
 
-When you run `start`, `continue`, or `reopen`, you are launching a live supervisor process.
+`prepare`, `start`, `continue`, and `reopen` are supervisor-facing lifecycle commands.
+
+When one of them actually launches or resumes a supervisor, you are responsible for preserving that supervisor process.
 
 This is not a special built-in Codex background feature.
 
@@ -68,10 +70,15 @@ Safe patterns:
 
 Unsafe pattern:
 
-- launch `start`, `continue`, or `reopen` from your outer-agent shell
+- launch `prepare`, `start`, `continue`, or `reopen` from your outer-agent shell
 - then let that shell exit or get interrupted
 
-If that happens, a role session may finish in `tmux` while the reviewer never launches, because the supervisor is already gone.
+If that happens, a role session may finish in `tmux` while the next council role never launches, because the supervisor is already gone.
+
+Planning-stage equivalent:
+
+- a planner or intent-critic session may keep running in `tmux`
+- but the planning loop will stop advancing until someone inspects `status --planning` and resumes with `prepare`
 
 ## Intended Audiences
 
@@ -102,7 +109,7 @@ The outer agent should:
 
 - avoid unnecessary questions
 - preserve the user’s intent precisely
-- move directly into `start`, `continue`, or `reopen` once the docs are strong enough
+- move directly into `prepare`, `start`, `continue`, or `reopen` once the docs are strong enough
 
 ## Decision-Complete Specs
 
@@ -137,7 +144,7 @@ Use a planning stage first:
 
 - preserve the raw user intent
 - inspect the repo
-- let a planner author draft execution docs
+- run `prepare` so a planner authors draft execution docs
 - let an intent critic reject weak, non-faithful, or under-specified docs
 - only then treat `task.md`, `spec.md`, and `contract.md` as locked execution inputs
 
@@ -156,6 +163,15 @@ It means:
 - require explicit prompt/tool/schema/instruction contracts when relevant
 - reject omissions, hidden assumptions, toy-like abstractions, and vague approval language
 - optimize for execution safety and intent fidelity rather than brevity
+
+Planning-stage runtime rule:
+
+- `prepare` is the planning-runtime entrypoint
+- it starts or resumes a planner → intent critic loop
+- `status --planning` inspects that planning loop
+- if the latest planning run is already approved and canonical docs are unchanged, `prepare` may report that the docs are already prepared instead of launching a new live planning supervisor
+- use `--new-run` or new `--intent` when you intentionally want a fresh planning pass after approval
+- only after planning approval should the outer agent treat the docs as execution-ready inputs for `start`
 
 ## Evidence-First Diagnosis
 
@@ -195,7 +211,7 @@ Behavior:
 
 - answer directly
 - do not create `.codex-council` files
-- do not call `start`, `continue`, or `reopen`
+- do not call `prepare`, `start`, `continue`, or `reopen`
 
 ### 2. Inspect or resume an existing run
 
@@ -436,13 +452,15 @@ If the answer is no, do not launch yet.
 
 The outer agent should use the existing CLI, not invent new commands.
 
-The canonical commands are `init`, `write`, `start`, `status`, `continue`, and `reopen`.
+The canonical commands are `init`, `write`, `prepare`, `start`, `status`, `continue`, and `reopen`.
 
 For a capable outer agent, the preferred authoring path is:
 
 - use `init` to scaffold if needed
 - inspect and fill the canonical files directly with normal file-editing tools
-- use `start`, `continue`, or `reopen` once the docs are strong
+- use `prepare` for broad planning work
+- use `start` for concrete execution once docs are ready
+- use `continue` or `reopen` once a run already exists
 
 Treat `write --body` as a fallback for:
 
@@ -576,4 +594,4 @@ When the request is direct-answer-only:
 - Do not launch the council with a weak brief just because the user wants speed.
 - Do not implement the target-repo feature directly when the user explicitly asked to use this harness.
 - Do not add harness-side glue code or wrappers just because the target feature would otherwise require some setup; first operate the existing harness unless the user explicitly asked to extend `council-agent`.
-- Do not fire-and-forget `start`, `continue`, or `reopen` from an outer-agent session that may kill the supervisor when it exits.
+- Do not fire-and-forget `prepare`, `start`, `continue`, or `reopen` from an outer-agent session that may kill the supervisor when it exits.

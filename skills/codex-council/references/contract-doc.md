@@ -14,6 +14,8 @@ Skip it only when the request is:
 
 `contract.md` gives the reviewer an auditable definition of done.
 
+For broad/spec-driven work, treat `contract.md` as the approval projection of `spec.md`, not as an independent mini-spec.
+
 It should encode short checklist items that are:
 
 - objective
@@ -31,6 +33,15 @@ Good contract items usually cover:
 - an important risk or regression guardrail
 - required validation
 - when relevant, the correct path for the user-visible behavior
+
+For broad/spec-driven work:
+- prefer one checkbox per major spec section or approval-critical group
+- ensure each item is traceable to a named spec section
+- only check an item when all acceptance criteria for the linked spec section are satisfied
+
+For a full worked example, see:
+
+- [`spec-contract-linking-example.md`](./spec-contract-linking-example.md)
 
 Bad contract items:
 
@@ -73,6 +84,8 @@ When the spec introduces runtime, fallback, state, persistence, or compatibility
 If the task has both a primary user-facing path and a maintenance/background/helper path, ensure at least one checklist item makes it auditable that the primary behavior is satisfied by the correct path and not merely by an adjacent helper mechanism.
 
 When prompts, system instructions, tool descriptions, schemas, approvals, or evaluator behavior are part of the product surface, ensure at least one checklist item makes their required behavior auditable.
+
+When subsystem cleanliness materially affects approval, include one explicit branch-quality / validation gate item rather than relying only on feature-presence checkboxes.
 
 ## Example seed
 

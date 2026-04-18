@@ -57,8 +57,12 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 "turn_timeout_seconds": 1800,
                 "require_git": True,
             },
+            "planning": {
+                "max_turns": 4,
+            },
             "review": {
                 "fresh_reviewer_session_per_turn": True,
+                "reviewer_reset_mode": "clear",
                 "allow_reviewer_test_edits": True,
                 "allow_reviewer_production_edits": False,
                 "require_primary_path_smoke": True,
@@ -80,6 +84,36 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                 "changed_files": changed_files or ["src/example.py"],
             },
         )
+
+    def write_planner_status(self, turn_dir: Path, *, result: str = "drafted") -> None:
+        (turn_dir / "planner").mkdir(parents=True, exist_ok=True)
+        (turn_dir / "planner" / "message.md").write_text("planner", encoding="utf-8")
+        payload = {
+            "result": result,
+            "summary": "Planning docs updated.",
+            "docs_updated": [MODULE.TASK_FILENAME, MODULE.SPEC_FILENAME, MODULE.CONTRACT_FILENAME],
+        }
+        if result == "needs_human":
+            payload["human_source"] = MODULE.TASK_FILENAME
+            payload["human_message"] = "Need clarification."
+        MODULE.save_json(turn_dir / "planner" / "status.json", payload)
+
+    def write_intent_critic_status(self, turn_dir: Path, *, verdict: str = "approved") -> None:
+        (turn_dir / "intent_critic").mkdir(parents=True, exist_ok=True)
+        (turn_dir / "intent_critic" / "message.md").write_text("critic", encoding="utf-8")
+        dimensions = {key: "pass" for key in MODULE.planning_review_dimension_keys()}
+        if verdict != "approved":
+            dimensions["spec_completeness"] = "fail"
+        payload = {
+            "verdict": verdict,
+            "summary": "Planning docs reviewed.",
+            "blocking_issues": [] if verdict == "approved" else ["Spec still missing a major section."],
+            "critical_dimensions": dimensions,
+        }
+        if verdict == "needs_human":
+            payload["human_source"] = MODULE.TASK_FILENAME
+            payload["human_message"] = "Need product clarification."
+        MODULE.save_json(turn_dir / "intent_critic" / "status.json", payload)
 
     def test_validate_generator_status_accepts_valid_payload(self) -> None:
         status = MODULE.validate_generator_status(
@@ -106,6 +140,28 @@ class CodexTuiSupervisorTests(unittest.TestCase):
                     "test_adequacy": "pass",
                     "maintainability": "pass",
                 },
+            }
+        )
+        self.assertEqual(status["verdict"], "approved")
+
+    def test_validate_planner_status_accepts_valid_payload(self) -> None:
+        status = MODULE.validate_planner_status(
+            {
+                "result": "drafted",
+                "summary": "Tightened the planning docs.",
+                "docs_updated": [MODULE.TASK_FILENAME, MODULE.SPEC_FILENAME, MODULE.CONTRACT_FILENAME],
+            }
+        )
+        self.assertEqual(status["result"], "drafted")
+        self.assertEqual(len(status["docs_updated"]), 3)
+
+    def test_validate_intent_critic_status_accepts_approved(self) -> None:
+        status = MODULE.validate_intent_critic_status(
+            {
+                "verdict": "approved",
+                "summary": "Docs are ready for execution.",
+                "blocking_issues": [],
+                "critical_dimensions": {key: "pass" for key in MODULE.planning_review_dimension_keys()},
             }
         )
         self.assertEqual(status["verdict"], "approved")
@@ -344,6 +400,9 @@ reviewer_reset_mode = "wrong"
             self.assertTrue((task_root / "AGENTS.md").exists())
             self.assertTrue((task_root / "generator.instructions.md").exists())
             self.assertTrue((task_root / "reviewer.instructions.md").exists())
+            self.assertTrue((task_root / "planner.instructions.md").exists())
+            self.assertTrue((task_root / "intent_critic.instructions.md").exists())
+            self.assertTrue((task_root / "spec-contract-linking-example.md").exists())
             self.assertFalse((task_root / MODULE.TASK_FILENAME).exists())
             self.assertEqual(result["profile"], "undocumented")
 
@@ -3157,6 +3216,127 @@ reviewer_reset_mode = "wrong"
             self.assertEqual(result, 0)
             self.assertEqual(resumed_roles, ["generator", "reviewer"])
 
+    def test_continue_run_writes_diagnostics_on_runtime_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix the retry path so duplicate rows are not created during sync.\n\n## Context\n\nThe sync worker currently retries after a transient timeout and may write the same row twice.\n\n## Success Signal\n\nA retry no longer creates duplicate rows and the changed path is covered by verification.\n",
+                encoding="utf-8",
+            )
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            (turn_one / "generator").mkdir(exist_ok=True)
+            MODULE.write_text(turn_one / "generator" / "prompt.md", "prompt")
+            MODULE.save_json(
+                run_dir / "state.json",
+                {
+                    "status": "waiting_generator",
+                    "current_turn": 1,
+                    "pending_turn": None,
+                    "pending_role": None,
+                    "transition_source_verdict": None,
+                    "task_root": str(task_root),
+                    "run_dir": str(run_dir),
+                    "review_bridge": {"mode": "internal"},
+                    "roles": {
+                        "generator": {"tmux_session": "gen", "last_wait_phase": None},
+                        "reviewer": {"tmux_session": "rev", "last_wait_phase": None},
+                    },
+                    "council_config": self.build_council_config(),
+                    "repo_root": str(repo_root),
+                    "run_id": "run-1",
+                    "diagnostics_dir": str(run_dir / "diagnostics"),
+                },
+            )
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+            )
+            error = MODULE.SupervisorRuntimeError("generator_session_ready", "boom", role="generator")
+            with mock.patch.object(MODULE, "ensure_active_role_sessions_ready", side_effect=error), contextlib.redirect_stdout(io.StringIO()):
+                result = MODULE.continue_run(args)
+            self.assertEqual(result, 1)
+            diagnostics_root = run_dir / "diagnostics"
+            self.assertTrue(diagnostics_root.exists())
+            failure_dirs = [path for path in diagnostics_root.iterdir() if path.is_dir()]
+            self.assertTrue(failure_dirs)
+            self.assertTrue((failure_dirs[0] / "error.json").exists())
+            persisted_state = MODULE.load_json(run_dir / "state.json")
+            self.assertEqual(persisted_state["status"], "blocked")
+            self.assertIn("generator_session_ready", persisted_state["stop_reason"])
+            events_text = MODULE.events_path_for(run_dir).read_text(encoding="utf-8")
+            self.assertIn("\"event\": \"blocked\"", events_text)
+
+    def test_continue_run_rejects_missing_state_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            broken_run_dir = task_root / "runs" / "broken-run"
+            (broken_run_dir / "turns").mkdir(parents=True)
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="broken-run",
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.continue_run(args)
+            self.assertIn("missing run state", str(ctx.exception))
+
+    def test_continue_run_writes_blocked_invalid_artifacts_status_on_invalid_artifact_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix the retry path so duplicate rows are not created during sync.\n\n## Context\n\nThe sync worker currently retries after a transient timeout and may write the same row twice.\n\n## Success Signal\n\nA retry no longer creates duplicate rows and the changed path is covered by verification.\n",
+                encoding="utf-8",
+            )
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            (turn_one / "generator").mkdir(exist_ok=True)
+            MODULE.write_text(turn_one / "generator" / "prompt.md", "prompt")
+            MODULE.save_json(
+                run_dir / "state.json",
+                {
+                    "status": "waiting_generator",
+                    "current_turn": 1,
+                    "pending_turn": None,
+                    "pending_role": None,
+                    "transition_source_verdict": None,
+                    "task_root": str(task_root),
+                    "run_dir": str(run_dir),
+                    "review_bridge": {"mode": "internal"},
+                    "roles": {
+                        "generator": {"tmux_session": "gen", "last_wait_phase": None},
+                        "reviewer": {"tmux_session": "rev", "last_wait_phase": None},
+                    },
+                    "council_config": self.build_council_config(),
+                    "repo_root": str(repo_root),
+                    "run_id": "run-1",
+                    "diagnostics_dir": str(run_dir / "diagnostics"),
+                },
+            )
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+            )
+            error = MODULE.SupervisorRuntimeError("blocked_invalid_artifacts", "broken artifact", role="generator")
+            with mock.patch.object(MODULE, "ensure_active_role_sessions_ready", side_effect=error), contextlib.redirect_stdout(io.StringIO()):
+                result = MODULE.continue_run(args)
+            self.assertEqual(result, 1)
+            persisted_state = MODULE.load_json(run_dir / "state.json")
+            self.assertEqual(persisted_state["status"], "blocked_invalid_artifacts")
+            events_text = MODULE.events_path_for(run_dir).read_text(encoding="utf-8")
+            self.assertIn("\"event\": \"blocked_invalid_artifacts\"", events_text)
+
     def test_reopen_run_creates_new_run_metadata_index_and_prompt_context_for_review_only_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir) / "repo"
@@ -3438,9 +3618,25 @@ reviewer_reset_mode = "wrong"
             self.assertIn("review:", rendered)
             self.assertIn("spec:", rendered)
             self.assertIn("contract:", rendered)
+            self.assertIn("planner:", rendered)
+            self.assertIn("intent_critic:", rendered)
+            self.assertIn("spec_contract_example:", rendered)
 
-    def test_build_parser_exposes_write_start_role_shared_fork_github_and_reopen_args(self) -> None:
+    def test_build_parser_exposes_prepare_write_start_role_shared_fork_github_and_reopen_args(self) -> None:
         parser = MODULE.build_parser()
+        prepare_args = parser.parse_args(
+            [
+                "prepare",
+                "demo-task",
+                "--intent",
+                "Build a robust workflow.",
+                "--hard",
+                "--planner-session",
+                "planner-tmux",
+                "--critic-session",
+                "critic-tmux",
+            ]
+        )
         write_args = parser.parse_args(["write", "task", "demo-task", "--body", "Fix it"])
         start_args = parser.parse_args(
             [
@@ -3468,6 +3664,12 @@ reviewer_reset_mode = "wrong"
                 "Approval was wrong.",
             ]
         )
+        status_args = parser.parse_args(["status", "demo-task", "--planning"])
+        self.assertEqual(prepare_args.command, "prepare")
+        self.assertEqual(prepare_args.intent, "Build a robust workflow.")
+        self.assertTrue(prepare_args.hard)
+        self.assertEqual(prepare_args.planner_session, "planner-tmux")
+        self.assertEqual(prepare_args.critic_session, "critic-tmux")
         self.assertEqual(write_args.command, "write")
         self.assertEqual(start_args.fork_session_id, "id")
         self.assertEqual(start_args.start_role, "reviewer")
@@ -3477,6 +3679,783 @@ reviewer_reset_mode = "wrong"
         self.assertEqual(reopen_args.command, "reopen")
         self.assertEqual(reopen_args.reason_kind, "false_approved")
         self.assertEqual(reopen_args.reason, "Approval was wrong.")
+        self.assertTrue(status_args.planning)
+
+    def test_prepare_run_scaffolds_planning_workspace_and_source_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=tmp_dir,
+                allow_non_git=True,
+                intent="Build a production-grade workflow.",
+                intent_file=None,
+                hard=True,
+                run_id=None,
+                planner_session=None,
+                critic_session=None,
+                new_run=False,
+            )
+            with mock.patch.object(MODULE, "run_planning_supervisor_for_initialized_run", return_value=0):
+                result = MODULE.prepare_run(args)
+            self.assertEqual(result, 0)
+            task_root = MODULE.task_root_for(Path(tmp_dir), "demo-task")
+            planning_runs_root = task_root / MODULE.PLANNING_RUNS_DIRNAME
+            self.assertTrue((task_root / "planner.instructions.md").exists())
+            self.assertTrue((task_root / "intent_critic.instructions.md").exists())
+            self.assertTrue(planning_runs_root.exists())
+            run_dirs = sorted(path for path in planning_runs_root.iterdir() if path.is_dir())
+            self.assertEqual(len(run_dirs), 1)
+            source_intent = (run_dirs[0] / MODULE.PLANNING_SOURCE_INTENT_FILENAME).read_text(encoding="utf-8")
+            self.assertIn("Build a production-grade workflow.", source_intent)
+            self.assertIn("Hard mode: enabled", source_intent)
+
+    def test_resolve_planning_continuation_plan_routes_changes_requested_to_next_planner_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "plan-run"
+            (run_dir / "turns").mkdir(parents=True)
+            state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="plan-run",
+                workspace_profile="undocumented",
+                council_config=self.build_council_config(),
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=False,
+            )
+            MODULE.save_run_state(run_dir, state)
+            MODULE.write_text(run_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            turn_one = MODULE.prepare_planning_turn(run_dir, 1, task_root)
+            self.write_planner_status(turn_one, result="drafted")
+            self.write_intent_critic_status(turn_one, verdict="changes_requested")
+            plan = MODULE.resolve_planning_continuation_plan(run_dir, state)
+            self.assertEqual(plan["mode"], "continue")
+            self.assertEqual(plan["role"], "planner")
+            self.assertTrue(plan["create_new_turn"])
+            self.assertEqual(plan["turn_number"], 2)
+
+    def test_show_status_supports_planning_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text("# Task\n\n## Request\n\nPlan it\n\n## Context\n\nctx\n\n## Success Signal\n\nready\n", encoding="utf-8")
+            (task_root / MODULE.SPEC_FILENAME).write_text("# Spec\n\n## Goal\n\ngoal\n\n## User Outcome\n\noutcome\n\n## In Scope\n\n- one\n\n## Out of Scope\n\n- two\n\n## Constraints\n\n- three\n\n## Existing Context\n\nctx\n\n## Desired Behavior\n\nbody\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate\n\n## Open Questions\n\n- none\n", encoding="utf-8")
+            (task_root / MODULE.CONTRACT_FILENAME).write_text("# Definition of Done\n\n- [ ] Example\n", encoding="utf-8")
+            run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "plan-run"
+            (run_dir / "turns").mkdir(parents=True)
+            state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="plan-run",
+                workspace_profile="task+spec+contract",
+                council_config=self.build_council_config(),
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=True,
+            )
+            state["status"] = "approved"
+            state["stop_reason"] = "Docs approved."
+            MODULE.save_run_state(run_dir, state)
+            MODULE.write_text(run_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            turn_one = MODULE.prepare_planning_turn(run_dir, 1, task_root)
+            self.write_planner_status(turn_one, result="drafted")
+            self.write_intent_critic_status(turn_one, verdict="approved")
+            MODULE.refresh_planning_turn_context_manifest(run_dir, task_root, turn_one)
+            MODULE.append_run_event(run_dir, "planner_prompt_sent", turn_number=1, role="planner")
+            MODULE.append_run_event(run_dir, "intent_critic_prompt_sent", turn_number=1, role="intent_critic")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=tmp_dir,
+                allow_non_git=True,
+                run_id="plan-run",
+                planning=True,
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = MODULE.show_status(args)
+            self.assertEqual(result, 0)
+            payload = json.loads(output.getvalue())
+            self.assertTrue(payload["docs_approved_for_execution"])
+            self.assertIn("planner", payload["latest_role_milestones"])
+            self.assertIn("intent_critic", payload["latest_role_milestones"])
+
+    def test_validate_task_workspace_for_start_rejects_missing_section_acceptance_criteria(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] M1. Workflow matches Spec M1 and validation passes.\n- [ ] Validation and branch quality gate.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("missing `### Acceptance Criteria`", str(ctx.exception))
+
+    def test_validate_task_workspace_for_start_rejects_missing_contract_section_linkage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Acceptance Criteria\n- The primary workflow works on the intended path.\n- Validation covers the changed behavior.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] The workflow works.\n- [ ] Validation and branch quality gate.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("missing linkage for: M1", str(ctx.exception))
+
+    def test_validate_task_workspace_for_start_does_not_confuse_m1_with_m10_linkage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. First Surface\n\nDescribe the first behavior.\n\n### Acceptance Criteria\n- The first surface works.\n- The first validation exists.\n\n## M10. Tenth Surface\n\nDescribe the tenth behavior.\n\n### Acceptance Criteria\n- The tenth surface works.\n- The tenth validation exists.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] M10. The tenth surface works and validation passes.\n- [ ] Validation and branch quality gate.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("missing linkage for: M1", str(ctx.exception))
+
+    def test_latest_named_run_dir_uses_state_created_at_not_directory_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runs_root = Path(tmp_dir) / "planning-runs"
+            older = runs_root / "z-old"
+            newer = runs_root / "a-new"
+            older.mkdir(parents=True)
+            newer.mkdir(parents=True)
+            MODULE.save_json(older / "state.json", {"created_at": "2026-04-18T10:00:00Z"})
+            MODULE.save_json(newer / "state.json", {"created_at": "2026-04-18T11:00:00Z"})
+            latest = MODULE.latest_named_run_dir(runs_root, label="planning runs")
+            self.assertEqual(latest.name, "a-new")
+
+    def test_latest_run_dir_uses_state_created_at_not_directory_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            runs_root = task_root / "runs"
+            older = runs_root / "z-old"
+            newer = runs_root / "a-new"
+            older.mkdir(parents=True)
+            newer.mkdir(parents=True)
+            MODULE.save_json(older / "state.json", {"created_at": "2026-04-18T10:00:00Z"})
+            MODULE.save_json(newer / "state.json", {"created_at": "2026-04-18T11:00:00Z"})
+            latest = MODULE.latest_run_dir(task_root)
+            self.assertEqual(latest.name, "a-new")
+
+    def test_prepare_run_rejects_reserved_latest_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=tmp_dir,
+                allow_non_git=True,
+                intent="Plan it",
+                intent_file=None,
+                hard=False,
+                run_id="latest",
+                planner_session=None,
+                critic_session=None,
+                new_run=False,
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.prepare_run(args)
+            self.assertIn("reserved as a run selector", str(ctx.exception))
+
+    def test_start_run_rejects_reserved_latest_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="latest",
+                generator_session=None,
+                reviewer_session=None,
+                fork_session_id=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+                review_mode="internal",
+                github_pr=None,
+                github_branch=None,
+                github_base=None,
+                start_role="auto",
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.start_run(args)
+            self.assertIn("reserved as a run selector", str(ctx.exception))
+
+    def test_prepare_run_rejects_latest_planning_continuation_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "plan-run"
+            (run_dir / "turns").mkdir(parents=True)
+            state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="plan-run",
+                workspace_profile="undocumented",
+                council_config=self.build_council_config(),
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=False,
+            )
+            MODULE.save_run_state(run_dir, state)
+            MODULE.write_text(run_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            turn_one = MODULE.prepare_planning_turn(run_dir, 1, task_root)
+            self.write_intent_critic_status(turn_one, verdict="changes_requested")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=tmp_dir,
+                allow_non_git=True,
+                intent=None,
+                intent_file=None,
+                hard=False,
+                run_id=None,
+                planner_session=None,
+                critic_session=None,
+                new_run=False,
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.prepare_run(args)
+            self.assertIn("mixes intent critic activity with incomplete planner state", str(ctx.exception))
+
+    def test_prepare_run_rejects_latest_planning_run_missing_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            broken_run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "broken-run"
+            (broken_run_dir / "turns").mkdir(parents=True)
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=tmp_dir,
+                allow_non_git=True,
+                intent=None,
+                intent_file=None,
+                hard=False,
+                run_id=None,
+                planner_session=None,
+                critic_session=None,
+                new_run=False,
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.prepare_run(args)
+            self.assertIn("missing state", str(ctx.exception))
+
+    def test_prepare_run_rejects_explicit_planning_run_missing_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            broken_run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "broken-run"
+            (broken_run_dir / "turns").mkdir(parents=True)
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=tmp_dir,
+                allow_non_git=True,
+                intent=None,
+                intent_file=None,
+                hard=False,
+                run_id="broken-run",
+                planner_session=None,
+                critic_session=None,
+                new_run=False,
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.prepare_run(args)
+            self.assertIn("selected planning run is missing state", str(ctx.exception))
+
+    def test_prepare_run_explicit_approved_planning_run_rejects_doc_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text("# Task\n\n## Request\n\nPlan it\n\n## Context\n\nctx\n\n## Success Signal\n\nready\n", encoding="utf-8")
+            (task_root / MODULE.SPEC_FILENAME).write_text("# Spec\n\n## Goal\n\ngoal\n\n## User Outcome\n\noutcome\n\n## In Scope\n\n- one\n\n## Out of Scope\n\n- two\n\n## Constraints\n\n- three\n\n## Existing Context\n\nctx\n\n## Desired Behavior\n\nbody\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate\n\n## Open Questions\n\n- none\n", encoding="utf-8")
+            (task_root / MODULE.CONTRACT_FILENAME).write_text("# Definition of Done\n\n- [ ] Example\n", encoding="utf-8")
+            run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "plan-run"
+            (run_dir / "turns").mkdir(parents=True)
+            state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="plan-run",
+                workspace_profile="task+spec+contract",
+                council_config=self.build_council_config(),
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=False,
+            )
+            MODULE.save_run_state(run_dir, state)
+            MODULE.write_text(run_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            turn_one = MODULE.prepare_planning_turn(run_dir, 1, task_root)
+            self.write_planner_status(turn_one, result="drafted")
+            self.write_intent_critic_status(turn_one, verdict="approved")
+            MODULE.refresh_planning_turn_context_manifest(run_dir, task_root, turn_one)
+            (task_root / MODULE.CONTRACT_FILENAME).write_text("# Definition of Done\n\n- [ ] Example changed\n", encoding="utf-8")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=tmp_dir,
+                allow_non_git=True,
+                intent=None,
+                intent_file=None,
+                hard=False,
+                run_id="plan-run",
+                planner_session=None,
+                critic_session=None,
+                new_run=False,
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.prepare_run(args)
+            self.assertIn("canonical docs changed since that approval", str(ctx.exception))
+
+    def test_prepare_run_resume_path_writes_diagnostics_on_runtime_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "plan-run"
+            (run_dir / "turns").mkdir(parents=True)
+            state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="plan-run",
+                workspace_profile="undocumented",
+                council_config=self.build_council_config(),
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=False,
+            )
+            MODULE.save_run_state(run_dir, state)
+            MODULE.write_text(run_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            turn_one = MODULE.prepare_planning_turn(run_dir, 1, task_root)
+            self.write_planner_status(turn_one, result="drafted")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=tmp_dir,
+                allow_non_git=True,
+                intent=None,
+                intent_file=None,
+                hard=False,
+                run_id=None,
+                planner_session=None,
+                critic_session=None,
+                new_run=False,
+            )
+            error = MODULE.SupervisorRuntimeError("planner_session_ready", "boom", role="planner")
+            with mock.patch.object(MODULE, "ensure_active_role_sessions_ready", side_effect=error):
+                result = MODULE.prepare_run(args)
+            self.assertEqual(result, 1)
+            diagnostics_root = run_dir / "diagnostics"
+            self.assertTrue(diagnostics_root.exists())
+            failure_dirs = [path for path in diagnostics_root.iterdir() if path.is_dir()]
+            self.assertTrue(failure_dirs)
+            self.assertTrue((failure_dirs[0] / "error.json").exists())
+            persisted_state = MODULE.load_json(run_dir / "state.json")
+            self.assertEqual(persisted_state["status"], "blocked")
+            events_text = MODULE.events_path_for(run_dir).read_text(encoding="utf-8")
+            self.assertIn("\"event\": \"blocked\"", events_text)
+
+    def test_prepare_run_resumes_same_turn_intent_critic_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "plan-run"
+            (run_dir / "turns").mkdir(parents=True)
+            state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="plan-run",
+                workspace_profile="undocumented",
+                council_config=self.build_council_config(),
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=False,
+            )
+            MODULE.save_run_state(run_dir, state)
+            MODULE.write_text(run_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            turn_one = MODULE.prepare_planning_turn(run_dir, 1, task_root)
+            self.write_planner_status(turn_one, result="drafted")
+            MODULE.write_prompt_artifact(turn_one, "intent_critic", "critic prompt")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=tmp_dir,
+                allow_non_git=True,
+                intent=None,
+                intent_file=None,
+                hard=False,
+                run_id=None,
+                planner_session=None,
+                critic_session=None,
+                new_run=False,
+            )
+            captured: dict[str, object] = {}
+
+            def fake_planning_loop_from(run_dir_arg, state_arg, task_root_arg, **kwargs):
+                captured["run_dir"] = run_dir_arg
+                captured["state_status"] = state_arg["status"]
+                captured["kwargs"] = kwargs
+
+            with mock.patch.object(MODULE, "ensure_active_role_sessions_ready", return_value=None), mock.patch.object(
+                MODULE,
+                "planning_loop_from",
+                side_effect=fake_planning_loop_from,
+            ), contextlib.redirect_stdout(io.StringIO()):
+                result = MODULE.prepare_run(args)
+            self.assertEqual(result, 0)
+            self.assertEqual(Path(captured["run_dir"]).resolve(), run_dir.resolve())
+            self.assertEqual(captured["state_status"], "waiting_intent_critic")
+            self.assertEqual(captured["kwargs"]["start_turn"], 1)
+            self.assertEqual(captured["kwargs"]["start_role"], "intent_critic")
+            self.assertTrue(captured["kwargs"]["reuse_existing_turn_for_first"])
+
+    def test_planning_loop_resume_respects_absolute_max_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "plan-run"
+            (run_dir / "turns").mkdir(parents=True)
+            config = self.build_council_config()
+            config["planning"]["max_turns"] = 4
+            state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="plan-run",
+                workspace_profile="undocumented",
+                council_config=config,
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=False,
+            )
+            MODULE.save_run_state(run_dir, state)
+            MODULE.write_text(run_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            MODULE.prepare_planning_turn(run_dir, 2, task_root)
+
+            def planner_side_effect(_run_dir, mutated_state, _task_root, turn_number, turn_dir, **_kwargs):
+                mutated_state["current_turn"] = turn_number
+                mutated_state["pending_turn"] = None
+                mutated_state["pending_role"] = None
+                mutated_state["transition_source_verdict"] = None
+                mutated_state["status"] = "waiting_planner"
+                MODULE.write_prompt_artifact(turn_dir, "planner", "planner prompt")
+                MODULE.save_run_state(run_dir, mutated_state)
+                return {"result": "drafted", "summary": "drafted", "docs_updated": []}
+
+            with mock.patch.object(MODULE, "run_planner_phase", side_effect=planner_side_effect), mock.patch.object(
+                MODULE,
+                "run_intent_critic_phase",
+                return_value={
+                    "verdict": "changes_requested",
+                    "summary": "more work",
+                    "blocking_issues": ["gap"],
+                    "critical_dimensions": {key: "fail" for key in MODULE.planning_review_dimension_keys()},
+                    "human_message": None,
+                    "human_source": None,
+                },
+            ):
+                MODULE.planning_loop_from(
+                    run_dir,
+                    state,
+                    task_root,
+                    start_turn=2,
+                    start_role="planner",
+                    reuse_existing_turn_for_first=True,
+                )
+
+            final_state = MODULE.load_json(run_dir / "state.json")
+            self.assertEqual(final_state["status"], "max_turns_reached")
+            self.assertFalse((run_dir / "turns" / "0005").exists())
+
+    def test_start_run_rejects_in_progress_planning_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix the retry path so duplicate rows are not created during sync.\n\n## Context\n\nThe sync worker currently retries after a transient timeout and may write the same row twice.\n\n## Success Signal\n\nA retry no longer creates duplicate rows and the changed path is covered by verification.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] The retry path no longer writes duplicate rows during sync.\n",
+                encoding="utf-8",
+            )
+            planning_run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "plan-run"
+            (planning_run_dir / "turns").mkdir(parents=True)
+            planning_state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="plan-run",
+                workspace_profile="task+contract",
+                council_config=self.build_council_config(),
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=False,
+            )
+            MODULE.save_run_state(planning_run_dir, planning_state)
+            MODULE.write_text(planning_run_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            turn_one = MODULE.prepare_planning_turn(planning_run_dir, 1, task_root)
+            self.write_planner_status(turn_one, result="drafted")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id=None,
+                generator_session=None,
+                reviewer_session=None,
+                fork_session_id=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+                review_mode="internal",
+                github_pr=None,
+                github_branch=None,
+                github_base=None,
+                start_role="auto",
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.start_run(args)
+            self.assertIn("planning run", str(ctx.exception))
+
+    def test_validate_planning_state_for_start_rejects_latest_blocked_planning_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            blocked_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "blocked-run"
+            (blocked_dir / "turns").mkdir(parents=True)
+            state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="blocked-run",
+                workspace_profile="undocumented",
+                council_config=self.build_council_config(),
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=False,
+            )
+            state["created_at"] = "2026-04-18T12:00:00Z"
+            MODULE.save_run_state(blocked_dir, state)
+            MODULE.write_text(blocked_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            turn_one = MODULE.prepare_planning_turn(blocked_dir, 1, task_root)
+            self.write_planner_status(turn_one, result="drafted")
+            self.write_intent_critic_status(turn_one, verdict="blocked")
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.validate_planning_state_for_start(task_root)
+            self.assertIn("ended as `intent_critic_blocked`", str(ctx.exception))
+
+    def test_validate_planning_state_for_start_rejects_latest_approved_run_with_doc_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text("# Task\n\n## Request\n\nPlan it well enough for a validation gate.\n\n## Context\n\nContext that is long enough to be meaningful.\n\n## Success Signal\n\nThe docs are approved and still match the current canonical files.\n", encoding="utf-8")
+            (task_root / MODULE.SPEC_FILENAME).write_text("# Spec\n\n## Goal\n\ngoal text here\n\n## User Outcome\n\noutcome text here\n\n## In Scope\n\n- one\n\n## Out of Scope\n\n- two\n\n## Constraints\n\n- three\n\n## Existing Context\n\nctx\n\n## Desired Behavior\n\nbody body body body body body\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate validation validation validation\n\n## Open Questions\n\n- none\n", encoding="utf-8")
+            (task_root / MODULE.CONTRACT_FILENAME).write_text("# Definition of Done\n\n- [ ] Concrete behavior remains correct.\n- [ ] Required validation passes.\n", encoding="utf-8")
+            approved_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "approved-run"
+            (approved_dir / "turns").mkdir(parents=True)
+            state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="approved-run",
+                workspace_profile="task+spec+contract",
+                council_config=self.build_council_config(),
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=False,
+            )
+            state["created_at"] = "2026-04-18T12:00:00Z"
+            MODULE.save_run_state(approved_dir, state)
+            MODULE.write_text(approved_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            turn_one = MODULE.prepare_planning_turn(approved_dir, 1, task_root)
+            self.write_planner_status(turn_one, result="drafted")
+            self.write_intent_critic_status(turn_one, verdict="approved")
+            MODULE.refresh_planning_turn_context_manifest(approved_dir, task_root, turn_one)
+            (task_root / MODULE.CONTRACT_FILENAME).write_text("# Definition of Done\n\n- [ ] Concrete behavior changed after approval.\n- [ ] Required validation passes.\n", encoding="utf-8")
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.validate_planning_state_for_start(task_root)
+            self.assertIn("changed afterward", str(ctx.exception))
+
+    def test_start_run_uses_newest_planning_run_by_created_at(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix the retry path so duplicate rows are not created during sync.\n\n## Context\n\nThe sync worker currently retries after a transient timeout and may write the same row twice.\n\n## Success Signal\n\nA retry no longer creates duplicate rows and the changed path is covered by verification.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] The retry path no longer writes duplicate rows during sync.\n",
+                encoding="utf-8",
+            )
+            older_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "z-old"
+            newer_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "a-new"
+            (older_dir / "turns").mkdir(parents=True)
+            (newer_dir / "turns").mkdir(parents=True)
+            older_state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="z-old",
+                workspace_profile="task+contract",
+                council_config=self.build_council_config(),
+                planner_session="planner-session-old",
+                critic_session="critic-session-old",
+                hard_mode=False,
+            )
+            older_state["created_at"] = "2026-04-18T10:00:00Z"
+            newer_state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="a-new",
+                workspace_profile="task+contract",
+                council_config=self.build_council_config(),
+                planner_session="planner-session-new",
+                critic_session="critic-session-new",
+                hard_mode=False,
+            )
+            newer_state["created_at"] = "2026-04-18T11:00:00Z"
+            MODULE.save_run_state(older_dir, older_state)
+            MODULE.save_run_state(newer_dir, newer_state)
+            MODULE.write_text(older_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            MODULE.write_text(newer_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            older_turn = MODULE.prepare_planning_turn(older_dir, 1, task_root)
+            self.write_planner_status(older_turn, result="drafted")
+            self.write_intent_critic_status(older_turn, verdict="approved")
+            MODULE.refresh_planning_turn_context_manifest(older_dir, task_root, older_turn)
+            newer_turn = MODULE.prepare_planning_turn(newer_dir, 1, task_root)
+            self.write_planner_status(newer_turn, result="drafted")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id=None,
+                generator_session=None,
+                reviewer_session=None,
+                fork_session_id=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+                review_mode="internal",
+                github_pr=None,
+                github_branch=None,
+                github_base=None,
+                start_role="auto",
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.start_run(args)
+            self.assertIn("`a-new`", str(ctx.exception))
+
+    def test_start_run_allows_latest_approved_planning_run_without_doc_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix the retry path so duplicate rows are not created during sync.\n\n## Context\n\nThe sync worker currently retries after a transient timeout and may write the same row twice.\n\n## Success Signal\n\nA retry no longer creates duplicate rows and the changed path is covered by verification.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] The retry path no longer writes duplicate rows during sync.\n- [ ] Required verification for the changed retry path is present and passing.\n",
+                encoding="utf-8",
+            )
+            approved_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "approved-run"
+            (approved_dir / "turns").mkdir(parents=True)
+            planning_state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="approved-run",
+                workspace_profile="task+contract",
+                council_config=self.build_council_config(),
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=False,
+            )
+            planning_state["created_at"] = "2026-04-18T12:00:00Z"
+            MODULE.save_run_state(approved_dir, planning_state)
+            MODULE.write_text(approved_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            turn_one = MODULE.prepare_planning_turn(approved_dir, 1, task_root)
+            self.write_planner_status(turn_one, result="drafted")
+            self.write_intent_critic_status(turn_one, verdict="approved")
+            MODULE.refresh_planning_turn_context_manifest(approved_dir, task_root, turn_one)
+            self.commit_repo_changes(repo_root, message="prepare planning docs")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id=None,
+                generator_session=None,
+                reviewer_session=None,
+                fork_session_id=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+                review_mode="internal",
+                github_pr=None,
+                github_branch=None,
+                github_base=None,
+                start_role="auto",
+            )
+            with mock.patch.object(MODULE, "build_review_bridge_state", return_value={"mode": "internal"}), mock.patch.object(
+                MODULE,
+                "run_supervisor_for_initialized_run",
+                return_value=0,
+            ):
+                result = MODULE.start_run(args)
+            self.assertEqual(result, 0)
+
+    def test_write_failure_diagnostics_supports_planning_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "plan-run"
+            run_dir.mkdir(parents=True)
+            state = MODULE.create_planning_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="plan-run",
+                workspace_profile="undocumented",
+                council_config=self.build_council_config(),
+                planner_session="planner-session",
+                critic_session="critic-session",
+                hard_mode=False,
+            )
+            error = MODULE.SupervisorRuntimeError("intent_critic_turn", "boom", role="intent_critic")
+            with mock.patch.object(MODULE, "tmux_capture_joined_pane", return_value="pane"):
+                failure_dir = MODULE.write_failure_diagnostics(run_dir, state, error)
+            self.assertTrue((failure_dir / "planner.pane.txt").exists())
+            self.assertTrue((failure_dir / "intent_critic.pane.txt").exists())
 
     def test_consumer_docs_reference_canonical_cli_and_document_model(self) -> None:
         repo_root = MODULE_PATH.parents[1]
@@ -3488,7 +4467,7 @@ reviewer_reset_mode = "wrong"
         failure_recovery = (repo_root / "skills" / "codex-council" / "references" / "failure-recovery.md").read_text(encoding="utf-8")
         routing = (repo_root / "skills" / "codex-council" / "references" / "routing.md").read_text(encoding="utf-8")
 
-        for command in ("init", "write", "start", "continue", "reopen", "status"):
+        for command in ("init", "write", "prepare", "start", "continue", "reopen", "status"):
             self.assertIn(f"`{command}`", readme)
             self.assertIn(f"`{command}`", instructs)
 
@@ -3502,7 +4481,7 @@ reviewer_reset_mode = "wrong"
         self.assertIn("outer coding agent", readme)
         self.assertIn("source of truth", architecture.lower())
         self.assertIn("artifact-driven", architecture)
-        self.assertIn("planner / intent critic preparation", architecture)
+        self.assertIn("planner / intent critic planning loop", architecture)
         self.assertIn("## Planning Stage", readme)
         self.assertIn("## Planning Stage", instructs)
         self.assertIn("harness operator", readme)
@@ -3516,6 +4495,10 @@ reviewer_reset_mode = "wrong"
         self.assertIn("foreground command is enough", instructs)
         self.assertIn("editing the canonical files directly", readme)
         self.assertIn("fill the canonical files directly", instructs)
+        self.assertIn("`prepare`", skill)
+        self.assertIn("--planning", run_lifecycle)
+        self.assertIn("`prepare`", routing)
+        self.assertIn("`prepare`", failure_recovery)
         self.assertIn("Decision-Complete Specs", instructs)
         self.assertIn("hard` mode", readme)
         self.assertIn("hard` mode", instructs)
@@ -3576,6 +4559,7 @@ reviewer_reset_mode = "wrong"
         intent_critic_instructions = (repo_root / "templates" / "scaffold" / "intent_critic.instructions.md").read_text(encoding="utf-8")
         generator_instructions = (repo_root / "templates" / "scaffold" / "generator.instructions.md").read_text(encoding="utf-8")
         reviewer_instructions = (repo_root / "templates" / "scaffold" / "reviewer.instructions.md").read_text(encoding="utf-8")
+        linking_example = (repo_root / "skills" / "codex-council" / "references" / "spec-contract-linking-example.md").read_text(encoding="utf-8")
 
         self.assertIn("default starting point for most execution requests", task_template)
         self.assertIn("pair this file with `contract.md`", review_template)
@@ -3584,18 +4568,28 @@ reviewer_reset_mode = "wrong"
         self.assertIn("deeper structure than `task.md`", spec_template)
         self.assertIn("keep `contract.md` alongside this file", spec_template)
         self.assertIn("planning-stage `hard` mode", spec_template)
+        self.assertIn("named major sections", spec_template)
+        self.assertIn("acceptance criteria for that slice", spec_template)
+        self.assertIn("spec-contract-linking-example.md", spec_template)
         self.assertIn("### Source of Truth / Ownership", spec_template)
         self.assertIn("Not applicable because", spec_template)
         self.assertIn("default acceptance and approval checklist", contract_template)
         self.assertIn("Skip it only for ultra-trivial tasks", contract_template)
         self.assertIn("regression / integrity / fallback / state guardrail", contract_template)
         self.assertIn("prompts, instructions, tools, schemas", contract_template)
+        self.assertIn("approval projection of `spec.md`", contract_template)
+        self.assertIn("traceable to a named spec section", contract_template)
+        self.assertIn("spec-contract-linking-example.md", contract_template)
         self.assertIn("decision-complete spec", planner_instructions)
         self.assertIn("tool descriptions, tool schemas", planner_instructions)
         self.assertIn("execution-safe", planner_instructions)
+        self.assertIn("derive `contract.md` from the approval-critical parts of that spec", planner_instructions)
+        self.assertIn("spec-contract-linking-example.md", planner_instructions)
         self.assertIn("strict external evaluator", intent_critic_instructions)
         self.assertIn("hidden assumptions presented as facts", intent_critic_instructions)
         self.assertIn("toy-like prompt / tool / schema descriptions", intent_critic_instructions)
+        self.assertIn("spec-to-contract traceability", intent_critic_instructions)
+        self.assertIn("spec-contract-linking-example.md", intent_critic_instructions)
         self.assertIn("do not compensate by inventing missing requirements", generator_instructions)
         self.assertIn("prompt, system-instruction, tool-description, and schema contracts", generator_instructions)
         self.assertIn("vague or aspirational `contract.md` items", reviewer_instructions)
@@ -3603,7 +4597,17 @@ reviewer_reset_mode = "wrong"
         self.assertIn("missing implementation-critical decisions", reviewer_instructions)
         self.assertIn("Passing tests or a satisfied-looking contract are not enough for approval", reviewer_instructions)
         self.assertIn("weak planning-authored docs", reviewer_instructions)
+        self.assertIn("approval projection of that truth", reviewer_instructions)
+        self.assertIn("spec-contract-linking-example.md", reviewer_instructions)
         self.assertIn("Code paths inspected", reviewer_instructions)
+        self.assertIn("## Core rule", linking_example)
+        self.assertIn("## Good `spec.md` shape", linking_example)
+        self.assertIn("## Good `contract.md` shape", linking_example)
+        self.assertIn("## Regression example", linking_example)
+
+        scaffold_example = (repo_root / "templates" / "scaffold" / "spec-contract-linking-example.md").read_text(encoding="utf-8")
+        self.assertIn("## Good `spec.md` shape", scaffold_example)
+        self.assertIn("## Good `contract.md` shape", scaffold_example)
 
 
 if __name__ == "__main__":

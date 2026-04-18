@@ -22,12 +22,17 @@ from typing import Literal
 COUNCIL_DIRNAME = ".codex-council"
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "templates"
 ROLE_NAMES = ("generator", "reviewer")
+PLANNING_ROLE_NAMES = ("planner", "intent_critic")
 REVIEW_MODES = {"internal", "github_pr_codex"}
 REOPEN_REASON_KINDS = {"false_approved", "requirements_changed_after_approval"}
 BASE_REQUIRED_FILENAMES = (
     "AGENTS.md",
     "generator.instructions.md",
     "reviewer.instructions.md",
+)
+PLANNING_INSTRUCTION_FILENAMES = (
+    "planner.instructions.md",
+    "intent_critic.instructions.md",
 )
 TASK_FILENAME = "task.md"
 REVIEW_FILENAME = "review.md"
@@ -61,6 +66,8 @@ CANONICAL_FILE_ORDER = (
 )
 GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked", "needs_human"}
 REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
+PLANNER_RESULTS = {"drafted", "blocked", "needs_human"}
+INTENT_CRITIC_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
 HUMAN_SOURCES = {
     TASK_FILENAME,
     REVIEW_FILENAME,
@@ -73,6 +80,17 @@ HUMAN_SOURCES = {
     "repo_state",
 }
 REVIEW_DIMENSION_STATUSES = {"pass", "fail", "uncertain"}
+PLANNING_REVIEW_DIMENSIONS = (
+    ("intent_fidelity", "Intent Fidelity"),
+    ("scope_clarity", "Scope Clarity"),
+    ("repo_fitness", "Repo Fitness / Plausibility"),
+    ("spec_completeness", "Spec Completeness"),
+    ("acceptance_criteria_quality", "Acceptance Criteria Quality"),
+    ("spec_to_contract_traceability", "Spec-To-Contract Traceability"),
+    ("contract_auditability", "Contract Auditability"),
+    ("prompt_tool_schema_clarity", "Prompt / Tool / Schema Clarity"),
+    ("validation_test_clarity", "Validation / Test Clarity"),
+)
 TMUX_PANE_POLL_SECONDS = 0.5
 TMUX_PASTE_SETTLE_SECONDS = 0.1
 TMUX_CAPTURE_HISTORY_LINES = 1000
@@ -81,6 +99,7 @@ TASK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 GITHUB_PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/([0-9]+)(?:/.*)?$")
 CHECKLIST_ITEM_RE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+\S")
 REVIEW_ITEM_RE = re.compile(r"^\s*[-*]\s+\S")
+SPEC_MAJOR_SECTION_RE = re.compile(r"^##\s+(M\d+)\.\s+.+$")
 CONTRACT_PLACEHOLDER_MARKERS = (
     "Write the definition of done for this task here as a checklist.",
     "Bad examples:",
@@ -244,6 +263,8 @@ TERMINAL_SUMMARY_END = "COUNCIL_TERMINAL_SUMMARY_END"
 TRANSITIONING_TURN_STATUS = "transitioning_turn"
 REOPEN_INDEX_FILENAME = "reopen-events.jsonl"
 REOPEN_METADATA_FILENAME = "reopen.json"
+PLANNING_RUNS_DIRNAME = "planning-runs"
+PLANNING_SOURCE_INTENT_FILENAME = "source_intent.md"
 TURN_METADATA_AUDIT_KEYS = (
     "continuation_reason",
     "continuation_source",
@@ -356,6 +377,8 @@ CODEX_FOOTER_RE = re.compile(r"^\s*\S.*\s+·\s+(?:~|/).+$")
 TMUX_BOOT_GRACE_SECONDS = 2.0
 TMUX_PROMPT_DISPATCH_ATTEMPTS = 2
 TMUX_PROMPT_DISPATCH_CONFIRM_SECONDS = 0.2
+ROLE_SESSION_CLEAR_PRE_SECONDS = 5.0
+ROLE_SESSION_CLEAR_POST_SECONDS = 5.0
 
 
 class SupervisorRuntimeError(RuntimeError):
@@ -896,6 +919,14 @@ def task_root_for(repo_root: Path, task_name: str) -> Path:
     return council_root_for(repo_root) / task_name
 
 
+def planning_runs_root_for(task_root: Path) -> Path:
+    return task_root / PLANNING_RUNS_DIRNAME
+
+
+def planning_source_intent_path(run_dir: Path) -> Path:
+    return run_dir / PLANNING_SOURCE_INTENT_FILENAME
+
+
 def config_path_for(repo_root: Path) -> Path:
     return council_root_for(repo_root) / "config.toml"
 
@@ -904,13 +935,36 @@ def council_gitignore_path_for(repo_root: Path) -> Path:
     return council_root_for(repo_root) / ".gitignore"
 
 
+def run_directory_sort_key(run_dir: Path) -> tuple[float, str]:
+    created_epoch: float | None = None
+    state_path = run_dir / "state.json"
+    if state_path.exists():
+        try:
+            state = load_json(state_path)
+        except Exception:
+            state = {}
+        created_epoch = parse_utc_timestamp(state.get("created_at"))
+    if created_epoch is None:
+        created_epoch = run_dir.stat().st_mtime
+    return (created_epoch, run_dir.name)
+
+
 def latest_run_dir(task_root: Path) -> Path:
     runs_root = task_root / "runs"
     if not runs_root.exists():
         raise SystemExit(f"missing runs directory: {runs_root}")
-    candidates = sorted(path for path in runs_root.iterdir() if path.is_dir())
+    candidates = sorted((path for path in runs_root.iterdir() if path.is_dir()), key=run_directory_sort_key)
     if not candidates:
         raise SystemExit(f"no runs found for task: {task_root.name}")
+    return candidates[-1]
+
+
+def latest_named_run_dir(runs_root: Path, *, label: str) -> Path:
+    if not runs_root.exists():
+        raise SystemExit(f"missing {label} directory: {runs_root}")
+    candidates = sorted((path for path in runs_root.iterdir() if path.is_dir()), key=run_directory_sort_key)
+    if not candidates:
+        raise SystemExit(f"no {label} found under: {runs_root}")
     return candidates[-1]
 
 
@@ -920,6 +974,16 @@ def resolve_run_dir(task_root: Path, run_id: str | None) -> Path:
     run_dir = task_root / "runs" / run_id
     if not run_dir.exists():
         raise SystemExit(f"missing run directory: {run_dir}")
+    return run_dir
+
+
+def resolve_planning_run_dir(task_root: Path, run_id: str | None) -> Path:
+    runs_root = planning_runs_root_for(task_root)
+    if run_id in (None, "latest"):
+        return latest_named_run_dir(runs_root, label="planning runs")
+    run_dir = runs_root / run_id
+    if not run_dir.exists():
+        raise SystemExit(f"missing planning run directory: {run_dir}")
     return run_dir
 
 
@@ -1104,6 +1168,18 @@ def scaffold_task_root(
         task_root / "reviewer.instructions.md",
         read_template("scaffold", "reviewer.instructions.md"),
     )
+    planner_created = write_if_missing(
+        task_root / "planner.instructions.md",
+        read_template("scaffold", "planner.instructions.md"),
+    )
+    intent_critic_created = write_if_missing(
+        task_root / "intent_critic.instructions.md",
+        read_template("scaffold", "intent_critic.instructions.md"),
+    )
+    spec_contract_example_created = write_if_missing(
+        task_root / "spec-contract-linking-example.md",
+        read_template("scaffold", "spec-contract-linking-example.md"),
+    )
     return {
         "task_created": task_created,
         "task_needs_edit": task_created and not initial_task_text,
@@ -1113,6 +1189,9 @@ def scaffold_task_root(
         "agents_created": agents_created,
         "generator_created": generator_created,
         "reviewer_created": reviewer_created,
+        "planner_created": planner_created,
+        "intent_critic_created": intent_critic_created,
+        "spec_contract_example_created": spec_contract_example_created,
         "profile": inspect_task_workspace(task_root)["profile"],
     }
 
@@ -1202,6 +1281,22 @@ def strip_checklist_prefix(line: str) -> str:
 
 def strip_bullet_prefix(line: str) -> str:
     return re.sub(r"^\s*[-*]\s*", "", line).strip()
+
+
+def major_spec_section_ids(spec_text: str) -> list[str]:
+    section_ids: list[str] = []
+    for line in spec_text.splitlines():
+        match = SPEC_MAJOR_SECTION_RE.match(line.strip())
+        if match:
+            section_ids.append(match.group(1))
+    return section_ids
+
+
+def major_spec_section_text(spec_text: str, section_id: str) -> str:
+    for line in spec_text.splitlines():
+        if line.strip().startswith(f"## {section_id}."):
+            return extract_markdown_section(spec_text, line.strip())
+    return ""
 
 
 def section_contains_placeholder(section_text: str, markers: tuple[str, ...]) -> bool:
@@ -1324,6 +1419,18 @@ def lint_spec_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]
         section_text = extract_markdown_section(spec_text, heading)
         if meaningful_word_count(section_text) < 2:
             warnings.append(f"{SPEC_FILENAME} should make `{heading}` more explicit for safe execution")
+    for section_id in major_spec_section_ids(spec_text):
+        section_text = major_spec_section_text(spec_text, section_id)
+        acceptance_text = extract_markdown_subsection(section_text, "### Acceptance Criteria")
+        if not acceptance_text:
+            errors.append(f"{SPEC_FILENAME} section `{section_id}` is missing `### Acceptance Criteria`")
+            continue
+        acceptance_lines = [strip_bullet_prefix(line) for line in acceptance_text.splitlines() if REVIEW_ITEM_RE.match(line)]
+        if not acceptance_lines:
+            errors.append(f"{SPEC_FILENAME} section `{section_id}` must include bullet acceptance criteria")
+            continue
+        if any(meaningful_word_count(line) < 4 for line in acceptance_lines):
+            errors.append(f"{SPEC_FILENAME} section `{section_id}` has acceptance criteria that are too short to be auditable")
     for heading in SPEC_DECISION_REQUIRED_HEADINGS:
         subsection_text = extract_markdown_subsection(spec_text, heading)
         if not subsection_text:
@@ -1371,12 +1478,24 @@ def lint_contract_workspace_readiness(task_root: Path) -> tuple[list[str], list[
 
 
 def lint_broad_spec_contract_alignment(task_root: Path) -> tuple[list[str], list[str]]:
+    spec_text = (task_root / SPEC_FILENAME).read_text(encoding="utf-8")
     contract_text = (task_root / CONTRACT_FILENAME).read_text(encoding="utf-8")
     checklist_items = [strip_checklist_prefix(item) for item in contract_checklist_items(contract_text)]
     errors: list[str] = []
     warnings: list[str] = []
     if not checklist_items:
         return errors, warnings
+    section_ids = major_spec_section_ids(spec_text)
+    if section_ids:
+        missing_links = [
+            section_id
+            for section_id in section_ids
+            if not any(re.search(rf"\b{re.escape(section_id)}\b", item) for item in checklist_items)
+        ]
+        if missing_links:
+            errors.append(
+                f"{CONTRACT_FILENAME} must trace major spec sections into checklist items; missing linkage for: {', '.join(missing_links)}"
+            )
     has_verification = any(contains_any_phrase(item, VERIFICATION_HINT_WORDS) for item in checklist_items)
     has_integrity_guardrail = any(contains_any_phrase(item, INTEGRITY_HINT_WORDS) for item in checklist_items)
     has_behavior_outcome = any(
@@ -1408,6 +1527,7 @@ def load_council_config(repo_root: Path) -> dict:
 
     codex_cfg = data.get("codex", {})
     council_cfg = data.get("council", {})
+    planning_cfg = data.get("planning", {})
     review_cfg = data.get("review", {})
     review_path_rules = review_cfg.get("path_rule", [])
     if review_path_rules is None:
@@ -1472,6 +1592,13 @@ def load_council_config(repo_root: Path) -> dict:
                 council_cfg.get("turn_timeout_seconds"),
                 1800,
                 "council.turn_timeout_seconds",
+            ),
+        },
+        "planning": {
+            "max_turns": coerce_int(
+                planning_cfg.get("max_turns"),
+                4,
+                "planning.max_turns",
             ),
         },
         "review": {
@@ -1824,6 +1951,7 @@ def clear_role_session(
             role=role,
             details={"pane_excerpt": before_pane[-4000:], "tmux_session": tmux_name},
         )
+    time.sleep(min(ROLE_SESSION_CLEAR_PRE_SECONDS, timeout_seconds))
     try:
         run_subprocess(["tmux", "send-keys", "-t", tmux_name, "/clear"])
         time.sleep(TMUX_PASTE_SETTLE_SECONDS)
@@ -1840,7 +1968,7 @@ def clear_role_session(
                 "tmux_session": tmux_name,
             },
         ) from exc
-    time.sleep(TMUX_PASTE_SETTLE_SECONDS)
+    time.sleep(min(ROLE_SESSION_CLEAR_POST_SECONDS, timeout_seconds))
     wait_for_tmux_prompt(
         tmux_name,
         timeout_seconds,
@@ -2054,6 +2182,14 @@ def format_path_group(title: str, repo_root: Path, paths: list[Path]) -> str:
     return "\n".join(lines)
 
 
+def format_path_group_allow_missing(title: str, repo_root: Path, paths: list[Path]) -> str:
+    if not paths:
+        return ""
+    lines = [f"{title}:"]
+    lines.extend(f"- {repo_relative_path(repo_root, path)}" for path in paths)
+    return "\n".join(lines)
+
+
 def compact_repo_root_label() -> str:
     return "."
 
@@ -2106,6 +2242,20 @@ def extra_context_files(task_root: Path, turn_dir: Path | None = None) -> dict[s
     return files
 
 
+def planning_extra_context_files(task_root: Path, run_dir: Path) -> dict[str, Path]:
+    files = extra_context_files(task_root)
+    source_intent = planning_source_intent_path(run_dir)
+    if source_intent.exists():
+        files["source_intent"] = source_intent
+    planner_instructions = task_root / "planner.instructions.md"
+    intent_critic_instructions = task_root / "intent_critic.instructions.md"
+    if planner_instructions.exists():
+        files["planner_instructions"] = planner_instructions
+    if intent_critic_instructions.exists():
+        files["intent_critic_instructions"] = intent_critic_instructions
+    return files
+
+
 def snapshot_context_manifest(run_dir: Path, task_root: Path, *, turn_dir: Path | None = None) -> dict:
     del run_dir
     return build_context_manifest(task_root, extra_files=extra_context_files(task_root, turn_dir))
@@ -2113,6 +2263,17 @@ def snapshot_context_manifest(run_dir: Path, task_root: Path, *, turn_dir: Path 
 
 def refresh_turn_context_manifest(run_dir: Path, task_root: Path, turn_dir: Path) -> None:
     save_json(context_manifest_path(turn_dir), snapshot_context_manifest(run_dir, task_root, turn_dir=turn_dir))
+
+
+def snapshot_planning_context_manifest(run_dir: Path, task_root: Path) -> dict:
+    return build_context_manifest(
+        task_root,
+        extra_files=planning_extra_context_files(task_root, run_dir),
+    )
+
+
+def refresh_planning_turn_context_manifest(run_dir: Path, task_root: Path, turn_dir: Path) -> None:
+    save_json(context_manifest_path(turn_dir), snapshot_planning_context_manifest(run_dir, task_root))
 
 
 def compare_context_manifests(previous_manifest: dict, current_manifest: dict) -> dict:
@@ -2248,6 +2409,17 @@ def prepare_turn(run_dir: Path, turn_number: int, task_root: Path) -> Path:
     ensure_dir(role_dir_for(current, "generator"))
     ensure_dir(role_dir_for(current, "reviewer"))
     refresh_turn_context_manifest(run_dir, task_root, current)
+    if not turn_metadata_path(current).exists():
+        save_turn_metadata(current, turn_number, "initialized")
+    return current
+
+
+def prepare_planning_turn(run_dir: Path, turn_number: int, task_root: Path) -> Path:
+    current = turn_dir_for(run_dir, turn_number)
+    ensure_dir(current)
+    ensure_dir(role_dir_for(current, "planner"))
+    ensure_dir(role_dir_for(current, "intent_critic"))
+    refresh_planning_turn_context_manifest(run_dir, task_root, current)
     if not turn_metadata_path(current).exists():
         save_turn_metadata(current, turn_number, "initialized")
     return current
@@ -2584,6 +2756,105 @@ def critical_review_dimension_keys() -> tuple[str, ...]:
     return tuple(item["key"] for item in load_critical_review_dimensions())
 
 
+def planning_review_dimensions() -> tuple[tuple[str, str], ...]:
+    return PLANNING_REVIEW_DIMENSIONS
+
+
+def planning_review_dimension_keys() -> tuple[str, ...]:
+    return tuple(key for key, _ in planning_review_dimensions())
+
+
+def validate_planner_status(data: dict) -> dict:
+    result = data.get("result")
+    if not isinstance(result, str) or result not in PLANNER_RESULTS:
+        raise ValueError(f"invalid planner result: {result}")
+    summary = data.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("planner summary must be a non-empty string")
+    docs_updated = data.get("docs_updated", [])
+    if not isinstance(docs_updated, list) or not all(isinstance(item, str) for item in docs_updated):
+        raise ValueError("planner docs_updated must be a list of strings")
+    normalized_docs_updated = [item.strip() for item in docs_updated if item.strip()]
+    allowed_docs = {TASK_FILENAME, SPEC_FILENAME, CONTRACT_FILENAME}
+    invalid_docs = [item for item in normalized_docs_updated if item not in allowed_docs]
+    if invalid_docs:
+        raise ValueError(
+            f"planner docs_updated entries must be one of: {', '.join(sorted(allowed_docs))}"
+        )
+    human_message = normalize_optional_text(
+        data.get("human_message"),
+        field_name="planner human_message",
+    )
+    human_source = normalize_optional_text(
+        data.get("human_source"),
+        field_name="planner human_source",
+    )
+    if result == "needs_human":
+        if not human_message:
+            raise ValueError("planner human_message must be a non-empty string when result is needs_human")
+        human_source = normalize_human_source(human_source, role="planner")
+    elif human_message is not None or human_source is not None:
+        raise ValueError("planner human_message and human_source may only be set when result is needs_human")
+    return {
+        "result": result,
+        "summary": summary.strip(),
+        "docs_updated": normalized_docs_updated,
+        "human_message": human_message,
+        "human_source": human_source,
+    }
+
+
+def validate_intent_critic_status(data: dict) -> dict:
+    verdict = data.get("verdict")
+    if not isinstance(verdict, str) or verdict not in INTENT_CRITIC_VERDICTS:
+        raise ValueError(f"invalid intent critic verdict: {verdict}")
+    summary = data.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("intent critic summary must be a non-empty string")
+    blocking_issues = data.get("blocking_issues", [])
+    if not isinstance(blocking_issues, list) or not all(isinstance(item, str) for item in blocking_issues):
+        raise ValueError("intent critic blocking_issues must be a list of strings")
+    human_message = normalize_optional_text(
+        data.get("human_message"),
+        field_name="intent critic human_message",
+    )
+    human_source = normalize_optional_text(
+        data.get("human_source"),
+        field_name="intent critic human_source",
+    )
+    if verdict == "needs_human":
+        if not human_message:
+            raise ValueError("intent critic human_message must be a non-empty string when verdict is needs_human")
+        human_source = normalize_human_source(human_source, role="intent_critic")
+    elif human_message is not None or human_source is not None:
+        raise ValueError("intent critic human_message and human_source may only be set when verdict is needs_human")
+    critical_dimensions = data.get("critical_dimensions")
+    if not isinstance(critical_dimensions, dict):
+        raise ValueError("intent critic critical_dimensions must be a dict")
+    normalized_dimensions: dict[str, str] = {}
+    for key in planning_review_dimension_keys():
+        value = critical_dimensions.get(key)
+        if not isinstance(value, str) or value not in REVIEW_DIMENSION_STATUSES:
+            raise ValueError(
+                f"intent critic critical_dimensions.{key} must be one of: {', '.join(sorted(REVIEW_DIMENSION_STATUSES))}"
+            )
+        normalized_dimensions[key] = value
+    if verdict == "approved":
+        failing = [key for key, value in normalized_dimensions.items() if value != "pass"]
+        if failing:
+            raise ValueError(
+                "intent critic approved verdict requires all planning review dimensions to be `pass`"
+            )
+    return {
+        "verdict": verdict,
+        "summary": summary.strip(),
+        "blocking_issues": [item.strip() for item in blocking_issues],
+        "human_message": human_message,
+        "human_source": human_source,
+        "critical_dimensions": normalized_dimensions,
+    }
+
+
 def validate_generator_status(data: dict) -> dict:
     result = data.get("result")
     if not isinstance(result, str) or result not in GENERATOR_RESULTS:
@@ -2716,6 +2987,9 @@ def canonical_doc_group_paths(task_root: Path, inspection: dict, *, role: str) -
             paths[role],
         ]
     )
+    example_path = task_root / "spec-contract-linking-example.md"
+    if example_path.exists():
+        ordered.append(example_path)
     return ordered
 
 
@@ -3009,6 +3283,194 @@ def format_reopen_context_block(state: dict) -> str:
     return "\n".join(lines).rstrip()
 
 
+def format_planning_reopen_context_block(state: dict) -> str:
+    del state
+    return ""
+
+
+def planning_canonical_doc_paths(task_root: Path) -> list[Path]:
+    paths = [
+        task_root / TASK_FILENAME,
+        task_root / SPEC_FILENAME,
+        task_root / CONTRACT_FILENAME,
+        task_root / "AGENTS.md",
+    ]
+    example_path = task_root / "spec-contract-linking-example.md"
+    if example_path.exists():
+        paths.append(example_path)
+    return paths
+
+
+def format_planner_input_files_block(
+    repo_root: Path,
+    task_root: Path,
+    run_dir: Path,
+    turn_dir: Path,
+    *,
+    include_previous_critic: bool,
+) -> str:
+    groups = [
+        format_path_group(
+            "Source intent and instructions",
+            repo_root,
+            [
+                planning_source_intent_path(run_dir),
+                task_root / "planner.instructions.md",
+            ],
+        ),
+        format_path_group(
+            "Canonical docs",
+            repo_root,
+            planning_canonical_doc_paths(task_root),
+        ),
+        format_path_group_allow_missing(
+            "Canonical docs to revise or create",
+            repo_root,
+            [
+                task_root / TASK_FILENAME,
+                task_root / SPEC_FILENAME,
+                task_root / CONTRACT_FILENAME,
+            ],
+        ),
+    ]
+    if role_message_path(turn_dir, "planner").exists() or role_status_path(turn_dir, "planner").exists():
+        groups.append(
+            format_path_group(
+                "Current turn artifacts",
+                repo_root,
+                [role_message_path(turn_dir, "planner"), role_status_path(turn_dir, "planner")],
+            )
+        )
+    if include_previous_critic:
+        previous_turn_dir = previous_turn_dir_for(turn_dir)
+        if previous_turn_dir is not None:
+            groups.append(
+                format_path_group(
+                    "Prior-turn historical context",
+                    repo_root,
+                    [
+                        role_message_path(previous_turn_dir, "intent_critic"),
+                        role_status_path(previous_turn_dir, "intent_critic"),
+                    ],
+                )
+            )
+    return "\n\n".join(item for item in groups if item).rstrip()
+
+
+def format_planner_objective_block(task_root: Path) -> str:
+    del task_root
+    lines = [
+        "Write execution-safe canonical docs, not brainstorming notes.",
+        "For broad or spec-driven work, write `spec.md` first as the decision-complete truth.",
+        "Organize major behavior slices into named sections such as `M1`, `M2`, `M3` when that improves traceability.",
+        "Inside each relevant major section, include `### Acceptance Criteria` with concrete, auditable, reviewer-usable checks.",
+        "Then derive `contract.md` from the approval-critical sections of the spec.",
+        "Do not write shallow aspirational contract items.",
+        "If a real user-intent ambiguity remains, emit `needs_human` instead of inventing policy.",
+    ]
+    return "\n".join(lines).rstrip()
+
+
+def format_planner_message_requirements_block() -> str:
+    return "\n".join(
+        [
+            "- What changed in `task.md`, `spec.md`, and `contract.md`",
+            "- Which major spec sections were introduced, removed, or tightened",
+            "- How each `contract.md` item maps to the approval-critical spec sections",
+            "- Any assumptions still present and whether they are acceptable",
+            "- Remaining weak points or ambiguities",
+        ]
+    ).rstrip()
+
+
+def format_planning_dimensions_block() -> str:
+    return "\n".join(
+        f"- [pass|fail|uncertain] {label}"
+        for _, label in planning_review_dimensions()
+    )
+
+
+def format_intent_critic_input_files_block(
+    repo_root: Path,
+    task_root: Path,
+    run_dir: Path,
+    turn_dir: Path,
+    *,
+    include_previous_critic: bool,
+) -> str:
+    groups = [
+        format_path_group(
+            "Source intent and instructions",
+            repo_root,
+            [
+                planning_source_intent_path(run_dir),
+                task_root / "intent_critic.instructions.md",
+            ],
+        ),
+        format_path_group(
+            "Canonical docs",
+            repo_root,
+            planning_canonical_doc_paths(task_root),
+        ),
+        format_path_group(
+            "Current turn artifacts",
+            repo_root,
+            [role_message_path(turn_dir, "planner"), role_status_path(turn_dir, "planner")],
+        ),
+    ]
+    if include_previous_critic:
+        previous_turn_dir = previous_turn_dir_for(turn_dir)
+        if previous_turn_dir is not None:
+            groups.append(
+                format_path_group(
+                    "Prior-turn historical context",
+                    repo_root,
+                    [
+                        role_message_path(previous_turn_dir, "intent_critic"),
+                        role_status_path(previous_turn_dir, "intent_critic"),
+                    ],
+                )
+            )
+    return "\n\n".join(item for item in groups if item).rstrip()
+
+
+def format_intent_critic_focus_block() -> str:
+    lines = [
+        "Review canonical docs against the raw source intent, repo reality, and the planning quality bar.",
+        "Reject drafts that are vague, toy-like, or that would force the execution council to invent policy.",
+        "For broad/spec-driven work, verify that `spec.md` uses major sections with section-level acceptance criteria.",
+        "Verify that `contract.md` is a short approval projection of the approval-critical spec sections rather than an independent mini-spec.",
+        "If the planner could fix the issue from existing context, use `changes_requested`. Use `needs_human` only for real missing user/product intent.",
+    ]
+    return "\n".join(lines).rstrip()
+
+
+def format_intent_critic_protocol_block() -> str:
+    lines = [
+        "Follow this protocol in order:",
+        "1. Reconstruct the real task from `source_intent.md` and current repo reality.",
+        "2. Audit `task.md`, `spec.md`, and `contract.md` for completeness, precision, and execution safety.",
+        "3. For broad/spec-driven work, verify each major spec section has meaningful acceptance criteria.",
+        "4. Check that each `contract.md` item maps to one major spec section or approval-critical group.",
+        "5. Mark every planning review dimension explicitly.",
+        "6. Decide whether the docs are approved for execution, need planner changes, or need human clarification.",
+    ]
+    return "\n".join(lines).rstrip()
+
+
+def format_intent_critic_message_requirements_block() -> str:
+    return "\n".join(
+        [
+            "- Verdict Summary",
+            "- Critical Planning Dimensions",
+            "- Exact section omissions or weaknesses",
+            "- Acceptance-criteria problems",
+            "- Spec-to-contract linkage problems",
+            "- Minimum changes required for approval",
+        ]
+    ).rstrip()
+
+
 def format_generator_message_requirements_block(
     inspection: dict,
     *,
@@ -3033,7 +3495,10 @@ def format_generator_message_requirements_block(
         )
     lines.extend(
         [
-            "- Which chunk-contract items were implemented",
+            "- Turn Intent:",
+            "  - what exact chunk this turn attempted",
+            "  - what it deliberately did not touch",
+            "  - what the primary user-facing effect should be",
             "- What changed",
             "- Commit created for this turn, or explicitly say that no repo-tracked files changed",
         ]
@@ -3478,6 +3943,83 @@ def build_reviewer_turn_prompt(
     ).rstrip()
 
 
+def build_planner_turn_prompt(
+    repo_root: Path,
+    task_root: Path,
+    run_dir: Path,
+    turn_dir: Path,
+    turn_number: int,
+    *,
+    state: dict,
+    inline_context: bool,
+    continue_context_block: str = "",
+) -> str:
+    values = {
+        "repo_root": compact_repo_root_label(),
+        "turn_name": turn_name(turn_number),
+        "continue_context_block": continue_context_block,
+        "reopen_context_block": format_planning_reopen_context_block(state),
+        "docs_to_read_block": format_planner_input_files_block(
+            repo_root,
+            task_root,
+            run_dir,
+            turn_dir,
+            include_previous_critic=turn_number > 1,
+        ),
+        "planner_objective_block": format_planner_objective_block(task_root),
+        "planner_message_requirements_block": format_planner_message_requirements_block(),
+        "task_path": repo_relative_path(repo_root, task_root / TASK_FILENAME),
+        "spec_path": repo_relative_path(repo_root, task_root / SPEC_FILENAME),
+        "contract_path": repo_relative_path(repo_root, task_root / CONTRACT_FILENAME),
+        "planner_message_path": repo_relative_path(repo_root, role_message_path(turn_dir, "planner")),
+        "planner_status_path": repo_relative_path(repo_root, role_status_path(turn_dir, "planner")),
+    }
+    template_name = "planner_initial.md" if inline_context else "planner_followup.md"
+    return render_template_text(
+        read_template("prompts", template_name),
+        values,
+        template_name=f"prompts/{template_name}",
+    ).rstrip()
+
+
+def build_intent_critic_turn_prompt(
+    repo_root: Path,
+    task_root: Path,
+    run_dir: Path,
+    turn_dir: Path,
+    turn_number: int,
+    *,
+    state: dict,
+    inline_context: bool,
+    continue_context_block: str = "",
+) -> str:
+    values = {
+        "repo_root": compact_repo_root_label(),
+        "turn_name": turn_name(turn_number),
+        "continue_context_block": continue_context_block,
+        "reopen_context_block": format_planning_reopen_context_block(state),
+        "docs_to_read_block": format_intent_critic_input_files_block(
+            repo_root,
+            task_root,
+            run_dir,
+            turn_dir,
+            include_previous_critic=turn_number > 1,
+        ),
+        "intent_critic_focus_block": format_intent_critic_focus_block(),
+        "intent_critic_protocol_block": format_intent_critic_protocol_block(),
+        "planning_dimensions_block": format_planning_dimensions_block(),
+        "intent_critic_message_requirements_block": format_intent_critic_message_requirements_block(),
+        "intent_critic_message_path": repo_relative_path(repo_root, role_message_path(turn_dir, "intent_critic")),
+        "intent_critic_status_path": repo_relative_path(repo_root, role_status_path(turn_dir, "intent_critic")),
+    }
+    template_name = "intent_critic_initial.md" if inline_context else "intent_critic_followup.md"
+    return render_template_text(
+        read_template("prompts", template_name),
+        values,
+        template_name=f"prompts/{template_name}",
+    ).rstrip()
+
+
 def write_prompt_artifact(turn_dir: Path, role: str, prompt: str) -> None:
     write_text(role_prompt_path(turn_dir, role), prompt)
 
@@ -3655,6 +4197,49 @@ def begin_turn_transition(
     return next_turn_dir
 
 
+def begin_planning_turn_transition(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    *,
+    from_turn: int,
+    to_turn: int,
+    from_role: str,
+    to_role: str,
+    source_verdict: str,
+    reason: str | None = None,
+) -> Path:
+    next_turn_dir = prepare_planning_turn(run_dir, to_turn, task_root)
+    annotate_turn_continuation(
+        next_turn_dir,
+        continuation_source=source_verdict,
+        selected_role=to_role,
+        selected_turn=to_turn,
+        reason=reason or f"{from_role} produced `{source_verdict}`; continue with {to_role} on turn {turn_name(to_turn)}.",
+    )
+    state["status"] = TRANSITIONING_TURN_STATUS
+    state["current_turn"] = from_turn
+    state["pending_turn"] = to_turn
+    state["pending_role"] = to_role
+    state["transition_source_verdict"] = source_verdict
+    state["stop_reason"] = None
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "turn_transition_started",
+        turn_number=from_turn,
+        role=from_role,
+        details={
+            "from_role": from_role,
+            "from_turn": turn_name(from_turn),
+            "source_verdict": source_verdict,
+            "to_role": to_role,
+            "to_turn": turn_name(to_turn),
+        },
+    )
+    return next_turn_dir
+
+
 def pause_for_human(
     run_dir: Path,
     state: dict,
@@ -3667,6 +4252,7 @@ def pause_for_human(
 ) -> None:
     turn_number = int(turn_dir.name)
     inspection = inspect_task_workspace(Path(state["task_root"]))
+    run_kind = state.get("run_kind", "execution")
     state["status"] = "paused_needs_human"
     state["stop_reason"] = summary
     save_run_state(run_dir, state)
@@ -3696,11 +4282,11 @@ def pause_for_human(
         next_step = (
             "update "
             + " / ".join(doc_names + ["AGENTS.md", "role instructions"])
-            + " as needed, then use `continue` to resume this run."
+            + f" as needed, then use `{'prepare' if run_kind == 'planning' else 'continue'}` to resume this run."
         )
     else:
         next_step = (
-            f"add {TASK_FILENAME}, {REVIEW_FILENAME}, or {SPEC_FILENAME}, or update the council files as needed, then use `continue` to resume this run."
+            f"add {TASK_FILENAME}, {REVIEW_FILENAME}, or {SPEC_FILENAME}, or update the council files as needed, then use `{'prepare' if run_kind == 'planning' else 'continue'}` to resume this run."
         )
     print(next_step, flush=True)
 
@@ -3734,6 +4320,7 @@ def create_run_state(
         "git": git_state,
         "repo_root": str(repo_root),
         "review_bridge": review_bridge,
+        "run_kind": "execution",
         "roles": {
             "generator": {
                 "bootstrap_mode": generator_bootstrap_mode,
@@ -3770,7 +4357,61 @@ def create_run_state(
     return state
 
 
-def validate_run_state(run_dir: Path, state: dict) -> None:
+def create_planning_run_state(
+    *,
+    repo_root: Path,
+    task_root: Path,
+    task_name: str,
+    run_id: str,
+    workspace_profile: str,
+    council_config: dict,
+    planner_session: str,
+    critic_session: str,
+    hard_mode: bool,
+) -> dict:
+    run_dir = planning_runs_root_for(task_root) / run_id
+    return {
+        "created_at": now_ts(),
+        "council_config": council_config,
+        "council_root": str(council_root_for(repo_root)),
+        "current_turn": 1,
+        "diagnostics_dir": str(run_dir / "diagnostics"),
+        "hard_mode": hard_mode,
+        "repo_root": str(repo_root),
+        "roles": {
+            "planner": {
+                "bootstrap_mode": "fresh",
+                "codex_session_id": None,
+                "codex_thread_name": None,
+                "fork_parent_session_id": None,
+                "last_wait_phase": None,
+                "tmux_session": planner_session,
+            },
+            "intent_critic": {
+                "bootstrap_mode": "fresh",
+                "codex_session_id": None,
+                "codex_thread_name": None,
+                "fork_parent_session_id": None,
+                "last_wait_phase": None,
+                "tmux_session": critic_session,
+            },
+        },
+        "run_dir": str(run_dir),
+        "run_id": run_id,
+        "run_kind": "planning",
+        "status": "booting",
+        "stop_reason": None,
+        "task_name": task_name,
+        "task_root": str(task_root),
+        "session_index_snapshot_ids": [],
+        "workspace_profile": workspace_profile,
+        "pending_turn": None,
+        "pending_role": None,
+        "transition_source_verdict": None,
+    }
+
+
+def validate_execution_run_state(run_dir: Path, state: dict) -> None:
     required_keys = {"status", "run_id", "task_root", "roles"}
     if not required_keys.issubset(state.keys()):
         return
@@ -3882,6 +4523,109 @@ def validate_run_state(run_dir: Path, state: dict) -> None:
         return
 
 
+def validate_planning_run_state(run_dir: Path, state: dict) -> None:
+    required_keys = {"status", "run_id", "task_root", "roles"}
+    if not required_keys.issubset(state.keys()):
+        return
+    status = state.get("status")
+    if not isinstance(status, str) or not status:
+        raise SupervisorRuntimeError(
+            "invalid_run_state",
+            "planning run state is missing a valid status",
+            details={"state": state},
+        )
+    pending_turn = state.get("pending_turn")
+    pending_role = state.get("pending_role")
+    if status != TRANSITIONING_TURN_STATUS and (pending_turn is not None or pending_role is not None):
+        raise SupervisorRuntimeError(
+            "invalid_run_state",
+            "planning pending turn metadata may only be present while transitioning turns",
+            details={
+                "status": status,
+                "pending_turn": pending_turn,
+                "pending_role": pending_role,
+            },
+        )
+    if status in {
+        "booting",
+        "approved",
+        "blocked",
+        "paused_needs_human",
+        "max_turns_reached",
+    }:
+        return
+    current_turn = state.get("current_turn")
+    if not isinstance(current_turn, int) or current_turn < 1:
+        raise SupervisorRuntimeError(
+            "invalid_run_state",
+            "planning run state current_turn must be a positive integer",
+            details={"status": status, "current_turn": current_turn},
+        )
+    current_turn_dir = turn_dir_for(run_dir, current_turn)
+    if status == TRANSITIONING_TURN_STATUS:
+        if not isinstance(pending_turn, int) or pending_turn <= current_turn:
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "planning transitioning turn state requires a pending_turn greater than current_turn",
+                details={"current_turn": current_turn, "pending_turn": pending_turn, "pending_role": pending_role},
+            )
+        if pending_role not in PLANNING_ROLE_NAMES:
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "planning transitioning turn state requires a pending_role of planner or intent_critic",
+                details={"pending_role": pending_role},
+            )
+        if not turn_metadata_path(current_turn_dir).exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "planning transitioning turn state requires the current turn to be initialized",
+                details={"current_turn_dir": str(current_turn_dir)},
+            )
+        pending_turn_dir = turn_dir_for(run_dir, pending_turn)
+        if not turn_metadata_path(pending_turn_dir).exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "planning transitioning turn state requires the pending turn to be initialized",
+                details={"pending_turn_dir": str(pending_turn_dir)},
+            )
+        return
+    if status == "waiting_planner":
+        if not turn_metadata_path(current_turn_dir).exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "waiting_planner requires the current turn to be initialized",
+                details={"current_turn_dir": str(current_turn_dir)},
+            )
+        if not role_prompt_path(current_turn_dir, "planner").exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "waiting_planner requires a planner prompt artifact for the current turn",
+                details={"prompt_path": str(role_prompt_path(current_turn_dir, "planner"))},
+            )
+        return
+    if status == "waiting_intent_critic":
+        if not turn_metadata_path(current_turn_dir).exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "waiting_intent_critic requires the current turn to be initialized",
+                details={"current_turn_dir": str(current_turn_dir)},
+            )
+        if not role_prompt_path(current_turn_dir, "intent_critic").exists():
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                "waiting_intent_critic requires an intent critic prompt artifact for the current turn",
+                details={"prompt_path": str(role_prompt_path(current_turn_dir, "intent_critic"))},
+            )
+        return
+
+
+def validate_run_state(run_dir: Path, state: dict) -> None:
+    if state.get("run_kind") == "planning":
+        validate_planning_run_state(run_dir, state)
+        return
+    validate_execution_run_state(run_dir, state)
+
+
 def save_run_state(run_dir: Path, state: dict) -> None:
     validate_run_state(run_dir, state)
     save_json(run_dir / "state.json", state)
@@ -3936,11 +4680,11 @@ def validate_task_workspace_for_start(task_root: Path, inspection: dict, *, revi
         errors.append(f"{SPEC_FILENAME} should be paired with {CONTRACT_FILENAME} so approval stays auditable")
     elif inspection["doc_paths"]["contract"] is None and inspection["present_docs"]:
         warnings.append(
-            f"starting without {CONTRACT_FILENAME} removes the explicit approval bar; add it unless this task is truly trivial"
+            f"starting without {CONTRACT_FILENAME} removes the explicit approval bar; add it unless this task is truly trivial. For broad work, prefer `prepare <task_name>` first."
         )
     if task_text and inspection["doc_paths"]["spec"] is None and task_brief_requires_spec(task_text):
         errors.append(
-            f"{TASK_FILENAME} looks broad enough and requires {SPEC_FILENAME}; add a spec or narrow the task brief before start"
+            f"{TASK_FILENAME} looks broad enough and requires {SPEC_FILENAME}; add a spec or narrow the task brief before start. For broad work, prefer `prepare <task_name>` first."
         )
     if errors:
         formatted = "\n".join(f"- {item}" for item in errors)
@@ -3950,6 +4694,44 @@ def validate_task_workspace_for_start(task_root: Path, inspection: dict, *, revi
         )
     for warning in warnings:
         print(f"warning: {warning}")
+
+
+def validate_planning_state_for_start(task_root: Path) -> None:
+    runs_root = planning_runs_root_for(task_root)
+    if not runs_root.exists():
+        return
+    candidates = sorted((path for path in runs_root.iterdir() if path.is_dir()), key=run_directory_sort_key)
+    if not candidates:
+        return
+    latest_run_dir = candidates[-1]
+    state_path = latest_run_dir / "state.json"
+    if not state_path.exists():
+        raise SystemExit(
+            f"latest planning run is missing state: {state_path}\n"
+            f"Inspect `status {task_root.name} --planning` or run `prepare {task_root.name} --new-run`."
+        )
+    latest_state = load_json(state_path)
+    plan = inspect_planning_continuation_plan(latest_run_dir, latest_state)
+    if plan["mode"] == "error":
+        raise SystemExit(
+            f"latest planning run cannot be resumed cleanly: {plan['reason']}\n"
+            f"Inspect `status {task_root.name} --planning` and repair or supersede that planning run before `start`."
+        )
+    if plan["mode"] == "continue":
+        raise SystemExit(
+            f"latest planning run `{latest_run_dir.name}` is still in progress (`{plan['continuation_state']}`).\n"
+            f"Run `prepare {task_root.name}` or inspect `status {task_root.name} --planning` before `start`."
+        )
+    if plan["continuation_state"] != "intent_critic_approved":
+        raise SystemExit(
+            f"latest planning run `{latest_run_dir.name}` ended as `{plan['continuation_state']}`.\n"
+            f"Run `prepare {task_root.name}` before `start`."
+        )
+    if not planning_run_docs_still_approved(latest_run_dir, task_root):
+        raise SystemExit(
+            f"latest planning run `{latest_run_dir.name}` was approved, but canonical docs changed afterward.\n"
+            f"Run `prepare {task_root.name} --new-run` or pass new `--intent` before `start`."
+        )
 
 
 def determine_start_role(
@@ -4024,7 +4806,10 @@ def role_uses_tmux(state: dict, role: str) -> bool:
 
 
 def active_tmux_roles(state: dict) -> tuple[str, ...]:
-    return tuple(role for role in ROLE_NAMES if role_uses_tmux(state, role))
+    roles = state.get("roles", {})
+    if not isinstance(roles, dict):
+        return ()
+    return tuple(role for role in roles.keys() if role_uses_tmux(state, role))
 
 
 def parse_github_pr_ref(value: str) -> dict:
@@ -6010,7 +6795,10 @@ def write_failure_diagnostics(run_dir: Path, state: dict, error: SupervisorRunti
         },
     )
     save_json(failure_dir / "state_snapshot.json", state)
-    for role in ROLE_NAMES:
+    roles = state.get("roles", {})
+    if not isinstance(roles, dict):
+        roles = {}
+    for role in roles.keys():
         tmux_name = state["roles"][role]["tmux_session"]
         if role_uses_tmux(state, role) and isinstance(tmux_name, str) and tmux_name:
             write_text(failure_dir / f"{role}.pane.txt", tmux_capture_joined_pane(tmux_name))
@@ -6121,6 +6909,55 @@ def enforce_fresh_reviewer_session_for_turn(run_dir: Path, state: dict, turn_num
         turn_number=turn_number,
         role="reviewer",
         details={"had_existing_session": had_existing_session, "had_resume_state": had_resume_state, "reset_mode": reset_mode},
+    )
+
+
+def enforce_fresh_intent_critic_session_for_turn(run_dir: Path, state: dict, turn_number: int) -> None:
+    role_state = state["roles"]["intent_critic"]
+    tmux_name = role_state.get("tmux_session")
+    if not isinstance(tmux_name, str) or not tmux_name:
+        return
+    had_existing_session = tmux_session_exists(tmux_name)
+    had_resume_state = bool(role_state.get("codex_session_id"))
+    if not had_existing_session and not had_resume_state:
+        return
+    if had_existing_session:
+        try:
+            clear_role_session(
+                tmux_name,
+                timeout_seconds=float(state["council_config"]["council"]["launch_timeout_seconds"]),
+                role="intent_critic",
+            )
+            role_state["last_session_reset_reason"] = "fresh_intent_critic_session_clear"
+            save_run_state(run_dir, state)
+            append_run_event(
+                run_dir,
+                "intent_critic_session_cleared_for_fresh_turn",
+                turn_number=turn_number,
+                role="intent_critic",
+                details={"had_existing_session": had_existing_session},
+            )
+            return
+        except SupervisorRuntimeError as error:
+            append_run_event(
+                run_dir,
+                "intent_critic_session_clear_failed_fallback_restart",
+                turn_number=turn_number,
+                role="intent_critic",
+                details={"error": str(error)},
+            )
+    if had_existing_session:
+        tmux_kill_session(tmux_name)
+    role_state["codex_session_id"] = None
+    role_state["codex_thread_name"] = None
+    role_state["last_session_reset_reason"] = "fresh_intent_critic_session_restart"
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "intent_critic_session_reset_for_fresh_turn",
+        turn_number=turn_number,
+        role="intent_critic",
+        details={"had_existing_session": had_existing_session, "had_resume_state": had_resume_state},
     )
 
 
@@ -6612,6 +7449,344 @@ def run_reviewer_phase(
         state["roles"]["reviewer"]["tmux_session"],
     )
     return reviewer_status
+
+
+def run_planner_phase(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_number: int,
+    current_turn_dir: Path,
+    *,
+    inline_context: bool,
+    continue_context_block: str = "",
+) -> dict:
+    repo_root = Path(state["repo_root"])
+    inspection = inspect_task_workspace(task_root)
+    state["workspace_profile"] = inspection["profile"]
+    was_transitioning = state.get("status") == TRANSITIONING_TURN_STATUS
+    transition_from_turn = state.get("current_turn")
+    transition_source_verdict = state.get("transition_source_verdict")
+    turn_timeout_seconds = float(state["council_config"]["council"]["turn_timeout_seconds"])
+    planner_prompt = build_planner_turn_prompt(
+        repo_root,
+        task_root,
+        run_dir,
+        current_turn_dir,
+        turn_number,
+        state=state,
+        inline_context=inline_context,
+        continue_context_block=continue_context_block,
+    )
+    write_prompt_artifact(current_turn_dir, "planner", planner_prompt)
+    state["current_turn"] = turn_number
+    state["pending_turn"] = None
+    state["pending_role"] = None
+    state["transition_source_verdict"] = None
+    state["status"] = "waiting_planner"
+    state["roles"]["planner"]["last_wait_phase"] = "planner_prompt_ready"
+    save_run_state(run_dir, state)
+    if was_transitioning and isinstance(transition_from_turn, int):
+        append_run_event(
+            run_dir,
+            "turn_transition_completed",
+            turn_number=turn_number,
+            role="planner",
+            details={
+                "from_role": "intent_critic",
+                "from_turn": turn_name(transition_from_turn),
+                "source_verdict": transition_source_verdict,
+                "to_role": "planner",
+                "to_turn": turn_name(turn_number),
+            },
+        )
+    save_turn_metadata(current_turn_dir, turn_number, "planner_prompt_prepared", role="planner")
+    append_run_event(run_dir, "planner_prompt_prepared", turn_number=turn_number, role="planner")
+    ensure_role_session_ready(run_dir, state, "planner")
+    wait_for_tmux_prompt(
+        state["roles"]["planner"]["tmux_session"],
+        turn_timeout_seconds,
+        phase="planner_prompt_ready",
+        role="planner",
+    )
+    tmux_send_prompt(
+        state["roles"]["planner"]["tmux_session"],
+        planner_prompt,
+        phase="planner_turn",
+        role="planner",
+    )
+    save_turn_metadata(current_turn_dir, turn_number, "planner_prompt_sent", role="planner")
+    append_run_event(run_dir, "planner_prompt_sent", turn_number=turn_number, role="planner")
+    planner_artifact_path, _, planner_status = wait_for_role_artifacts(
+        current_turn_dir,
+        "planner",
+        validator=validate_planner_status,
+        timeout_seconds=turn_timeout_seconds,
+        phase="planner_artifacts",
+        tmux_name=state["roles"]["planner"]["tmux_session"],
+        turn_number=turn_number,
+        repo_root=repo_root,
+        council_config=state["council_config"],
+    )
+    write_final_message_artifact(
+        current_turn_dir,
+        "planner",
+        planner_artifact_path.read_text(encoding="utf-8"),
+    )
+    write_raw_final_output_artifact(
+        current_turn_dir,
+        "planner",
+        state["roles"]["planner"]["tmux_session"],
+    )
+    refresh_planning_turn_context_manifest(run_dir, task_root, current_turn_dir)
+    return planner_status
+
+
+def run_intent_critic_phase(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_number: int,
+    current_turn_dir: Path,
+    *,
+    inline_context: bool,
+    continue_context_block: str = "",
+) -> dict:
+    repo_root = Path(state["repo_root"])
+    inspection = inspect_task_workspace(task_root)
+    state["workspace_profile"] = inspection["profile"]
+    turn_timeout_seconds = float(state["council_config"]["council"]["turn_timeout_seconds"])
+    intent_critic_prompt = build_intent_critic_turn_prompt(
+        repo_root,
+        task_root,
+        run_dir,
+        current_turn_dir,
+        turn_number,
+        state=state,
+        inline_context=inline_context,
+        continue_context_block=continue_context_block,
+    )
+    write_prompt_artifact(current_turn_dir, "intent_critic", intent_critic_prompt)
+    state["current_turn"] = turn_number
+    state["pending_turn"] = None
+    state["pending_role"] = None
+    state["transition_source_verdict"] = None
+    state["status"] = "waiting_intent_critic"
+    state["roles"]["intent_critic"]["last_wait_phase"] = "intent_critic_prompt_ready"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "intent_critic_prompt_prepared", role="intent_critic")
+    append_run_event(run_dir, "intent_critic_prompt_prepared", turn_number=turn_number, role="intent_critic")
+    state["roles"]["intent_critic"]["last_wait_phase"] = "intent_critic_session_reset_started"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "intent_critic_session_reset_started", role="intent_critic")
+    append_run_event(run_dir, "intent_critic_session_reset_started", turn_number=turn_number, role="intent_critic")
+    enforce_fresh_intent_critic_session_for_turn(run_dir, state, turn_number)
+    state["roles"]["intent_critic"]["last_wait_phase"] = "intent_critic_session_reset_completed"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "intent_critic_session_reset_completed", role="intent_critic")
+    append_run_event(run_dir, "intent_critic_session_reset_completed", turn_number=turn_number, role="intent_critic")
+    ensure_role_session_ready(run_dir, state, "intent_critic")
+    state["roles"]["intent_critic"]["last_wait_phase"] = "intent_critic_session_ready"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "intent_critic_session_ready", role="intent_critic")
+    append_run_event(run_dir, "intent_critic_session_ready", turn_number=turn_number, role="intent_critic")
+    wait_for_tmux_prompt(
+        state["roles"]["intent_critic"]["tmux_session"],
+        turn_timeout_seconds,
+        phase="intent_critic_prompt_ready",
+        role="intent_critic",
+    )
+    tmux_send_prompt(
+        state["roles"]["intent_critic"]["tmux_session"],
+        intent_critic_prompt,
+        phase="intent_critic_turn",
+        role="intent_critic",
+    )
+    state["roles"]["intent_critic"]["last_wait_phase"] = "intent_critic_prompt_sent"
+    save_run_state(run_dir, state)
+    save_turn_metadata(current_turn_dir, turn_number, "intent_critic_prompt_sent", role="intent_critic")
+    append_run_event(run_dir, "intent_critic_prompt_sent", turn_number=turn_number, role="intent_critic")
+    critic_artifact_path, _, critic_status = wait_for_role_artifacts(
+        current_turn_dir,
+        "intent_critic",
+        validator=validate_intent_critic_status,
+        timeout_seconds=turn_timeout_seconds,
+        phase="intent_critic_artifacts",
+        tmux_name=state["roles"]["intent_critic"]["tmux_session"],
+        turn_number=turn_number,
+        repo_root=repo_root,
+        council_config=state["council_config"],
+    )
+    write_final_message_artifact(
+        current_turn_dir,
+        "intent_critic",
+        critic_artifact_path.read_text(encoding="utf-8"),
+    )
+    write_raw_final_output_artifact(
+        current_turn_dir,
+        "intent_critic",
+        state["roles"]["intent_critic"]["tmux_session"],
+    )
+    refresh_planning_turn_context_manifest(run_dir, task_root, current_turn_dir)
+    return critic_status
+
+
+def planning_loop_from(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    *,
+    start_turn: int,
+    start_role: str,
+    reuse_existing_turn_for_first: bool = False,
+    first_continue_context_block: str = "",
+) -> None:
+    next_role = start_role
+    max_turn_budget = int(state["council_config"]["planning"]["max_turns"])
+    last_turn = max_turn_budget
+
+    for turn_number in range(start_turn, last_turn + 1):
+        state["workspace_profile"] = inspect_task_workspace(task_root)["profile"]
+        if turn_number == start_turn and reuse_existing_turn_for_first:
+            current_turn_dir = turn_dir_for(run_dir, turn_number)
+            ensure_dir(role_dir_for(current_turn_dir, "planner"))
+            ensure_dir(role_dir_for(current_turn_dir, "intent_critic"))
+        else:
+            current_turn_dir = prepare_planning_turn(run_dir, turn_number, task_root)
+
+        continue_context_block = first_continue_context_block if turn_number == start_turn else ""
+
+        if next_role == "planner":
+            planner_status = run_planner_phase(
+                run_dir,
+                state,
+                task_root,
+                turn_number,
+                current_turn_dir,
+                inline_context=turn_number == 1,
+                continue_context_block=continue_context_block,
+            )
+            if planner_status["result"] == "needs_human":
+                pause_for_human(
+                    run_dir,
+                    state,
+                    role="planner",
+                    turn_dir=current_turn_dir,
+                    summary=planner_status["summary"],
+                    human_message=planner_status["human_message"],
+                    human_source=planner_status["human_source"],
+                )
+                return
+            if planner_status["result"] == "blocked":
+                state["status"] = "blocked"
+                state["stop_reason"] = planner_status["summary"]
+                save_run_state(run_dir, state)
+                save_turn_metadata(
+                    current_turn_dir,
+                    turn_number,
+                    "blocked",
+                    role="planner",
+                    details={"summary": planner_status["summary"]},
+                )
+                append_run_event(run_dir, "blocked", turn_number=turn_number, role="planner", details={"summary": planner_status["summary"]})
+                return
+            critic_status = run_intent_critic_phase(
+                run_dir,
+                state,
+                task_root,
+                turn_number,
+                current_turn_dir,
+                inline_context=turn_number == 1,
+                continue_context_block=continue_context_block,
+            )
+        else:
+            critic_status = run_intent_critic_phase(
+                run_dir,
+                state,
+                task_root,
+                turn_number,
+                current_turn_dir,
+                inline_context=turn_number == 1,
+                continue_context_block=continue_context_block,
+            )
+
+        if critic_status["verdict"] == "approved":
+            state["status"] = "approved"
+            state["stop_reason"] = critic_status["summary"]
+            save_run_state(run_dir, state)
+            refresh_planning_turn_context_manifest(run_dir, task_root, current_turn_dir)
+            save_turn_metadata(
+                current_turn_dir,
+                turn_number,
+                "approved",
+                role="intent_critic",
+                details={"summary": critic_status["summary"]},
+            )
+            append_run_event(run_dir, "approved", turn_number=turn_number, role="intent_critic", details={"summary": critic_status["summary"]})
+            return
+        if critic_status["verdict"] == "needs_human":
+            pause_for_human(
+                run_dir,
+                state,
+                role="intent_critic",
+                turn_dir=current_turn_dir,
+                summary=critic_status["summary"],
+                human_message=critic_status["human_message"],
+                human_source=critic_status["human_source"],
+            )
+            return
+        if critic_status["verdict"] == "blocked":
+            state["status"] = "blocked"
+            state["stop_reason"] = critic_status["summary"]
+            save_run_state(run_dir, state)
+            save_turn_metadata(
+                current_turn_dir,
+                turn_number,
+                "blocked",
+                role="intent_critic",
+                details={"summary": critic_status["summary"]},
+            )
+            append_run_event(run_dir, "blocked", turn_number=turn_number, role="intent_critic", details={"summary": critic_status["summary"]})
+            return
+        if critic_status["verdict"] == "changes_requested":
+            next_turn_number = turn_number + 1
+            if next_turn_number > last_turn:
+                break
+            begin_planning_turn_transition(
+                run_dir,
+                state,
+                task_root,
+                from_turn=turn_number,
+                to_turn=next_turn_number,
+                from_role="intent_critic",
+                to_role="planner",
+                source_verdict="intent_critic_changes_requested",
+            )
+            save_turn_metadata(
+                current_turn_dir,
+                turn_number,
+                "changes_requested",
+                role="intent_critic",
+                details={"summary": critic_status["summary"]},
+            )
+            append_run_event(run_dir, "changes_requested", turn_number=turn_number, role="intent_critic", details={"summary": critic_status["summary"]})
+            next_role = "planner"
+            continue
+
+    state["status"] = "max_turns_reached"
+    state["stop_reason"] = f"reached planning max turns ({max_turn_budget})"
+    save_run_state(run_dir, state)
+    append_run_event(run_dir, "max_turns_reached", turn_number=state["current_turn"])
+
+
+def planning_loop(run_dir: Path, state: dict, task_root: Path) -> None:
+    planning_loop_from(
+        run_dir,
+        state,
+        task_root,
+        start_turn=1,
+        start_role="planner",
+    )
 
 
 def blocked_github_reviewer_status(summary: str, reviewed_commit_sha: str | None) -> dict:
@@ -7167,8 +8342,368 @@ def run_supervisor_for_initialized_run(
     return 0
 
 
+def build_source_intent_text(
+    *,
+    task_name: str,
+    raw_intent: str | None,
+    hard_mode: bool,
+    inspection: dict,
+) -> str:
+    doc_names = [INPUT_DOC_FILENAMES[name] for name in INPUT_DOC_ORDER if inspection["doc_paths"][name] is not None]
+    raw_block = raw_intent.strip() if isinstance(raw_intent, str) and raw_intent.strip() else "No new raw user request was supplied for this planning run."
+    existing_docs_block = "\n".join(f"- {name}" for name in doc_names) if doc_names else "- None"
+    return textwrap.dedent(
+        f"""\
+        # Source Intent
+
+        ## Task Name
+
+        {task_name}
+
+        ## Raw User Request
+
+        {raw_block}
+
+        ## Existing Canonical Docs At Planning Start
+
+        {existing_docs_block}
+
+        ## Planning Mode
+
+        - Hard mode: {"enabled" if hard_mode else "disabled"}
+        """
+    ).rstrip()
+
+
+def print_planning_run_launch_summary(run_dir: Path, state: dict, task_root: Path) -> None:
+    print(f"repo_root: {state['repo_root']}")
+    print(f"task_root: {task_root}")
+    print(f"planning_run_id: {state['run_id']}")
+    print(f"planning_run_dir: {run_dir}")
+    print(f"planner tmux: {state['roles']['planner']['tmux_session']}")
+    print(f"attach planner: tmux attach -t {state['roles']['planner']['tmux_session']}")
+    print(f"intent critic tmux: {state['roles']['intent_critic']['tmux_session']}")
+    print(f"attach intent critic: tmux attach -t {state['roles']['intent_critic']['tmux_session']}")
+    print(f"source intent: {planning_source_intent_path(run_dir)}")
+
+
+def run_planning_supervisor_for_initialized_run(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    *,
+    start_turn: int,
+    start_role: str,
+    reuse_existing_turn_for_first: bool = False,
+    first_continue_context_block: str = "",
+) -> int:
+    try:
+        create_tmux_sessions(run_dir, state)
+        print_planning_run_launch_summary(run_dir, state, task_root)
+        wait_for_tmux_sessions_ready(run_dir, state)
+        print("planner and intent critic Codex TUI sessions are ready")
+        planning_loop_from(
+            run_dir,
+            state,
+            task_root,
+            start_turn=start_turn,
+            start_role=start_role,
+            reuse_existing_turn_for_first=reuse_existing_turn_for_first,
+            first_continue_context_block=first_continue_context_block,
+        )
+    except SupervisorRuntimeError as error:
+        state = load_json(run_dir / "state.json")
+        state["status"] = "blocked"
+        state["stop_reason"] = f"{error.phase}: {error}"
+        failure_dir = write_failure_diagnostics(run_dir, state, error)
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            state["status"],
+            role=error.role,
+            turn_number=state.get("current_turn"),
+            details={"phase": error.phase, "message": str(error)},
+        )
+        print(f"planning supervisor error during {error.phase}: {error}", flush=True)
+        print(f"diagnostics: {failure_dir}", flush=True)
+        return 1
+    except Exception as exc:
+        error = SupervisorRuntimeError("unexpected", str(exc))
+        state = load_json(run_dir / "state.json")
+        state["status"] = "blocked"
+        state["stop_reason"] = f"{error.phase}: {error}"
+        failure_dir = write_failure_diagnostics(run_dir, state, error)
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            "blocked",
+            turn_number=state.get("current_turn"),
+            details={"phase": error.phase, "message": str(error)},
+        )
+        print(f"planning supervisor error during {error.phase}: {error}", flush=True)
+        print(f"diagnostics: {failure_dir}", flush=True)
+        return 1
+    final_state = load_json(run_dir / "state.json")
+    print(f"final planning status: {final_state['status']}")
+    if final_state.get("stop_reason"):
+        print(f"stop reason: {final_state['stop_reason']}")
+    return 0
+
+
+def planning_docs_present(inspection: dict) -> bool:
+    return any(inspection["doc_paths"][name] is not None for name in ("task", "spec", "contract"))
+
+
+def planning_run_docs_still_approved(run_dir: Path, task_root: Path) -> bool:
+    plan = resolve_planning_continuation_plan(run_dir, load_json(run_dir / "state.json"))
+    if plan["mode"] != "terminal" or plan["continuation_state"] != "intent_critic_approved":
+        return False
+    comparison = build_reopen_doc_comparison(plan["turn_dir"], task_root)
+    return not comparison["docs_changed_since_approval"]
+
+
+def prepare_run(args: argparse.Namespace) -> int:
+    task_name = validate_task_name(args.task_name)
+    if args.run_id == "latest":
+        raise SystemExit("`latest` is reserved as a run selector; choose a different explicit run id for `prepare`")
+    target_input = Path(args.dir or Path.cwd()).resolve()
+    repo_root, _ = resolve_target_root(target_input, allow_non_git=args.allow_non_git)
+    scaffold_council_root(repo_root)
+    task_root = task_root_for(repo_root, task_name)
+    scaffold_task_root(task_root, initial_task_text=None)
+    inspection = inspect_task_workspace(task_root)
+    council_config = load_council_config(repo_root)
+    raw_intent = read_text_arg(args.intent, args.intent_file, default="").strip()
+    if args.new_run and args.run_id:
+        raise SystemExit("--new-run and --run-id cannot be combined")
+    if args.run_id and raw_intent:
+        explicit_run_dir = planning_runs_root_for(task_root) / args.run_id
+        if explicit_run_dir.exists():
+            raise SystemExit("--intent/--intent-file cannot be combined with --run-id when resuming an existing planning run")
+
+    runs_root = planning_runs_root_for(task_root)
+    latest_run_dir: Path | None = None
+    if runs_root.exists():
+        candidates = [path for path in runs_root.iterdir() if path.is_dir()]
+        latest_run_dir = max(candidates, key=run_directory_sort_key) if candidates else None
+
+    resume_run_dir: Path | None = None
+    new_run_id: str | None = None
+    force_new_run = bool(args.new_run or raw_intent)
+
+    if args.run_id and not args.new_run:
+        explicit_run_dir = runs_root / args.run_id
+        if explicit_run_dir.exists():
+            explicit_state_path = explicit_run_dir / "state.json"
+            if not explicit_state_path.exists():
+                raise SystemExit(
+                    f"selected planning run is missing state: {explicit_state_path}\n"
+                    f"Inspect `status {task_name} --planning --run-id {args.run_id}` and repair or supersede that planning run."
+                )
+            resume_run_dir = explicit_run_dir
+        else:
+            new_run_id = args.run_id
+            force_new_run = True
+    elif not force_new_run and latest_run_dir is not None:
+        latest_state_path = latest_run_dir / "state.json"
+        if not latest_state_path.exists():
+            raise SystemExit(
+                f"latest planning run is missing state: {latest_state_path}\n"
+                f"Inspect `status {task_name} --planning` and repair or supersede that planning run before starting a new one."
+            )
+        latest_state = load_json(latest_state_path)
+        latest_plan = inspect_planning_continuation_plan(latest_run_dir, latest_state)
+        if latest_plan["mode"] == "continue":
+            resume_run_dir = latest_run_dir
+        elif latest_plan["mode"] == "error":
+            raise SystemExit(latest_plan["reason"])
+        elif latest_plan["mode"] == "terminal" and latest_plan.get("continuation_state") == "intent_critic_approved":
+            if planning_run_docs_still_approved(latest_run_dir, task_root):
+                print(f"planning_run_dir: {latest_run_dir}")
+                print("docs already approved for execution by the latest planning run")
+                return 0
+            force_new_run = True
+        else:
+            force_new_run = True
+
+    if resume_run_dir is not None:
+        state = load_json(resume_run_dir / "state.json")
+        inspection = inspect_task_workspace(task_root)
+        state["workspace_profile"] = inspection["profile"]
+        try:
+            continuation_plan_data = resolve_planning_continuation_plan(resume_run_dir, state)
+        except ContinuationResolutionError as exc:
+            raise SystemExit(str(exc)) from exc
+        if continuation_plan_data["mode"] == "terminal":
+            if continuation_plan_data["continuation_state"] == "intent_critic_approved":
+                if not planning_run_docs_still_approved(resume_run_dir, task_root):
+                    raise SystemExit(
+                        "selected planning run is approved, but canonical docs changed since that approval. "
+                        "Use `prepare <task> --new-run` or pass new `--intent` to create a fresh planning run."
+                    )
+                print(f"planning_run_dir: {resume_run_dir}")
+                print("docs already approved for execution")
+                return 0
+            raise SystemExit(continuation_plan_data["reason"])
+        turn_number = continuation_plan_data["turn_number"]
+        role = continuation_plan_data["role"]
+        create_new_turn = continuation_plan_data["create_new_turn"]
+        prior_status = continuation_plan_data["prior_status"]
+        continue_context = ""
+        if create_new_turn:
+            state["status"] = TRANSITIONING_TURN_STATUS
+            state["current_turn"] = continuation_plan_data["source_turn_number"]
+            state["pending_turn"] = turn_number
+            state["pending_role"] = role
+            state["transition_source_verdict"] = prior_status
+            target_turn_dir = begin_planning_turn_transition(
+                resume_run_dir,
+                state,
+                task_root,
+                from_turn=continuation_plan_data["source_turn_number"],
+                to_turn=turn_number,
+                from_role=("intent_critic" if prior_status.startswith("intent_critic_") else "planner"),
+                to_role=role,
+                source_verdict=prior_status,
+                reason=continuation_plan_data["reason"],
+            )
+        else:
+            state["current_turn"] = turn_number
+            state["pending_turn"] = None
+            state["pending_role"] = None
+            state["transition_source_verdict"] = None
+            prompt_exists = (
+                continuation_plan_data["reuse_existing_turn_for_first"]
+                and role_prompt_path(continuation_plan_data["turn_dir"], role).exists()
+            )
+            state["status"] = "waiting_planner" if (prompt_exists and role == "planner") else (
+                "waiting_intent_critic" if prompt_exists else "booting"
+            )
+            state["stop_reason"] = None
+            save_run_state(resume_run_dir, state)
+            target_turn_dir = continuation_plan_data["turn_dir"]
+            if continuation_plan_data["reuse_existing_turn_for_first"]:
+                annotate_turn_continuation(
+                    target_turn_dir,
+                    continuation_source=prior_status,
+                    selected_role=role,
+                    selected_turn=turn_number,
+                    reason=continuation_plan_data["reason"],
+                )
+        append_run_event(
+            resume_run_dir,
+            "planning_run_continued",
+            turn_number=turn_number,
+            role=role,
+            details={
+                "prior_status": prior_status,
+                "reason": continuation_plan_data["reason"],
+                "ignored_turns": continuation_plan_data["ignored_turns"],
+            },
+        )
+        try:
+            ensure_active_role_sessions_ready(resume_run_dir, state)
+            planning_loop_from(
+                resume_run_dir,
+                state,
+                task_root,
+                start_turn=turn_number,
+                start_role=role,
+                reuse_existing_turn_for_first=continuation_plan_data["reuse_existing_turn_for_first"],
+                first_continue_context_block=continue_context,
+            )
+        except SupervisorRuntimeError as error:
+            state = load_json(resume_run_dir / "state.json")
+            state["status"] = "blocked"
+            state["stop_reason"] = f"{error.phase}: {error}"
+            failure_dir = write_failure_diagnostics(resume_run_dir, state, error)
+            save_run_state(resume_run_dir, state)
+            append_run_event(
+                resume_run_dir,
+                state["status"],
+                role=error.role,
+                turn_number=state.get("current_turn"),
+                details={"phase": error.phase, "message": str(error)},
+            )
+            print(f"planning supervisor error during {error.phase}: {error}", flush=True)
+            print(f"diagnostics: {failure_dir}", flush=True)
+            return 1
+        except Exception as exc:
+            error = SupervisorRuntimeError("unexpected", str(exc))
+            state = load_json(resume_run_dir / "state.json")
+            state["status"] = "blocked"
+            state["stop_reason"] = f"{error.phase}: {error}"
+            failure_dir = write_failure_diagnostics(resume_run_dir, state, error)
+            save_run_state(resume_run_dir, state)
+            append_run_event(
+                resume_run_dir,
+                "blocked",
+                turn_number=state.get("current_turn"),
+                details={"phase": error.phase, "message": str(error)},
+            )
+            print(f"planning supervisor error during {error.phase}: {error}", flush=True)
+            print(f"diagnostics: {failure_dir}", flush=True)
+            return 1
+        final_state = load_json(resume_run_dir / "state.json")
+        print(f"planning_run_dir: {resume_run_dir}")
+        print(f"continued role: {role}")
+        print(f"continuation reason: {continuation_plan_data['reason']}")
+        print(f"current_turn: {final_state['current_turn']}")
+        print(f"final planning status: {final_state['status']}")
+        if final_state.get("stop_reason"):
+            print(f"stop reason: {final_state['stop_reason']}")
+        return 0
+
+    if not raw_intent and not planning_docs_present(inspection):
+        raise SystemExit(
+            f"cannot start planning for `{task_name}` without source intent or existing canonical docs.\n"
+            f"Pass --intent/--intent-file, or create {TASK_FILENAME}, {SPEC_FILENAME}, or {CONTRACT_FILENAME} first."
+        )
+
+    run_id = new_run_id or run_id_value()
+    run_dir = planning_runs_root_for(task_root) / run_id
+    if run_dir.exists():
+        raise SystemExit(f"planning run directory already exists: {run_dir}")
+    ensure_dir(run_dir / "turns")
+    planner_session = args.planner_session or build_tmux_session_name(task_name, "planner", run_id)
+    critic_session = args.critic_session or build_tmux_session_name(task_name, "intent-critic", run_id)
+    session_index_snapshot_ids = [entry["id"] for entry in read_codex_session_index()]
+    state = create_planning_run_state(
+        repo_root=repo_root,
+        task_root=task_root,
+        task_name=task_name,
+        run_id=run_id,
+        workspace_profile=inspection["profile"],
+        council_config=council_config,
+        planner_session=planner_session,
+        critic_session=critic_session,
+        hard_mode=bool(args.hard),
+    )
+    state["session_index_snapshot_ids"] = session_index_snapshot_ids
+    save_run_state(run_dir, state)
+    write_text(
+        planning_source_intent_path(run_dir),
+        build_source_intent_text(
+            task_name=task_name,
+            raw_intent=raw_intent or None,
+            hard_mode=bool(args.hard),
+            inspection=inspection,
+        ),
+    )
+    append_run_event(run_dir, "run_created", details={"task_name": task_name, "run_kind": "planning", "hard_mode": bool(args.hard)})
+    return run_planning_supervisor_for_initialized_run(
+        run_dir,
+        state,
+        task_root,
+        start_turn=1,
+        start_role="planner",
+    )
+
+
 def start_run(args: argparse.Namespace) -> int:
     task_name = validate_task_name(args.task_name)
+    if args.run_id == "latest":
+        raise SystemExit("`latest` is reserved as a run selector; choose a different explicit run id for `start`")
     target_input = Path(args.dir or Path.cwd()).resolve()
     repo_root, is_git = resolve_target_root(target_input, allow_non_git=args.allow_non_git)
     review_mode = normalize_review_mode(args)
@@ -7201,6 +8736,7 @@ def start_run(args: argparse.Namespace) -> int:
     if not is_git and fork_enabled:
         raise SystemExit("fork start requires a git worktree and cannot be used with --allow-non-git")
     validate_task_workspace_for_start(task_root, inspection, review_mode=review_mode)
+    validate_planning_state_for_start(task_root)
     start_role, bootstrap_phase = determine_start_role(
         inspection=inspection,
         fork_enabled=fork_enabled,
@@ -7439,10 +8975,13 @@ def init_task(args: argparse.Namespace) -> int:
     print(f"agents: {task_root / 'AGENTS.md'}")
     print(f"generator: {task_root / 'generator.instructions.md'}")
     print(f"reviewer: {task_root / 'reviewer.instructions.md'}")
+    print(f"planner: {task_root / 'planner.instructions.md'}")
+    print(f"intent_critic: {task_root / 'intent_critic.instructions.md'}")
+    print(f"spec_contract_example: {task_root / 'spec-contract-linking-example.md'}")
     if result["task_needs_edit"]:
-        print(f"next: review {TASK_FILENAME}, then run `start` or use `write` to add other documents")
+        print(f"next: review {TASK_FILENAME}, then run `prepare` for broad work or `start` for concrete execution")
     else:
-        print(f"next: use `write task|review|spec|contract {task_name}` or edit the files directly, then run `start`")
+        print(f"next: use `write task|review|spec|contract {task_name}` or edit the files directly, then run `prepare` or `start`")
     return 0
 
 
@@ -7453,13 +8992,13 @@ def show_status(args: argparse.Namespace) -> int:
     task_root = task_root_for(repo_root, task_name)
     if not task_root.exists():
         raise SystemExit(f"missing task workspace: {task_root}")
-    run_dir = resolve_run_dir(task_root, args.run_id)
+    run_dir = resolve_planning_run_dir(task_root, args.run_id) if getattr(args, "planning", False) else resolve_run_dir(task_root, args.run_id)
 
     state_path = run_dir / "state.json"
     if not state_path.exists():
         raise SystemExit(f"missing run state: {state_path}")
     state = load_json(state_path)
-    continuation = inspect_continuation_plan(run_dir, state)
+    continuation = inspect_planning_continuation_plan(run_dir, state) if getattr(args, "planning", False) else inspect_continuation_plan(run_dir, state)
     payload = dict(state)
     events: list[dict] = []
     events_path = events_path_for(run_dir)
@@ -7470,7 +9009,8 @@ def show_status(args: argparse.Namespace) -> int:
             events = []
 
     latest_role_events: dict[str, dict] = {}
-    for role_name in ("generator", "reviewer"):
+    role_names = PLANNING_ROLE_NAMES if getattr(args, "planning", False) else ROLE_NAMES
+    for role_name in role_names:
         matching = [event for event in events if event.get("role") == role_name]
         if matching:
             latest_role_events[role_name] = matching[-1]
@@ -7496,6 +9036,12 @@ def show_status(args: argparse.Namespace) -> int:
     elif continuation["mode"] == "error":
         derived_payload["details"] = continuation["details"]
     payload["derived_continuation"] = derived_payload
+    if getattr(args, "planning", False):
+        payload["docs_approved_for_execution"] = (
+            continuation["mode"] == "terminal"
+            and continuation.get("continuation_state") == "intent_critic_approved"
+            and planning_run_docs_still_approved(run_dir, task_root)
+        )
     if latest_role_events:
         payload["latest_role_milestones"] = {
             role_name: {
@@ -7650,6 +9196,69 @@ def inspect_turn_for_continuation(turn_dir: Path) -> dict:
     inspection["has_runtime_activity"] = bool(
         generator["activity_exists"] or reviewer["activity_exists"]
     )
+    inspection["is_empty_initialized"] = bool(metadata) and not inspection["has_runtime_activity"]
+    return inspection
+
+
+PlanningArtifactContinuationState = Literal[
+    "planner_pending",
+    "planner_invalid",
+    "planner_needs_human",
+    "planner_blocked",
+    "planner_complete_waiting_intent_critic",
+    "intent_critic_pending",
+    "intent_critic_invalid",
+    "intent_critic_changes_requested",
+    "intent_critic_needs_human",
+    "intent_critic_blocked",
+    "intent_critic_approved",
+]
+
+
+def classify_planning_turn_continuation_state(turn: dict) -> str:
+    planner = turn["planner"]
+    critic = turn["intent_critic"]
+
+    if not planner["activity_exists"] and not critic["activity_exists"]:
+        return "not_started"
+    if critic["activity_exists"] and planner["state"] != "valid":
+        return "ambiguous"
+    if planner["state"] == "invalid":
+        return "planner_invalid"
+    if planner["state"] == "pending":
+        return "planner_pending"
+    planner_result = planner["validated_status"]["result"]
+    if planner_result == "needs_human":
+        return "ambiguous" if critic["activity_exists"] else "planner_needs_human"
+    if planner_result == "blocked":
+        return "ambiguous" if critic["activity_exists"] else "planner_blocked"
+    if critic["state"] == "invalid":
+        return "intent_critic_invalid"
+    if critic["state"] == "pending":
+        return "intent_critic_pending" if critic["activity_exists"] else "planner_complete_waiting_intent_critic"
+    critic_verdict = critic["validated_status"]["verdict"]
+    if critic_verdict == "approved":
+        return "intent_critic_approved"
+    if critic_verdict == "changes_requested":
+        return "intent_critic_changes_requested"
+    if critic_verdict == "needs_human":
+        return "intent_critic_needs_human"
+    return "intent_critic_blocked"
+
+
+def inspect_planning_turn_for_continuation(turn_dir: Path) -> dict:
+    metadata = load_turn_metadata(turn_dir) if turn_metadata_path(turn_dir).exists() else {}
+    planner = inspect_role_runtime(turn_dir, "planner", validate_planner_status)
+    critic = inspect_role_runtime(turn_dir, "intent_critic", validate_intent_critic_status)
+    inspection = {
+        "turn_dir": turn_dir,
+        "turn_number": int(turn_dir.name),
+        "metadata": metadata,
+        "planner": planner,
+        "intent_critic": critic,
+    }
+    inspection["continuation_state"] = classify_planning_turn_continuation_state(inspection)
+    inspection["has_runtime_activity"] = bool(planner["activity_exists"] or critic["activity_exists"])
     inspection["is_empty_initialized"] = bool(metadata) and not inspection["has_runtime_activity"]
     return inspection
 
@@ -8072,6 +9681,303 @@ def determine_continue_target(run_dir: Path, state: dict) -> tuple[Path, int, st
     )
 
 
+def planning_next_turn_expectation(turn: dict, continuation_state: str) -> dict | None:
+    turn_number = turn["turn_number"]
+    if continuation_state in {"intent_critic_changes_requested", "planner_needs_human", "intent_critic_needs_human"}:
+        role = "planner"
+    else:
+        return None
+    return {
+        "target_turn_number": turn_number + 1,
+        "source_turn_number": turn_number,
+        "source_status": continuation_state,
+        "role": role,
+        "reason": (
+            f"turn {turn_name(turn_number)} ended with `{continuation_state}`, "
+            f"so {role} should continue on turn {turn_name(turn_number + 1)}."
+        ),
+    }
+
+
+def resolve_planning_turn_continuation(
+    run_dir: Path,
+    turns: list[dict],
+    *,
+    index: int,
+    expected_transition: dict | None = None,
+    max_turn_budget: int | None = None,
+) -> dict:
+    turn = turns[index]
+    continuation_state = turn["continuation_state"]
+    turn_label = turn_name(turn["turn_number"])
+
+    if expected_transition is not None and turn["turn_number"] != expected_transition["target_turn_number"]:
+        raise ContinuationResolutionError(
+            f"expected turn {turn_name(expected_transition['target_turn_number'])} after `{expected_transition['source_status']}`, but found {turn_label} instead",
+            details={"expected_turn": turn_name(expected_transition["target_turn_number"]), "found_turn": turn_label},
+        )
+
+    if continuation_state == "ambiguous":
+        raise ContinuationResolutionError(
+            f"planning turn {turn_label} mixes intent critic activity with incomplete planner state",
+            details={"turn": turn_label},
+        )
+
+    if continuation_state == "not_started":
+        if expected_transition is not None:
+            if not turn_matches_expected_transition(turn, expected_transition):
+                raise ContinuationResolutionError(
+                    f"planning turn {turn_label} exists but does not clearly match the expected transition from `{expected_transition['source_status']}`",
+                    details={
+                        "turn": turn_label,
+                        "metadata": turn["metadata"],
+                        "expected_source_status": expected_transition["source_status"],
+                        "expected_role": expected_transition["role"],
+                    },
+                )
+            ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+            if conflicts:
+                raise ContinuationResolutionError(
+                    f"planning turn {turn_label} is the expected next turn, but later turns already contain conflicting activity",
+                    details={"turn": turn_label, "conflicts": conflicts},
+                )
+            return continuation_plan(
+                turn_dir=turn["turn_dir"],
+                turn_number=turn["turn_number"],
+                role=expected_transition["role"],
+                create_new_turn=False,
+                reuse_existing_turn_for_first=bool(turn["metadata"]),
+                prior_status=expected_transition["source_status"],
+                continuation_state=continuation_state,
+                reason=expected_transition["reason"] + " The target planning turn exists but has not started yet.",
+                reference_turn_dir=turn["turn_dir"],
+                source_turn_number=expected_transition["source_turn_number"],
+                ignored_turns=ignored_turns,
+            )
+        if index == 0:
+            ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+            if conflicts:
+                raise ContinuationResolutionError(
+                    f"planning turn {turn_label} has no role activity, but later turns already contain conflicting activity",
+                    details={"turn": turn_label, "conflicts": conflicts},
+                )
+            selected_role = turn["metadata"].get("selected_role")
+            role = selected_role if selected_role in PLANNING_ROLE_NAMES else "planner"
+            return continuation_plan(
+                turn_dir=turn["turn_dir"],
+                turn_number=turn["turn_number"],
+                role=role,
+                create_new_turn=False,
+                reuse_existing_turn_for_first=bool(turn["metadata"]),
+                prior_status="no_artifacts_present",
+                continuation_state=continuation_state,
+                reason=f"planning turn {turn_label} exists but no prompt or role artifacts were written yet.",
+                reference_turn_dir=None,
+                source_turn_number=None,
+                ignored_turns=ignored_turns,
+            )
+        raise ContinuationResolutionError(
+            f"planning turn {turn_label} has no role activity and no validated earlier turn explains it",
+            details={"turn": turn_label, "metadata": turn["metadata"]},
+        )
+
+    if continuation_state in {"planner_pending", "planner_invalid"}:
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"planning turn {turn_label} still needs planner work, but later turns already contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts},
+            )
+        return continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            role="planner",
+            create_new_turn=False,
+            reuse_existing_turn_for_first=True,
+            prior_status=continuation_state,
+            continuation_state=continuation_state,
+            reason=f"planning turn {turn_label} still has incomplete or invalid planner artifacts.",
+            reference_turn_dir=turn["turn_dir"],
+            source_turn_number=turn["turn_number"],
+            ignored_turns=ignored_turns,
+        )
+
+    if continuation_state in {
+        "planner_complete_waiting_intent_critic",
+        "intent_critic_pending",
+        "intent_critic_invalid",
+    }:
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"planning turn {turn_label} still needs intent critic work, but later turns already contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts},
+            )
+        if continuation_state == "planner_complete_waiting_intent_critic":
+            reason = f"planner finished on turn {turn_label}, but intent critic has not started yet."
+        elif continuation_state == "intent_critic_pending":
+            critic_phase = turn["metadata"].get("phase")
+            if critic_phase == "intent_critic_prompt_prepared":
+                reason = f"planning turn {turn_label} has a prepared intent critic prompt, but the prompt was not sent yet."
+            elif critic_phase == "intent_critic_session_reset_started":
+                reason = f"planning turn {turn_label} started resetting the intent critic session, but the handoff did not complete."
+            elif critic_phase == "intent_critic_session_reset_completed":
+                reason = f"planning turn {turn_label} finished resetting the intent critic session, but the prompt was not sent."
+            elif critic_phase == "intent_critic_session_ready":
+                reason = f"planning turn {turn_label} has a ready intent critic session, but the prompt was not sent."
+            elif critic_phase == "intent_critic_prompt_sent":
+                reason = f"planning turn {turn_label} sent the intent critic prompt and is still waiting for artifacts."
+            else:
+                reason = f"planning turn {turn_label} still has incomplete intent critic work."
+        else:
+            reason = f"planning turn {turn_label} still has incomplete or invalid intent critic artifacts."
+        return continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            role="intent_critic",
+            create_new_turn=False,
+            reuse_existing_turn_for_first=True,
+            prior_status=continuation_state,
+            continuation_state=continuation_state,
+            reason=reason,
+            reference_turn_dir=turn["turn_dir"],
+            source_turn_number=turn["turn_number"],
+            ignored_turns=ignored_turns,
+        )
+
+    if continuation_state == "intent_critic_approved":
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"planning turn {turn_label} is already approved, but later turns contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts},
+            )
+        return terminal_continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            continuation_state=continuation_state,
+            reason=f"planning turn {turn_label} is approved; the docs are already prepared for execution.",
+            ignored_turns=ignored_turns,
+        )
+
+    if continuation_state == "planner_blocked":
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"planning turn {turn_label} is blocked, but later turns contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts},
+            )
+        return terminal_continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            continuation_state=continuation_state,
+            reason=f"planning turn {turn_label} is blocked.",
+            ignored_turns=ignored_turns,
+        )
+
+    if continuation_state == "intent_critic_blocked":
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"planning turn {turn_label} is blocked in intent critic review, but later turns contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts},
+            )
+        return terminal_continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            continuation_state=continuation_state,
+            reason=f"planning turn {turn_label} is blocked in intent critic review.",
+            ignored_turns=ignored_turns,
+        )
+
+    next_transition = planning_next_turn_expectation(turn, continuation_state)
+    if next_transition is None:
+        raise ContinuationResolutionError(
+            f"unsupported planning continuation state on turn {turn_label}: {continuation_state}",
+            details={"turn": turn_label, "state": continuation_state},
+        )
+    if max_turn_budget is not None and next_transition["target_turn_number"] > max_turn_budget:
+        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
+        if conflicts:
+            raise ContinuationResolutionError(
+                f"planning turn {turn_label} would exceed the configured max turns, but later turns already contain conflicting activity",
+                details={"turn": turn_label, "conflicts": conflicts, "max_turns": max_turn_budget},
+            )
+        return terminal_continuation_plan(
+            turn_dir=turn["turn_dir"],
+            turn_number=turn["turn_number"],
+            continuation_state="max_turns_reached",
+            reason=f"planning run already reached max turns ({max_turn_budget}); do not create turn {turn_name(next_transition['target_turn_number'])}.",
+            ignored_turns=ignored_turns,
+        )
+    if index + 1 >= len(turns):
+        return continuation_plan(
+            turn_dir=turn_dir_for(run_dir, next_transition["target_turn_number"]),
+            turn_number=next_transition["target_turn_number"],
+            role=next_transition["role"],
+            create_new_turn=True,
+            reuse_existing_turn_for_first=False,
+            prior_status=continuation_state,
+            continuation_state=continuation_state,
+            reason=next_transition["reason"],
+            reference_turn_dir=turn["turn_dir"],
+            source_turn_number=turn["turn_number"],
+            ignored_turns=[],
+        )
+    return resolve_planning_turn_continuation(
+        run_dir,
+        turns,
+        index=index + 1,
+        expected_transition=next_transition,
+        max_turn_budget=max_turn_budget,
+    )
+
+
+def resolve_planning_continuation_plan(run_dir: Path, state: dict) -> dict:
+    turns_root = run_dir / "turns"
+    if not turns_root.exists() or not any(path.is_dir() for path in turns_root.iterdir()):
+        turn_number = int(state.get("current_turn", 1))
+        return continuation_plan(
+            turn_dir=turn_dir_for(run_dir, turn_number),
+            turn_number=turn_number,
+            role="planner",
+            create_new_turn=False,
+            reuse_existing_turn_for_first=False,
+            prior_status="no_turns_present",
+            continuation_state="not_started",
+            reason=f"planning run has no turn directories yet; resume from turn {turn_name(turn_number)}.",
+            reference_turn_dir=None,
+            source_turn_number=None,
+            ignored_turns=[],
+        )
+    turns = [inspect_planning_turn_for_continuation(turn_dir) for turn_dir in list_turn_dirs(run_dir)]
+    max_turn_budget = int(state.get("council_config", {}).get("planning", {}).get("max_turns", 4))
+    return resolve_planning_turn_continuation(run_dir, turns, index=0, max_turn_budget=max_turn_budget)
+
+
+def inspect_planning_continuation_plan(run_dir: Path, state: dict) -> dict:
+    try:
+        return resolve_planning_continuation_plan(run_dir, state)
+    except ContinuationResolutionError as exc:
+        return {"mode": "error", "reason": str(exc), "details": exc.details}
+
+
+def determine_prepare_target(run_dir: Path, state: dict) -> tuple[Path, int, str, bool, str]:
+    try:
+        plan = resolve_planning_continuation_plan(run_dir, state)
+    except ContinuationResolutionError as exc:
+        raise SystemExit(str(exc)) from exc
+    if plan["mode"] == "terminal":
+        raise SystemExit("planning run is already approved; docs are prepared for execution")
+    return (
+        plan["turn_dir"],
+        plan["turn_number"],
+        plan["role"],
+        plan["create_new_turn"],
+        plan["prior_status"],
+    )
+
+
 def build_reopen_metadata(
     *,
     task_name: str,
@@ -8156,7 +10062,13 @@ def continue_run(args: argparse.Namespace) -> int:
         raise SystemExit(f"missing task workspace: {task_root}")
     run_dir = resolve_run_dir(task_root, args.run_id)
 
-    state = load_json(run_dir / "state.json")
+    state_path = run_dir / "state.json"
+    if not state_path.exists():
+        raise SystemExit(
+            f"missing run state: {state_path}\n"
+            f"Inspect `status {task_name}` to choose a healthy run, or repair/remove the broken run directory first."
+        )
+    state = load_json(state_path)
     inspection = inspect_task_workspace(task_root)
     state["workspace_profile"] = inspection["profile"]
     try:
@@ -8239,16 +10151,53 @@ def continue_run(args: argparse.Namespace) -> int:
             "ignored_turns": continuation_plan_data["ignored_turns"],
         },
     )
-    ensure_active_role_sessions_ready(run_dir, state)
-    supervisor_loop_from(
-        run_dir,
-        state,
-        task_root,
-        start_turn=turn_number,
-        start_role=role,
-        reuse_existing_turn_for_first=continuation_plan_data["reuse_existing_turn_for_first"],
-        first_continue_context_block=continue_context,
-    )
+    try:
+        ensure_active_role_sessions_ready(run_dir, state)
+        supervisor_loop_from(
+            run_dir,
+            state,
+            task_root,
+            start_turn=turn_number,
+            start_role=role,
+            reuse_existing_turn_for_first=continuation_plan_data["reuse_existing_turn_for_first"],
+            first_continue_context_block=continue_context,
+        )
+    except SupervisorRuntimeError as error:
+        state = load_json(run_dir / "state.json")
+        state["status"] = (
+            "blocked_invalid_artifacts"
+            if error.phase == "blocked_invalid_artifacts"
+            else "blocked"
+        )
+        state["stop_reason"] = f"{error.phase}: {error}"
+        failure_dir = write_failure_diagnostics(run_dir, state, error)
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            state["status"],
+            role=error.role,
+            turn_number=state.get("current_turn"),
+            details={"phase": error.phase, "message": str(error)},
+        )
+        print(f"supervisor error during {error.phase}: {error}", flush=True)
+        print(f"diagnostics: {failure_dir}", flush=True)
+        return 1
+    except Exception as exc:
+        error = SupervisorRuntimeError("unexpected", str(exc))
+        state = load_json(run_dir / "state.json")
+        state["status"] = "blocked"
+        state["stop_reason"] = f"{error.phase}: {error}"
+        failure_dir = write_failure_diagnostics(run_dir, state, error)
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            "blocked",
+            turn_number=state.get("current_turn"),
+            details={"phase": error.phase, "message": str(error)},
+        )
+        print(f"supervisor error during {error.phase}: {error}", flush=True)
+        print(f"diagnostics: {failure_dir}", flush=True)
+        return 1
 
     final_state = load_json(run_dir / "state.json")
     print(f"run_dir: {run_dir}")
@@ -8285,6 +10234,19 @@ def build_parser() -> argparse.ArgumentParser:
     write.add_argument("--body")
     write.add_argument("--body-file")
     write.set_defaults(func=write_document_command)
+
+    prepare = sub.add_parser("prepare", help="start or resume a planning run for task/spec/contract authoring")
+    prepare.add_argument("task_name")
+    prepare.add_argument("--dir", help="target repository or working directory")
+    prepare.add_argument("--allow-non-git", action="store_true")
+    prepare.add_argument("--intent")
+    prepare.add_argument("--intent-file")
+    prepare.add_argument("--hard", action="store_true")
+    prepare.add_argument("--run-id")
+    prepare.add_argument("--planner-session")
+    prepare.add_argument("--critic-session")
+    prepare.add_argument("--new-run", action="store_true")
+    prepare.set_defaults(func=prepare_run)
 
     start = sub.add_parser("start", help="start a council run for a task name")
     start.add_argument("task_name")
@@ -8324,6 +10286,7 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--dir", help="target repository or working directory")
     status.add_argument("--allow-non-git", action="store_true")
     status.add_argument("--run-id", default="latest")
+    status.add_argument("--planning", action="store_true", help="inspect the latest or chosen planning run instead of an execution run")
     status.set_defaults(func=show_status)
 
     return parser

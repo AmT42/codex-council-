@@ -20,7 +20,7 @@ The harness is intentionally layered.
 User
   -> Outer agent
     -> codex-council skill
-      -> planner / intent critic preparation (when needed)
+      -> prepare (planner / intent critic planning loop when needed)
         -> Canonical docs in target repo
           -> codex_tui_supervisor.py
             -> generator / reviewer role sessions
@@ -81,6 +81,12 @@ Instead, it should use a planning preparation stage:
 - `intent critic`
   - verifies fidelity to user intent, repo plausibility, and document quality before execution
 
+In runtime terms, that stage is now `prepare`:
+
+- it writes auditable planning artifacts under `planning-runs/`
+- it preserves `source_intent.md` per planning run
+- it loops planner and intent critic until `approved`, `blocked`, `needs_human`, or planning max turns
+
 This stage is where `hard` mode belongs.
 
 `hard` mode means:
@@ -104,14 +110,24 @@ They are the durable briefing layer between the outer agent and the runtime:
 - `generator.instructions.md`
 - `reviewer.instructions.md`
 
+Standard scaffolded planning-support files live under the task workspace in the current harness model:
+
+- `planner.instructions.md`
+  - task-local planner guidance used during `prepare`
+- `intent_critic.instructions.md`
+  - task-local planning-critic guidance used during `prepare`
+- `spec-contract-linking-example.md`
+  - task-local worked example for the spec→acceptance criteria→contract linkage model
+
 Optional supporting context may also exist under the task workspace:
 
 - `branch_northstar_summary.md`
   - non-canonical branch/worktree context used to preserve intent for branch-driven work such as `github_pr_codex`
-- `planner.instructions.md`
-  - future-facing task-local planner guidance used during preparation
-- `intent_critic.instructions.md`
-  - future-facing task-local planning-critic guidance used during preparation
+
+Planning runs live separately from execution runs:
+
+- `.codex-council/<task_name>/planning-runs/<run_id>/...`
+- `.codex-council/<task_name>/runs/<run_id>/...`
 
 ### Runtime supervisor
 
@@ -385,7 +401,7 @@ Breaking that boundary is a product failure, even if the direct implementation w
 
 ## Process-Lifetime Rule
 
-When an outer agent launches `start`, `continue`, or `reopen`, it must preserve the lifetime of the supervisor process.
+When an outer agent uses `prepare`, `start`, `continue`, or `reopen`, it must preserve the lifetime of the supervisor process whenever that command actually launches or resumes a supervisor.
 
 Valid patterns:
 
