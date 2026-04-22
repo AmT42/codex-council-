@@ -53,13 +53,20 @@
 - toy-like prompt / tool / schema descriptions for agentic work
 - missing implementation-critical decisions
 - specs that would force the execution council to invent policy
-- broad/spec-driven `spec.md` with no acceptance criteria per major section
+- `spec.md` with no major `M#` sections for approval-critical behavior
+- broad/spec-driven `spec.md` with no labeled acceptance criteria (`A1`, `A2`, ...) per major section
+- any per-section `Non-Goals` or `Out of Scope` subsection
 - execution scope that is narrower than the approval scope implied by `contract.md`
 - helper, background, repair, or maintenance paths that could be mistaken for the required primary user path
+- docs that only make unchecked contract items feel live while checked items feel settled
+- docs that do not make re-audit and re-uncheck behavior explicit
 - approval-critical runtime/fallback/validator/integrity claims with only happy-path or helper-only validation guidance
 - approval-critical behavior that cannot be audited on the real path
 - approval logic that would still depend on “looks right from tests or code inspection” instead of a falsifiable branch-state proof path
 - `contract.md` that is not clearly derived from `spec.md`
+- `contract.md` with no top-level `M#` item for a spec section or no `M#.A#` sub-check for a linked acceptance criterion
+- `contract.md` whose top-level `M#.` title drifts from the linked `spec.md` section title
+- `contract.md` whose `M#.A#` sub-check text drifts from the linked acceptance criterion text
 - important spec guarantees with no auditable contract representation
 - contract that is too generic to justify approval
 - contract that duplicates the whole spec instead of acting as an approval projection

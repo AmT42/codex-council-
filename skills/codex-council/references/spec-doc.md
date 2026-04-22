@@ -65,7 +65,9 @@ When the product is agentic, also make explicit:
 
 If a dimension is relevant, decide it. If it truly does not apply, say so explicitly with a short reason.
 
-For broad/spec-driven work, prefer named major sections such as `M1`, `M2`, `M3` when that improves traceability. Each major section should include acceptance criteria for that slice of behavior. Those acceptance criteria are the real test of “done right” and are what `contract.md` should project into auditable approval items.
+For spec-driven work, organize approval-critical behavior into named major sections such as `M1`, `M2`, `M3`. Each major section should include labeled acceptance criteria (`A1`, `A2`, `A3`, ...) for that slice of behavior. Those acceptance criteria are the real test of “done right” and are what `contract.md` should project into auditable approval items.
+
+Do not add per-section `Non-Goals` or `Out of Scope` subsections. Put exclusions into the global scope sections or into explicit acceptance criteria.
 
 For a full worked example, see:
 
@@ -98,7 +100,7 @@ Use `## Open Questions` only for uncertainty that does not prevent safe executio
 - Prefer explicit defaults or assumptions over leaving the generator to choose policy during implementation.
 - If a “helper” or “background” path exists near the primary workflow, state whether it supports the primary path or is forbidden as a replacement for it.
 - If planning-stage `hard` mode is active, optimize for execution safety and intent fidelity rather than brevity.
-- For broad work, acceptance criteria should live under the relevant spec sections, not only at the end of the file.
+- For broad work, acceptance criteria should live under the relevant spec sections, use `A#` labels, and be explicit enough to become cited `M#.A#` contract sub-checks.
 
 ## Example uses
 

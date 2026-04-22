@@ -135,6 +135,13 @@ The preferred route is a planning stage:
 - intent critic checks whether those docs are faithful to the real intent and strong enough for execution
 - only after that review passes should the execution docs be treated as locked inputs for the generator/reviewer loop
 
+When a run uses `spec.md`, the planning target is now explicit:
+
+- `spec.md` should break approval-critical behavior into major `M#` sections
+- each `M#` section should contain labeled acceptance criteria such as `A1`, `A2`, `A3`
+- do not use per-section `Non-Goals` / `Out of Scope` subsections; exclusions belong in the global scope sections or explicit acceptance criteria
+- `contract.md` should mirror that structure with one top-level `M#` checklist item and one nested `M#.A#` sub-check per acceptance criterion
+
 This planning stage is a preparation layer, not a replacement for the runtime council.
 
 `hard` mode belongs here:
@@ -202,9 +209,9 @@ Canonical documents:
 - `review.md`
   - findings input for debugging, review-driven work, and external comments
 - `spec.md`
-  - detailed design when `task.md` alone would be too ambiguous
+  - detailed design when `task.md` alone would be too ambiguous; for spec-driven work it should use major `M#` sections with labeled acceptance criteria
 - `contract.md`
-  - default acceptance and approval checklist for most non-trivial runs
+  - default acceptance and approval checklist for most non-trivial runs; for spec-driven work it should mirror `spec.md` with top-level `M#` items and nested `M#.A#` sub-checks
 - `AGENTS.md`
   - stable council behavior only, not feature requirements
 

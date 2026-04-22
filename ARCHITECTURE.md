@@ -81,6 +81,13 @@ Instead, it should use a planning preparation stage:
 - `intent critic`
   - verifies fidelity to user intent, repo plausibility, and document quality before execution
 
+When the planning loop produces `spec.md`, it should converge on:
+
+- `spec.md` organized into major `M#` sections
+- labeled acceptance criteria under each section (`A1`, `A2`, `A3`, ...)
+- no per-section `Non-Goals` / `Out of Scope` subsections; exclusions belong in the global scope sections or explicit acceptance criteria
+- `contract.md` that mirrors those sections with top-level `M#` items and cited `M#.A#` sub-checks
+
 In runtime terms, that stage is now `prepare`:
 
 - it writes auditable planning artifacts under `planning-runs/`
@@ -164,7 +171,7 @@ The reviewer is not merely a checklist scorer. In stronger review postures, it s
 
 Reviewer contract state is not monotonic across turns.
 
-If later generator work regresses a previously satisfied contract point, the reviewer should uncheck it again and record that regression explicitly rather than preserving the old checkmark.
+If later generator work regresses a previously satisfied contract point or cited acceptance sub-check, the reviewer should uncheck it again and record that regression explicitly rather than preserving the old checkmark.
 
 The reviewer may tighten tests or fixtures when that materially improves review evidence, but it should not directly patch production code.
 

@@ -8,7 +8,7 @@
 - Write or tighten `task.md`.
 - Write or tighten `spec.md` when the task is broad, risky, or agentic.
 - Write or tighten `contract.md` so approval is auditable.
-- For broad/spec-driven work, write `spec.md` first as the full decision-complete truth, then derive `contract.md` from the approval-critical parts of that spec.
+- For broad/spec-driven work, write `spec.md` first as the full decision-complete truth, then derive `contract.md` from every major spec section in that spec.
 - Do not write `review.md` in this planning loop unless a human explicitly asks for findings-shaped planning context.
 
 ## Runtime contract
@@ -49,17 +49,21 @@
 - Do not hide assumptions as facts.
 - Do not use vague terms like `production-ready`, `robust`, `good UX`, or `enterprise-grade` without decomposing them into observable requirements.
 - Prefer explicit defaults or decisions over leaving policy for the execution council to invent.
-- When writing a broad/spec-driven `spec.md`, organize major behavior slices into named sections (for example `M1`, `M2`, `M3`) and place acceptance criteria under each relevant section.
-- When writing `contract.md`, create one checkbox per major spec section or approval-critical group, not one checkbox per tiny detail.
-- A contract item is only valid if all linked acceptance criteria for that spec section are satisfied.
+- When writing a broad/spec-driven `spec.md`, organize major behavior slices into named sections (for example `M1`, `M2`, `M3`) and place labeled acceptance criteria (`A1`, `A2`, `A3`, ...) under every major section.
+- Do not create per-section `Non-Goals` or `Out of Scope` subsections. Put exclusions into the global scope sections or into explicit acceptance criteria.
+- When writing `contract.md`, create one top-level checkbox per major spec section and one indented `M#.A#` sub-check per linked acceptance criterion.
+- Preserve the same section title after each top-level `M#.` contract item that appears in the linked `spec.md` heading.
+- Copy the linked acceptance criterion text into each matching `M#.A#` sub-check. Do not paraphrase it.
+- A top-level contract item is only valid if all linked acceptance sub-checks for that spec section are satisfied.
 - Acceptance criteria must be:
   - concrete
   - auditable
   - reviewer-usable
-  - specific enough that an execution reviewer can mark the linked contract item `[x]` or `[ ]` without inventing missing policy
+  - specific enough that an execution reviewer can mark the linked `M#.A#` contract sub-check `[x]` or `[ ]` without inventing missing policy
 - For runtime enforcement, fallback behavior, validator correctness, or state integrity, include at least one reviewer-usable falsification hook, not only happy-path intent.
 - When execution is likely to happen in partial turns, write the docs so a local fix to one slice cannot be mistaken for whole-task approval while other approval-critical sections remain open.
 - If the implementation work may land in a narrower slice than the eventual approval surface, spell that out explicitly instead of leaving the reviewer to infer the boundary.
+- Make it explicit when already-satisfied contract items can become unsatisfied again after later changes and therefore must be re-audited every turn.
 - For a complete worked example of this structure, see `spec-contract-linking-example.md`.
 
 ## Agentic-system rule
@@ -83,10 +87,10 @@
 - If a dimension truly does not apply, say so explicitly instead of leaving it vague.
 
 ## Spec-to-contract linkage
-- After writing `spec.md`, derive `contract.md` from the approval-critical parts of the spec.
-- For each major spec section, ask:
-  - if this section were wrong, could approval be wrong?
-  - if yes, it needs a contract item or to be covered by a grouped contract item
+- After writing `spec.md`, derive `contract.md` from every major spec section.
+- Every major spec section needs its own top-level `M#` contract item.
+- Cite every acceptance criterion from that section as a matching `M#.A#` sub-check.
+- Keep the exact `M#.` section title and the exact linked acceptance criterion text when projecting into `contract.md`.
 - Do not write shallow “done / not done” contracts for broad work.
 - Do not restate the whole spec in `contract.md`; keep it short but traceable.
 - Use the worked example in `spec-contract-linking-example.md` as the canonical model.

@@ -403,6 +403,12 @@ Typical triggers:
 - non-obvious validation expectations
 - broad feature work that needs structured decomposition
 
+If you create `spec.md`, it should:
+
+- break approval-critical behavior into major `M#` sections
+- give each `M#` section labeled acceptance criteria such as `A1`, `A2`, `A3`
+- do not use per-section `Non-Goals` or `Out of Scope` subsections; put exclusions into the global scope sections or explicit acceptance criteria instead
+
 Non-blocking uncertainty may remain in `## Open Questions`, but blocking uncertainty should be asked before launch.
 
 ### `contract.md`
@@ -430,7 +436,7 @@ Good contract items usually cover:
 
 For broad/spec-driven work, that is only the minimum bar.
 
-`contract.md` should usually mirror the major `M*` sections in `spec.md`, and when a section has multiple acceptance criteria, the contract should make those criteria explicit enough that the reviewer cannot mark the section satisfied by interpretation alone.
+`contract.md` should mirror the major `M*` sections in `spec.md`. Each major section should have its own top-level `M#` checklist item, and every acceptance criterion from that section should be cited as a nested `M#.A#` sub-check so the reviewer cannot mark the section satisfied by interpretation alone.
 
 Do not paraphrase away approval-critical details from `spec.md` just to keep the contract short.
 
@@ -447,7 +453,7 @@ Before launching with `start`, the outer agent should mentally check:
 - is the request concrete enough for safe execution?
 - are the chosen docs the smallest sufficient set?
 - does `contract.md` make approval auditable?
-- is `contract.md` precise enough that each major spec section can only be approved by satisfying its linked acceptance criteria?
+- is `contract.md` precise enough that each major spec section can only be approved by satisfying every linked `M#.A#` acceptance sub-check?
 - would a reviewer know how to reject a bad implementation from these docs?
 - is this really a new run, or should it be `continue` or `reopen`?
 - am I still acting as harness operator rather than drifting into doing the target task myself?

@@ -13,8 +13,12 @@ Rules:
 - Keep detailed product reasoning, architecture, and implementation notes in `task.md`, `review.md`, or `spec.md`, not here.
 - The reviewer will copy this checklist into the reviewer turn message artifact and mark items with `[x]` / `[ ]`.
 - For broad/spec-driven work, treat this file as the approval projection of `spec.md`, not as an independent mini-spec.
-- Prefer one checkbox per major spec section or approval-critical group, not one checkbox per tiny implementation detail.
-- Each contract item should be traceable to a named spec section, and it is only checkable if all acceptance criteria for that linked spec section are satisfied.
+- For broad/spec-driven work, create one top-level checkbox per major spec section.
+- Ensure each top-level item is traceable to a named spec section.
+- Use the same section title after `M#.` that appears in the linked `spec.md` heading.
+- Under each top-level `M#` checkbox, add indented `M#.A#` sub-checks that cite every linked acceptance criterion from `spec.md`.
+- The top-level `M#` checkbox is only checkable if every nested `M#.A#` sub-check is checked.
+- Do not add nested checklist items that are not tied to a spec acceptance criterion.
 - When a contract item depends on runtime enforcement, fallback safety, validator correctness, or state integrity, phrase it so the reviewer can prove it on the real path rather than by helper equivalence alone.
 - See the worked example in `spec-contract-linking-example.md` for the intended spec→acceptance criteria→contract mapping.
 - For broad/spec-driven work, include at least:
@@ -36,3 +40,16 @@ Good examples:
 - [ ] Deployment instructions are present and accurate.
 - [ ] Required tests for the changed behavior are present and passing.
 - [ ] Analytics events for the onboarding funnel are implemented and documented.
+
+For broad/spec-driven work, prefer a shape like:
+
+```md
+# Definition of Done
+
+- [ ] M1. Section Name
+  - [ ] M1.A1 First linked acceptance criterion.
+  - [ ] M1.A2 Second linked acceptance criterion.
+- [ ] M2. Another Section
+  - [ ] M2.A1 First linked acceptance criterion.
+  - [ ] M2.A2 Second linked acceptance criterion.
+```

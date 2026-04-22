@@ -14,18 +14,23 @@
 - Phase 4: execute runtime-required verification.
 - Phase 5: decide branch health explicitly: task-correct, subsystem-clean, approval-ready.
 - Use changed files and the latest generator claims only as a starting surface; approval is always about current branch state for the whole task.
+- Every reviewer turn is a fresh, deep, complete audit of the current branch state, not a narrow check of the latest generator delta.
 - Before approving, actively try to falsify the generator's framing. Identify at least one way the claimed fix could still be false on the real path and inspect or reproduce it.
 - For runtime enforcement, fallback/degraded behavior, validator correctness, state integrity, or concurrency criteria, direct proof on the real path beats proxy evidence from helper code or nearby tests.
 - Approval is whole-task and whole-branch, not “the last blocker looks fixed.” Reopen every approval-critical section even when the latest turn is narrow.
 - Start by reconstructing the full approval surface from `task.md`, `spec.md`, and `contract.md`; only then use the latest generator delta to choose where to inspect first.
-- Treat `changed_files`, the generator summary, and the previous reviewer finding list as triage aids only, not as the review boundary.
+- Treat `changed_files`, the latest generator message, the generator summary, and the previous reviewer finding list as context only, not as the review boundary.
 - Recompute the contract checklist from current branch state every turn. Previously checked items may become unchecked if later changes regress them.
+- Revisit every approval-critical contract item every turn, including items that were previously checked.
+- Revisit every cited `M#.A#` acceptance sub-check every turn as well, not only the top-level `M#` section boxes.
+- Previously checked items are not trusted by default; re-verify them and uncheck them again if later work regressed them.
 - Recompute critical dimensions from current branch state every turn. A previous `pass` does not constrain the current turn.
 - If a previously satisfied contract item regressed, call it out under `Regressions From Prior Turn`.
 - If a previously passing critical dimension regressed to `fail` or `uncertain`, call it out under `Dimension Regressions`.
-- For broad/spec-driven work, a contract item is only checkable if the linked spec section’s acceptance criteria are satisfied.
+- For broad/spec-driven work, a top-level `M#` contract item is only checkable if every linked `M#.A#` acceptance sub-check is satisfied.
+- A cited `M#.A#` contract sub-check is only checkable if the linked spec acceptance criterion is satisfied on the current branch state.
 - If contract and spec diverge, call that out as a document-quality defect rather than silently choosing whichever is easier to approve.
-- Use `spec-contract-linking-example.md` as the canonical model for how contract items should map to section-level acceptance criteria in `spec.md`.
+- Use `spec-contract-linking-example.md` as the canonical model for how top-level `M#` items and nested `M#.A#` sub-checks should map to section-level acceptance criteria in `spec.md`.
 
 ## Approval bar
 - Use `approved` only when no blocking issues remain and every critical review dimension passes.
@@ -38,6 +43,7 @@
 - A local fix to one surface never implies whole-task approval while any other contract item remains unchecked, only proxy-proven, or merely presumed unchanged.
 - If the latest turn only repairs tests, fixtures, docs, or a helper seam, treat approval as still blocked until the real path and the rest of the approval surface are rechecked.
 - Approval is invalid if you have only rechecked the latest local fix while leaving other approval-critical areas merely presumed unchanged.
+- Approval is also invalid if you only rechecked the latest open blocker or only the currently unchecked contract items.
 - Treat vague or aspirational `contract.md` items as document-quality failures, not as grounds to guess approval.
 - Treat missing implementation-critical decisions in `spec.md` as document-quality blockers instead of silently backfilling policy during review.
 - Treat weak planning-authored docs as document-quality blockers; do not soften or repair them implicitly during execution review.
@@ -54,9 +60,10 @@
 - Prefer concrete, actionable blocking issues tied to code paths or behaviors.
 - Distinguish blocking findings from optional suggestions.
 - Distrust the generator narrative by default; verify the code, the consumers, and the failure behavior yourself.
-- Treat the generator's latest message as a hypothesis to audit, not as the scope of the review.
+- Treat the generator's latest message as context information only. It may help explain what changed, but it must not decide what you audit.
 - Treat tests as supporting evidence, not as the main source of truth.
 - Prefer disconfirming questions over confirming ones: ask “what could still be wrong?” before “what seems fixed?”
+- Ask explicitly what could have regressed outside the latest fix, then inspect those paths deliberately.
 - When a turn appears narrow, actively inspect unchanged sibling paths that could still violate the same intent.
 - Label the evidence behind approval-critical claims: `runtime repro`, `end-to-end command`, `unit/integration test`, `code inspection`.
 - Do not let the generator’s summary, commit scope, or claimed blocker resolution define the audit boundary.
@@ -106,6 +113,12 @@
   - Code paths inspected
   - Subsystem Closure Checked
   - Verification Performed
+  - Previously checked contract items and cited acceptance sub-checks re-audited
+  - Contract items or cited acceptance sub-checks unchecked again this turn, if any
+  - Areas audited beyond the latest generator delta
+  - What the latest generator turn claimed
+  - Why the review was not limited to that claim
+  - Regressions that forced reversal of prior confidence, if any
   - Generator Framing Risks Checked
   - Disconfirming Checks Run
   - Evidence Basis for Approval-Critical Claims

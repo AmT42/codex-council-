@@ -63,8 +63,9 @@ Planning artifacts live under:
 
 For broad/spec-driven work, the planner should:
 - write `spec.md` first as the full decision-complete truth
-- organize major behavior slices into named sections with acceptance criteria
-- then derive `contract.md` from the approval-critical sections of that spec
+- organize major behavior slices into named `M#` sections with labeled acceptance criteria (`A1`, `A2`, `A3`, ...)
+- avoid per-section `Non-Goals` or `Out of Scope` subsections
+- then derive `contract.md` from that spec with top-level `M#` items and cited `M#.A#` sub-checks
 - use [`spec-contract-linking-example.md`](./spec-contract-linking-example.md) as the canonical model
 
 ## Hard mode

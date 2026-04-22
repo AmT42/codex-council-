@@ -56,8 +56,13 @@ Dimensions:
 - toy-like prompt/tool/schema descriptions for agentic work
 - missing implementation-critical decisions
 - specs that would force the execution council to invent policy
-- broad/spec-driven `spec.md` with no section-level acceptance criteria
+- `spec.md` with no major `M#` sections for approval-critical behavior
+- broad/spec-driven `spec.md` with no labeled acceptance criteria (`A1`, `A2`, ...) under its major sections
+- any per-section `Non-Goals` or `Out of Scope` subsection
 - `contract.md` that is not clearly derived from the approval-critical spec sections
+- `contract.md` with no top-level `M#` item for a spec section or no cited `M#.A#` sub-check for a linked acceptance criterion
+- `contract.md` whose top-level `M#.` title drifts from the linked `spec.md` section title
+- `contract.md` whose `M#.A#` sub-check text drifts from the linked acceptance criterion text
 
 ## Verdict discipline
 

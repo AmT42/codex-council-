@@ -8,14 +8,14 @@ For most non-trivial spec-driven tasks, keep `contract.md` alongside this file s
 
 If this spec was produced in a planning-stage `hard` mode, treat it as a decision-complete execution contract. Do not rely on the generator or reviewer to silently fill in omitted policy later.
 
-For broad/spec-driven work, organize the spec into named major sections such as `M1`, `M2`, `M3` when that structure improves traceability.
+When you use `spec.md`, organize approval-critical behavior into named major sections such as `M1`, `M2`, `M3`.
 Each major section should describe:
 - the behavior or design intent
 - important constraints or boundaries for that slice
 - acceptance criteria for that slice
 
 Those acceptance criteria are the real test of “done right”.
-They live here in `spec.md`, not in `contract.md`.
+They are the source of truth here in `spec.md`, and `contract.md` must cite them explicitly.
 
 See the full worked example in:
 
@@ -55,14 +55,17 @@ For broad/spec-driven work, prefer a structure like:
 ## M1. Section Name
 
 Describe the intended behavior and boundaries for this slice.
+Do not add a separate `### Non-Goals` or `### Out of Scope` subsection here.
+If a behavior must be excluded, put that exclusion into the global scope sections above or into an explicit acceptance criterion below.
 
 ### Acceptance Criteria
-- ...
-- ...
-- ...
+- A1. ...
+- A2. ...
+- A3. ...
 ```
 
 Use as many major sections as needed, but keep them meaningful. Do not make one section per trivial implementation detail.
+Every approval-critical `M#` section must have `### Acceptance Criteria`, and each acceptance bullet should be explicit enough to become a cited `M#.A#` sub-check in `contract.md`.
 
 For a complete worked example of section ids, section-level acceptance criteria, and how those map into `contract.md`, see:
 
@@ -130,6 +133,7 @@ Describe known technical boundaries, touched areas, interfaces, or architectural
 Describe how the work should be validated.
 
 When the spec is broad enough to need `contract.md`, ensure the validation expectations are traceable to the major spec sections so the contract can act as the approval projection of the spec.
+Do not invent acceptance-only requirements in `contract.md` that are missing from the spec.
 
 When relevant, include both:
 - a positive-path check

@@ -16,6 +16,7 @@ This task is handled by a two-agent council:
 - `review.md` is the canonical review/findings input when the task starts from findings or debugging work.
 - `spec.md` is the detailed design doc when the task needs deeper structure than `task.md`.
 - `contract.md` is the optional definition of done and approval checklist.
+- When `spec.md` exists, its major `M#` sections and labeled `A#` acceptance criteria are the source of truth, and `contract.md` should mirror them with top-level `M#` items and cited `M#.A#` sub-checks.
 - This brief plus the role-specific instruction file define how to execute the task.
 - If these documents disagree, the council must surface the conflict instead of guessing.
 - If you need to know whether a document changed between turns, inspect the canonical files directly.
@@ -30,6 +31,7 @@ This task is handled by a two-agent council:
 - Reviewer must adjudicate generator disagreements with evidence and must not keep repeating the same blocker without stronger evidence.
 - Blocker and timeout summaries must be evidence-first: state observed behavior and use the narrowest proven claim instead of naming a guessed root cause.
 - If `contract.md` is present, reviewer approves only when the checklist is satisfied and all critical review dimensions pass.
+- Reviewer must recompute both top-level contract items and cited acceptance sub-checks from current branch state every turn; previously checked items may become unchecked again on regression.
 - For broad/spec-driven work, `spec.md` should be decision-complete for the relevant runtime/state/fallback/integrity dimensions. Missing implementation-critical policy is a document-quality blocker, not something the council should quietly invent.
 - If planning-authored docs were produced before execution, treat those decision-complete requirements as binding execution inputs, not as suggestions to soften during implementation or review.
 - The reviewer should start from the changed code and failure behavior, not from test results alone. Passing tests are supporting evidence, not sufficient proof of correctness.

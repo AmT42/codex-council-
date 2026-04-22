@@ -38,8 +38,11 @@ In the `prepare` loop, the planner writes:
 - Do not use vague words like `production-ready`, `robust`, `good UX`, or `enterprise-grade` without decomposition.
 - Prefer explicit decisions over leaving policy for the generator to invent.
 - For agentic work, treat prompts, system instructions, tool descriptions, schemas, evaluator behavior, and approval/sandbox posture as first-class product interfaces.
-- For broad/spec-driven work, organize `spec.md` into named major sections and place acceptance criteria under each section.
-- Derive `contract.md` from the approval-critical parts of `spec.md`; do not write a shallow generic contract and do not restate the whole spec.
+- For broad/spec-driven work, organize `spec.md` into named major `M#` sections and place labeled acceptance criteria (`A1`, `A2`, `A3`, ...) under every major section.
+- Do not create per-section `Non-Goals` or `Out of Scope` subsections; express exclusions in the global scope sections or in explicit acceptance criteria.
+- Derive `contract.md` from every major spec section in `spec.md`; use one top-level `M#` item per section plus nested `M#.A#` sub-checks rather than a shallow generic contract.
+- Preserve the same section title after each top-level `M#.` contract item that appears in the linked `spec.md` heading.
+- Copy the linked acceptance criterion text into each matching `M#.A#` sub-check. Do not paraphrase it.
 
 ## Completeness matrix
 
@@ -62,12 +65,11 @@ If a dimension truly does not apply, say so explicitly.
 ## Spec-to-contract linkage
 
 - Write `spec.md` first as the full decision-complete truth.
-- Then derive `contract.md` from the approval-critical parts of that spec.
-- For each major spec section, ask:
-  - if this section were wrong, could approval be wrong?
-  - if yes, it needs a contract item or to be covered by a grouped contract item
-- A contract item is only valid if all linked acceptance criteria for that spec section are satisfied.
-- If a grouped contract item would let the reviewer approve while one linked acceptance criterion still fails, split that item into explicit sub-checks.
+- Then derive `contract.md` from every major spec section in that spec.
+- Every major spec section needs its own top-level `M#` contract item.
+- A top-level contract item is only valid if all linked `M#.A#` acceptance sub-checks for that spec section are satisfied.
+- If a contract structure would let the reviewer approve while one linked acceptance criterion still fails, split that requirement into explicit `M#.A#` sub-checks.
+- Keep the exact `M#.` section title and the exact linked acceptance criterion text when projecting into `contract.md`.
 - Use [`spec-contract-linking-example.md`](./spec-contract-linking-example.md) as the canonical model.
 
 ## Revision protocol

@@ -17,6 +17,7 @@
 - If the available documents disagree, do not guess. Emit `needs_human`.
 - If the task documents are too vague, aspirational, or non-auditable to support a safe implementation, do not compensate by inventing missing requirements. Emit `needs_human`.
 - For broad/spec-driven work, treat `spec.md` as decision-complete, not merely directional. If a relevant runtime, state, fallback, performance, or ownership decision is still missing, do not invent it in code. Emit `needs_human`.
+- For broad/spec-driven work, treat the `A#` acceptance criteria in each `M#` spec section as binding implementation requirements and treat the matching `M#.A#` contract sub-checks as the explicit approval surface.
 - If the task has a primary user-facing path plus a maintenance/background/helper path, do not implement the helper path as the only solution unless the task documents explicitly say that is acceptable.
 
 ## Change strategy
@@ -32,6 +33,7 @@
 - Do not frame a narrow turn as if it resolved the whole task. If you fixed one blocker, say which approval-critical areas were not re-proved by this turn.
 - Do not steer the reviewer toward only your latest delta. Call out adjacent surfaces that still need re-audit when the task touches them.
 - Treat prior reviewer blockers as a starting fix queue, not as the whole review boundary.
+- Do not imply that fixing the latest blocker or the latest unchecked contract item is enough for approval; the reviewer must still re-audit the whole task from current branch state.
 - If you changed repo-tracked files in this turn, create a git commit for those changes before writing the turn artifacts.
 - If you change a state, metadata, cache, checkpoint, fallback, or health/coverage contract, inspect both the writers and the downstream readers/consumers before ending the turn.
 - If `spec.md` includes decision-completeness subsections, verify the implementation follows those concrete decisions rather than solving the problem a different way.
@@ -71,8 +73,8 @@
   - Verification performed
   - Disconfirming checks run and what each was trying to falsify
   - What remains unproven or only indirectly proven after this turn
-  - Which contract items or adjacent review surfaces still need reviewer re-audit
-  - Remaining open issues or contract items not yet satisfied
+  - Which contract items, cited acceptance sub-checks, or adjacent review surfaces still need reviewer re-audit
+  - Remaining open issues or contract items / acceptance sub-checks not yet satisfied
   - Known risks or blockers
 - If the turn is blocked, also include:
   - Last confirmed progress point

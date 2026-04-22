@@ -505,6 +505,17 @@ reviewer_reset_mode = "wrong"
             self.assertEqual(MODULE.lint_spec_workspace_readiness(task_root)[0], [])
             self.assertEqual(MODULE.lint_contract_workspace_readiness(task_root)[0], [])
 
+    def test_golden_brief_quality_examples_pass_start_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            brief_root = FIXTURES_ROOT / "brief_quality"
+            (task_root / MODULE.TASK_FILENAME).write_text((brief_root / "good_task.md").read_text(encoding="utf-8"), encoding="utf-8")
+            (task_root / MODULE.SPEC_FILENAME).write_text((brief_root / "good_spec.md").read_text(encoding="utf-8"), encoding="utf-8")
+            (task_root / MODULE.CONTRACT_FILENAME).write_text((brief_root / "good_contract.md").read_text(encoding="utf-8"), encoding="utf-8")
+            inspection = MODULE.inspect_task_workspace(task_root)
+            MODULE.validate_task_workspace_for_start(task_root, inspection)
+
     def test_lint_task_rejects_generic_success_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
@@ -574,7 +585,13 @@ reviewer_reset_mode = "wrong"
                 "## Out of Scope\n\n- Data mutation\n\n"
                 "## Constraints\n\n- Preserve auth boundaries.\n\n"
                 "## Existing Context\n\nThe repo already has billing read models.\n\n"
-                "## Desired Behavior\n\nThe page shows billing status and retry health.\n\n"
+                "## Desired Behavior\n\n"
+                "## M1. Reporting Dashboard Surface\n\n"
+                "The page shows billing status and retry health.\n\n"
+                "### Acceptance Criteria\n"
+                "- A1. Operators can inspect billing status from the reporting page.\n"
+                "- A2. Retry health is visible on the main reporting surface.\n"
+                "- A3. The dashboard remains read-only.\n\n"
                 "### Source of Truth / Ownership\n\nExisting billing tables remain authoritative and the dashboard does not create a new state store.\n\n"
                 "### Read Path\n\nRead through the current billing service and repository path.\n\n"
                 "### Write Path / Mutation Flow\n\nNot applicable because this dashboard is read-only and must not mutate billing state.\n\n"
@@ -887,20 +904,27 @@ reviewer_reset_mode = "wrong"
             self.assertIn("Do not repeat the same blocker without stronger evidence", prompt)
             self.assertIn("directly supported by evidence or only inferred from symptoms", prompt)
             self.assertIn("narrowest justified blocker wording", prompt)
-            self.assertIn("Treat the generator's latest message as a hypothesis about the branch", prompt)
+            self.assertIn("Treat the generator's latest message as context information only", prompt)
             self.assertIn("Approval is whole-task and whole-branch", prompt)
             self.assertIn("Reconstruct the full approval surface", prompt)
             self.assertIn("Review scope note:", prompt)
-            self.assertIn("Primary review scope: full current branch state against canonical docs.", prompt)
-            self.assertIn("Latest turn evidence (not review scope)", prompt)
-            self.assertIn("Latest changed surface to inspect first:", prompt)
-            self.assertIn("Expand from this surface to the full approval surface before deciding approval.", prompt)
-            self.assertIn("Minimum verification commands for the latest touched surface:", prompt)
-            self.assertIn("not sufficient proof for approval", prompt)
+            self.assertIn("Primary review scope: the full current branch state against `task.md`, `spec.md`, and `contract.md`.", prompt)
+            self.assertIn("Latest generator context only (not review scope)", prompt)
+            self.assertIn("Latest generator context only (not review scope):", prompt)
+            self.assertIn("context information only", prompt)
+            self.assertIn("revisit the full approval surface, including already-checked contract items", prompt)
+            self.assertIn("Minimum context checks only (not approval proof):", prompt)
+            self.assertIn("complete full-task audit", prompt)
             self.assertIn("Generator Framing Risks Checked", prompt)
             self.assertIn("Disconfirming Checks Run", prompt)
             self.assertIn("Evidence Basis for Approval-Critical Claims", prompt)
             self.assertIn("What remains unproven after this turn", prompt)
+            self.assertIn("Previously checked contract items and cited acceptance sub-checks re-audited", prompt)
+            self.assertIn("Contract items or cited acceptance sub-checks unchecked again this turn, if any", prompt)
+            self.assertIn("Areas audited beyond the latest generator delta", prompt)
+            self.assertIn("What the latest generator turn claimed", prompt)
+            self.assertIn("Why the review was not limited to that claim", prompt)
+            self.assertIn("Regressions that forced reversal of prior confidence", prompt)
             self.assertIn("Key Code Paths Inspected", prompt)
             self.assertIn("Verification Performed", prompt)
             self.assertIn("Branch Health Verdict", prompt)
@@ -972,7 +996,10 @@ reviewer_reset_mode = "wrong"
             self.assertIn("Blocker Diagnosis Check", prompt)
             self.assertIn("Do not inherit prior checklist state", prompt)
             self.assertIn("previously satisfied contract item", prompt)
-            self.assertIn("identify at least one way the generator's framing could still be wrong", prompt)
+            self.assertIn("Re-audit every approval-critical contract section and every cited acceptance sub-check from current branch state", prompt)
+            self.assertIn("already-checked contract items that may need to be unchecked again on regression", prompt)
+            self.assertIn("Ask explicitly what could have regressed outside the latest fix", prompt)
+            self.assertIn("only rechecked the latest fix, the latest open blocker, or the currently unchecked contract items", prompt)
             self.assertIn("Evidence Basis for Approval-Critical Claims", prompt)
 
     def test_build_reviewer_prompt_includes_required_commands_and_evidence_path(self) -> None:
@@ -996,8 +1023,34 @@ reviewer_reset_mode = "wrong"
                 inline_context=True,
             )
             self.assertIn("Follow this protocol in order:", prompt)
-            self.assertIn("disconfirming check on the real path", prompt)
+            self.assertIn("targeted disconfirming real-path check", prompt)
+            self.assertIn("latest generator turn only as background context", prompt)
             self.assertIn("pytest -q tests/test_example.py", prompt)
+
+    def test_build_evaluator_brief_labels_latest_surface_as_starting_point_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            inspection = MODULE.inspect_task_workspace(task_root)
+            brief = MODULE.build_evaluator_brief(
+                repo_root,
+                task_root,
+                inspection,
+                turn_dir,
+                state={"review_bridge": {"mode": "internal"}, "council_config": self.build_council_config()},
+                phase="implementation-review",
+                initial_review_surface=["src/example.py"],
+                required_commands=["pytest -q tests/test_example.py"],
+            )
+            self.assertIn("Primary review scope: the full current branch state against `task.md`, `spec.md`, and `contract.md`.", brief)
+            self.assertIn("revisit all approval-critical areas, including already-checked contract items", brief)
+            self.assertIn("Latest generator artifacts are background context only", brief)
+            self.assertIn("## Latest Generator Context Only", brief)
+            self.assertIn("Use this only as background after reconstructing the full approval surface", brief)
+            self.assertIn("## Latest-Context Background Checks Only", brief)
+            self.assertIn("never replace a full-task, full-branch re-audit", brief)
 
     def test_build_reviewer_prompt_warns_when_change_surface_is_tests_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3936,7 +3989,7 @@ reviewer_reset_mode = "wrong"
                 MODULE.validate_task_workspace_for_start(task_root, inspection)
             self.assertIn("missing `### Acceptance Criteria`", str(ctx.exception))
 
-    def test_validate_task_workspace_for_start_rejects_missing_contract_section_linkage(self) -> None:
+    def test_validate_task_workspace_for_start_rejects_unlabeled_acceptance_criteria(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir)
             task_root = self.scaffold_base_workspace(repo_root)
@@ -3955,7 +4008,126 @@ reviewer_reset_mode = "wrong"
             inspection = MODULE.inspect_task_workspace(task_root)
             with self.assertRaises(SystemExit) as ctx:
                 MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("missing linkage for: M1", str(ctx.exception))
+            self.assertIn("must label acceptance criteria as `- A1. ...`", str(ctx.exception))
+
+    def test_validate_task_workspace_for_start_rejects_missing_contract_acceptance_subchecks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Acceptance Criteria\n- A1. The primary workflow works on the intended path.\n- A2. Validation covers the changed behavior.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] M1. Workflow Surface\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("must cite every acceptance criterion as indented sub-checks", str(ctx.exception))
+
+    def test_validate_task_workspace_for_start_rejects_contract_acceptance_text_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Acceptance Criteria\n- A1. The primary workflow works on the intended path.\n- A2. Validation covers the changed behavior.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] M1. Workflow Surface\n  - [ ] M1.A1 The wrong path works instead.\n  - [ ] M1.A2 Validation covers the changed behavior.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("must cite the linked acceptance criterion text", str(ctx.exception))
+
+    def test_validate_task_workspace_for_start_rejects_contract_section_title_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Acceptance Criteria\n- A1. The primary workflow works on the intended path.\n- A2. Validation covers the changed behavior.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] M1. Totally Unrelated Title\n  - [ ] M1.A1 The primary workflow works on the intended path.\n  - [ ] M1.A2 Validation covers the changed behavior.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("must use the same section title", str(ctx.exception))
+
+    def test_validate_task_workspace_for_start_rejects_contract_acceptance_operator_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Acceptance Criteria\n- A1. p99 latency stays <= 500 ms for the primary workflow.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] M1. Workflow Surface\n  - [ ] M1.A1 p99 latency stays >= 500 ms for the primary workflow.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("must cite the linked acceptance criterion text", str(ctx.exception))
+
+    def test_validate_task_workspace_for_start_rejects_top_level_acceptance_subcheck(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            task_root.mkdir(parents=True)
+            brief_root = FIXTURES_ROOT / "brief_quality"
+            (task_root / MODULE.TASK_FILENAME).write_text((brief_root / "good_task.md").read_text(encoding="utf-8"), encoding="utf-8")
+            (task_root / MODULE.SPEC_FILENAME).write_text((brief_root / "good_spec.md").read_text(encoding="utf-8"), encoding="utf-8")
+            contract_text = (brief_root / "good_contract.md").read_text(encoding="utf-8") + "\n- [ ] M1.A99 Totally unrelated top-level item.\n"
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(contract_text, encoding="utf-8")
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("must be indented under the top-level `M1` checklist item", str(ctx.exception))
+
+    def test_validate_task_workspace_for_start_rejects_duplicate_major_spec_sections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. First Workflow Surface\n\nDescribe the first behavior.\n\n### Acceptance Criteria\n- A1. The first workflow path works.\n\n## M1. Duplicate Workflow Surface\n\nDescribe the duplicate behavior.\n\n### Acceptance Criteria\n- A1. The duplicate workflow path works.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] M1. First Workflow Surface\n  - [ ] M1.A1 The first workflow path works.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("repeats major section ids", str(ctx.exception))
 
     def test_validate_task_workspace_for_start_does_not_confuse_m1_with_m10_linkage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3966,7 +4138,7 @@ reviewer_reset_mode = "wrong"
                 encoding="utf-8",
             )
             (task_root / MODULE.SPEC_FILENAME).write_text(
-                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. First Surface\n\nDescribe the first behavior.\n\n### Acceptance Criteria\n- The first surface works.\n- The first validation exists.\n\n## M10. Tenth Surface\n\nDescribe the tenth behavior.\n\n### Acceptance Criteria\n- The tenth surface works.\n- The tenth validation exists.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
+                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. First Surface\n\nDescribe the first behavior.\n\n### Acceptance Criteria\n- A1. The first surface works.\n- A2. The first validation exists.\n\n## M10. Tenth Surface\n\nDescribe the tenth behavior.\n\n### Acceptance Criteria\n- A1. The tenth surface works.\n- A2. The tenth validation exists.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
                 encoding="utf-8",
             )
             (task_root / MODULE.CONTRACT_FILENAME).write_text(
@@ -4716,9 +4888,10 @@ reviewer_reset_mode = "wrong"
         self.assertIn("decision-complete spec", planner_instructions)
         self.assertIn("tool descriptions, tool schemas", planner_instructions)
         self.assertIn("execution-safe", planner_instructions)
-        self.assertIn("derive `contract.md` from the approval-critical parts of that spec", planner_instructions)
+        self.assertIn("derive `contract.md` from every major spec section in that spec", planner_instructions)
         self.assertIn("reviewer-usable falsification hook", planner_instructions)
         self.assertIn("local fix to one slice cannot be mistaken for whole-task approval", planner_instructions)
+        self.assertIn("already-satisfied contract items can become unsatisfied again", planner_instructions)
         self.assertIn("spec-contract-linking-example.md", planner_instructions)
         self.assertIn("strict external evaluator", intent_critic_instructions)
         self.assertIn("hidden assumptions presented as facts", intent_critic_instructions)
@@ -4726,6 +4899,8 @@ reviewer_reset_mode = "wrong"
         self.assertIn("helper-only validation guidance", intent_critic_instructions)
         self.assertIn("execution scope that is narrower than the approval scope", intent_critic_instructions)
         self.assertIn("helper, background, repair, or maintenance paths", intent_critic_instructions)
+        self.assertIn("checked items feel settled", intent_critic_instructions)
+        self.assertIn("re-audit and re-uncheck behavior explicit", intent_critic_instructions)
         self.assertIn("Reject docs that would let an execution reviewer focus only on the latest local fix", intent_critic_instructions)
         self.assertIn("spec-to-contract traceability", intent_critic_instructions)
         self.assertIn("spec-contract-linking-example.md", intent_critic_instructions)
@@ -4736,13 +4911,18 @@ reviewer_reset_mode = "wrong"
         self.assertIn("Do not frame a narrow turn as if it resolved the whole task", generator_instructions)
         self.assertIn("adjacent review surfaces still need reviewer re-audit", generator_instructions)
         self.assertIn("starting fix queue, not as the whole review boundary", generator_instructions)
+        self.assertIn("latest blocker or the latest unchecked contract item is enough for approval", generator_instructions)
         self.assertIn("vague or aspirational `contract.md` items", reviewer_instructions)
         self.assertIn("actively try to falsify the generator's framing", reviewer_instructions)
         self.assertIn("tests-only, docs-only, fixture-only, or council-artifact-only changes", reviewer_instructions)
+        self.assertIn("fresh, deep, complete audit of the current branch state", reviewer_instructions)
         self.assertIn("Approval is whole-task and whole-branch", reviewer_instructions)
         self.assertIn("local fix to one surface never implies whole-task approval", reviewer_instructions)
-        self.assertIn("triage aids only, not as the review boundary", reviewer_instructions)
+        self.assertIn("latest generator message, the generator summary, and the previous reviewer finding list as context only", reviewer_instructions)
+        self.assertIn("Revisit every approval-critical contract item every turn", reviewer_instructions)
+        self.assertIn("Previously checked items are not trusted by default", reviewer_instructions)
         self.assertIn("Approval is invalid if you have only rechecked the latest local fix", reviewer_instructions)
+        self.assertIn("latest open blocker or only the currently unchecked contract items", reviewer_instructions)
         self.assertIn("What remains unproven after this turn", reviewer_instructions)
         self.assertIn("Evidence Basis for Approval-Critical Claims", reviewer_instructions)
         self.assertIn("decision-complete", generator_instructions)

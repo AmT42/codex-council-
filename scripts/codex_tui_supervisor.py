@@ -16,7 +16,7 @@ import textwrap
 import time
 import tomllib
 import uuid
-from typing import Literal
+from typing import Literal, cast
 
 
 COUNCIL_DIRNAME = ".codex-council"
@@ -109,7 +109,12 @@ TASK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 GITHUB_PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/([0-9]+)(?:/.*)?$")
 CHECKLIST_ITEM_RE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+\S")
 REVIEW_ITEM_RE = re.compile(r"^\s*[-*]\s+\S")
-SPEC_MAJOR_SECTION_RE = re.compile(r"^##\s+(M\d+)\.\s+.+$")
+SPEC_MAJOR_SECTION_RE = re.compile(r"^##\s+(M\d+)\.\s+(.+)$")
+SPEC_ACCEPTANCE_ITEM_RE = re.compile(r"^\s*[-*]\s+A(\d+)\.\s+(.+?)\s*$")
+CONTRACT_SECTION_ITEM_RE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+(M\d+)\.\s+(.+?)\s*$")
+CONTRACT_ACCEPTANCE_ITEM_RE = re.compile(r"^\s{2,}(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+(M\d+)\.A(\d+)\b[.:]?\s+(.+?)\s*$")
+CONTRACT_ANY_ACCEPTANCE_ITEM_RE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+(M\d+)\.A(\d+)\b[.:]?\s+(.+?)\s*$")
+SPEC_SECTION_ANTI_HEADING_RE = re.compile(r"^###\s+(?:Non-Goals?|Non Goals?|Out of Scope)\b", re.IGNORECASE)
 CONTRACT_PLACEHOLDER_MARKERS = (
     "Write the definition of done for this task here as a checklist.",
     "Bad examples:",
@@ -1250,6 +1255,11 @@ def normalize_text(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
 
+def normalize_projection_text(value: str) -> str:
+    cleaned = value.replace("`", "").replace("*", "")
+    return re.sub(r"\s+", " ", cleaned.lower()).strip()
+
+
 def meaningful_word_count(value: str) -> int:
     return len(re.findall(r"[A-Za-z0-9_/-]+", value))
 
@@ -1318,6 +1328,74 @@ def major_spec_section_text(spec_text: str, section_id: str) -> str:
         if line.strip().startswith(f"## {section_id}."):
             return extract_markdown_section(spec_text, line.strip())
     return ""
+
+
+def major_spec_section_title(spec_text: str, section_id: str) -> str:
+    for line in spec_text.splitlines():
+        match = SPEC_MAJOR_SECTION_RE.match(line.strip())
+        if match and match.group(1) == section_id:
+            return match.group(2).strip()
+    return ""
+
+
+def spec_section_acceptance_items(section_text: str) -> list[tuple[int, str]]:
+    acceptance_text = extract_markdown_subsection(section_text, "### Acceptance Criteria")
+    items: list[tuple[int, str]] = []
+    for line in acceptance_text.splitlines():
+        match = SPEC_ACCEPTANCE_ITEM_RE.match(line)
+        if match:
+            items.append((int(match.group(1)), match.group(2).strip()))
+    return items
+
+
+def contract_spec_projection(contract_text: str) -> tuple[dict[str, dict[str, object]], list[str]]:
+    sections: dict[str, dict[str, object]] = {}
+    errors: list[str] = []
+    current_section_id: str | None = None
+    for line_no, line in enumerate(contract_text.splitlines(), start=1):
+        section_match = CONTRACT_SECTION_ITEM_RE.match(line)
+        if section_match:
+            section_id = section_match.group(1)
+            section = sections.setdefault(section_id, {"line_no": None, "title": "", "acceptance": []})
+            if section["line_no"] is not None:
+                errors.append(f"{CONTRACT_FILENAME} repeats top-level checklist item `{section_id}`")
+            section["line_no"] = line_no
+            section["title"] = section_match.group(2).strip()
+            current_section_id = section_id
+            continue
+        acceptance_match = CONTRACT_ACCEPTANCE_ITEM_RE.match(line)
+        if acceptance_match:
+            section_id = acceptance_match.group(1)
+            section = sections.setdefault(section_id, {"line_no": None, "title": "", "acceptance": []})
+            cast(list[dict[str, object]], section["acceptance"]).append(
+                {
+                    "number": int(acceptance_match.group(2)),
+                    "text": acceptance_match.group(3).strip(),
+                    "line_no": line_no,
+                }
+            )
+            if current_section_id != section_id:
+                errors.append(
+                    f"{CONTRACT_FILENAME} line {line_no} must appear under the top-level `{section_id}` checklist item"
+                )
+            continue
+        malformed_acceptance_match = CONTRACT_ANY_ACCEPTANCE_ITEM_RE.match(line)
+        if malformed_acceptance_match:
+            section_id = malformed_acceptance_match.group(1)
+            criterion_number = malformed_acceptance_match.group(2)
+            errors.append(
+                f"{CONTRACT_FILENAME} line {line_no} acceptance sub-check `{section_id}.A{criterion_number}` must be indented under the top-level `{section_id}` checklist item"
+            )
+            current_section_id = None
+            continue
+        if current_section_id and CHECKLIST_ITEM_RE.match(line) and (line.startswith(" ") or line.startswith("\t")):
+            errors.append(
+                f"{CONTRACT_FILENAME} line {line_no} nested under `{current_section_id}` must cite a linked acceptance criterion as `{current_section_id}.A#`"
+            )
+            continue
+        if CHECKLIST_ITEM_RE.match(line):
+            current_section_id = None
+    return sections, errors
 
 
 def section_contains_placeholder(section_text: str, markers: tuple[str, ...]) -> bool:
@@ -1427,6 +1505,16 @@ def lint_spec_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]
             errors.append(f"{SPEC_FILENAME} is missing required heading: {heading}")
     if any(marker in spec_text for marker in SPEC_PLACEHOLDER_MARKERS):
         errors.append(f"{SPEC_FILENAME} still contains scaffold placeholder text")
+    section_ids = major_spec_section_ids(spec_text)
+    duplicate_section_ids = sorted({section_id for section_id in section_ids if section_ids.count(section_id) > 1})
+    if duplicate_section_ids:
+        errors.append(
+            f"{SPEC_FILENAME} repeats major section ids; each `M#` section must be unique: {', '.join(duplicate_section_ids)}"
+        )
+    if not section_ids:
+        errors.append(
+            f"{SPEC_FILENAME} must organize approval-critical behavior into named major sections such as `M1`, `M2`, `M3`"
+        )
     for heading, minimum_words in (
         ("## Goal", 4),
         ("## User Outcome", 4),
@@ -1434,23 +1522,53 @@ def lint_spec_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]
         ("## Validation Expectations", 4),
     ):
         section_text = extract_markdown_section(spec_text, heading)
+        if heading == "## Desired Behavior" and section_ids:
+            continue
         if not section_text or meaningful_word_count(section_text) < minimum_words:
             errors.append(f"{SPEC_FILENAME} needs a more complete `{heading}` section")
     for heading in ("## In Scope", "## Out of Scope", "## Constraints", "## Technical Boundaries"):
         section_text = extract_markdown_section(spec_text, heading)
         if meaningful_word_count(section_text) < 2:
             warnings.append(f"{SPEC_FILENAME} should make `{heading}` more explicit for safe execution")
-    for section_id in major_spec_section_ids(spec_text):
+    for section_id in section_ids:
         section_text = major_spec_section_text(spec_text, section_id)
+        for line in section_text.splitlines():
+            if SPEC_SECTION_ANTI_HEADING_RE.match(line.strip()):
+                errors.append(
+                    f"{SPEC_FILENAME} section `{section_id}` should express exclusions through acceptance criteria or the global scope sections, not `{line.strip()}`"
+                )
         acceptance_text = extract_markdown_subsection(section_text, "### Acceptance Criteria")
         if not acceptance_text:
             errors.append(f"{SPEC_FILENAME} section `{section_id}` is missing `### Acceptance Criteria`")
             continue
-        acceptance_lines = [strip_bullet_prefix(line) for line in acceptance_text.splitlines() if REVIEW_ITEM_RE.match(line)]
+        acceptance_lines = [line.strip() for line in acceptance_text.splitlines() if line.strip()]
         if not acceptance_lines:
             errors.append(f"{SPEC_FILENAME} section `{section_id}` must include bullet acceptance criteria")
             continue
-        if any(meaningful_word_count(line) < 4 for line in acceptance_lines):
+        if any(not REVIEW_ITEM_RE.match(line) for line in acceptance_lines):
+            errors.append(f"{SPEC_FILENAME} section `{section_id}` must use only bullet items under `### Acceptance Criteria`")
+            continue
+        parsed_items: list[tuple[int, str]] = []
+        unlabeled_items = False
+        for line in acceptance_lines:
+            match = SPEC_ACCEPTANCE_ITEM_RE.match(line)
+            if not match:
+                unlabeled_items = True
+                continue
+            parsed_items.append((int(match.group(1)), match.group(2).strip()))
+        if unlabeled_items:
+            errors.append(
+                f"{SPEC_FILENAME} section `{section_id}` must label acceptance criteria as `- A1. ...`, `- A2. ...`, and so on"
+            )
+            continue
+        expected_numbers = list(range(1, len(parsed_items) + 1))
+        actual_numbers = [number for number, _ in parsed_items]
+        if actual_numbers != expected_numbers:
+            errors.append(
+                f"{SPEC_FILENAME} section `{section_id}` must number acceptance criteria consecutively as `A1`, `A2`, `A3`, ..."
+            )
+            continue
+        if any(meaningful_word_count(text) < 4 for _, text in parsed_items):
             errors.append(f"{SPEC_FILENAME} section `{section_id}` has acceptance criteria that are too short to be auditable")
     for heading in SPEC_DECISION_REQUIRED_HEADINGS:
         subsection_text = extract_markdown_subsection(spec_text, heading)
@@ -1507,16 +1625,63 @@ def lint_broad_spec_contract_alignment(task_root: Path) -> tuple[list[str], list
     if not checklist_items:
         return errors, warnings
     section_ids = major_spec_section_ids(spec_text)
+    section_projection, projection_errors = contract_spec_projection(contract_text)
+    errors.extend(projection_errors)
     if section_ids:
         missing_links = [
             section_id
             for section_id in section_ids
-            if not any(re.search(rf"\b{re.escape(section_id)}\b", item) for item in checklist_items)
+            if section_projection.get(section_id, {}).get("line_no") is None
         ]
         if missing_links:
             errors.append(
-                f"{CONTRACT_FILENAME} must trace major spec sections into checklist items; missing linkage for: {', '.join(missing_links)}"
+                f"{CONTRACT_FILENAME} must trace every major spec section into its own top-level checklist item; missing linkage for: {', '.join(missing_links)}"
             )
+        for section_id in section_ids:
+            spec_acceptance = spec_section_acceptance_items(major_spec_section_text(spec_text, section_id))
+            spec_title = major_spec_section_title(spec_text, section_id)
+            contract_title = str(section_projection.get(section_id, {}).get("title", "")).strip()
+            if contract_title and spec_title and normalize_projection_text(contract_title) != normalize_projection_text(spec_title):
+                errors.append(
+                    f"{CONTRACT_FILENAME} top-level item `{section_id}` must use the same section title as {SPEC_FILENAME}: `{spec_title}`"
+                )
+            if not spec_acceptance:
+                continue
+            contract_acceptance = cast(list[dict[str, object]], section_projection.get(section_id, {}).get("acceptance", []))
+            if not contract_acceptance:
+                errors.append(
+                    f"{CONTRACT_FILENAME} section `{section_id}` must cite every acceptance criterion as indented sub-checks (`{section_id}.A1`, `{section_id}.A2`, ...)"
+                )
+                continue
+            numbers = [int(item["number"]) for item in contract_acceptance]
+            duplicate_numbers = sorted({number for number in numbers if numbers.count(number) > 1})
+            if duplicate_numbers:
+                duplicates = ", ".join(f"{section_id}.A{number}" for number in duplicate_numbers)
+                errors.append(f"{CONTRACT_FILENAME} repeats acceptance sub-checks for `{section_id}`: {duplicates}")
+            expected_numbers = [number for number, _ in spec_acceptance]
+            missing_acceptance = [number for number in expected_numbers if number not in numbers]
+            extra_acceptance = [number for number in numbers if number not in expected_numbers]
+            if missing_acceptance or extra_acceptance:
+                details: list[str] = []
+                if missing_acceptance:
+                    details.append("missing " + ", ".join(f"{section_id}.A{number}" for number in missing_acceptance))
+                if extra_acceptance:
+                    details.append("unexpected " + ", ".join(f"{section_id}.A{number}" for number in extra_acceptance))
+                errors.append(
+                    f"{CONTRACT_FILENAME} section `{section_id}` must cite every linked acceptance criterion exactly once; " + "; ".join(details)
+                )
+            contract_by_number = {
+                int(item["number"]): str(item["text"])
+                for item in contract_acceptance
+            }
+            for number, spec_text_for_number in spec_acceptance:
+                contract_text_for_number = contract_by_number.get(number)
+                if contract_text_for_number is None:
+                    continue
+                if normalize_projection_text(contract_text_for_number) != normalize_projection_text(spec_text_for_number):
+                    errors.append(
+                        f"{CONTRACT_FILENAME} sub-check `{section_id}.A{number}` must cite the linked acceptance criterion text from {SPEC_FILENAME} without paraphrasing away approval-critical detail"
+                    )
     has_verification = any(contains_any_phrase(item, VERIFICATION_HINT_WORDS) for item in checklist_items)
     has_integrity_guardrail = any(contains_any_phrase(item, INTEGRITY_HINT_WORDS) for item in checklist_items)
     has_behavior_outcome = any(
@@ -3214,22 +3379,15 @@ def format_evaluator_execution_input_files_block(
         "\n".join(
             [
                 "Review scope note:",
-                "- Primary review scope: full current branch state against canonical docs.",
-                "- Latest generator artifacts below are starting evidence only, not the approval boundary.",
+                "- Primary review scope: the full current branch state against `task.md`, `spec.md`, and `contract.md`.",
+                "- Each reviewer turn is a fresh full-task audit, including already-checked contract items that may need to be unchecked again on regression.",
+                "- Latest generator artifacts below are background context only; do not narrow the review to them.",
             ]
         ),
         format_path_group(
             "Canonical docs",
             repo_root,
             canonical_doc_group_paths(task_root, inspection, role="reviewer"),
-        ),
-        format_path_group(
-            "Latest turn evidence (not review scope)",
-            repo_root,
-            [
-                role_message_path(turn_dir, "generator"),
-                role_status_path(turn_dir, "generator"),
-            ],
         ),
     ]
     if include_previous_reviewer:
@@ -3241,6 +3399,18 @@ def format_evaluator_execution_input_files_block(
         group = format_path_group("Prior-turn historical context", repo_root, historical)
         if group:
             groups.append(group)
+    groups.extend(
+        [
+            format_path_group(
+                "Latest generator context only (not review scope)",
+                repo_root,
+                [
+                    role_message_path(turn_dir, "generator"),
+                    role_status_path(turn_dir, "generator"),
+                ],
+            ),
+        ]
+    )
     return "\n\n".join(item for item in groups if item).rstrip()
 
 
@@ -3488,9 +3658,11 @@ def format_planner_objective_block(task_root: Path) -> str:
         "Write execution-safe canonical docs, not brainstorming notes.",
         "For broad or spec-driven work, write `spec.md` first as the decision-complete truth.",
         "Organize major behavior slices into named sections such as `M1`, `M2`, `M3` when that improves traceability.",
-        "Inside each relevant major section, include `### Acceptance Criteria` with concrete, auditable, reviewer-usable checks.",
-        "Then derive `contract.md` from the approval-critical sections of the spec.",
+        "Inside each major section, include `### Acceptance Criteria` with concrete, auditable, reviewer-usable checks labeled `A1`, `A2`, `A3`, and so on.",
+        "Do not use per-section `Non-Goals` or `Out of Scope` subsections; put exclusions into the global scope sections or into explicit acceptance criteria.",
+        "Then derive `contract.md` from the spec with one top-level `M#` checklist item per major section and one indented `M#.A#` sub-check per acceptance criterion.",
         "If execution is likely to happen in partial turns, make it obvious that a local fix does not imply whole-task approval while other approval-critical sections remain open.",
+        "Make it explicit when already-satisfied contract items can become unsatisfied again after later changes and therefore must be re-audited every turn.",
         "Do not write shallow aspirational contract items.",
         "If a real user-intent ambiguity remains, emit `needs_human` instead of inventing policy.",
     ]
@@ -3502,7 +3674,7 @@ def format_planner_message_requirements_block() -> str:
         [
             "- What changed in `task.md`, `spec.md`, and `contract.md`",
             "- Which major spec sections were introduced, removed, or tightened",
-            "- How each `contract.md` item maps to the approval-critical spec sections",
+            "- How each top-level `contract.md` section item and each cited `M#.A#` sub-check maps to the linked spec acceptance criteria",
             "- Any assumptions still present and whether they are acceptable",
             "- Remaining weak points or ambiguities",
         ]
@@ -3564,9 +3736,10 @@ def format_intent_critic_focus_block() -> str:
     lines = [
         "Review canonical docs against the raw source intent, repo reality, and the planning quality bar.",
         "Reject drafts that are vague, toy-like, or that would force the execution council to invent policy.",
-        "For broad/spec-driven work, verify that `spec.md` uses major sections with section-level acceptance criteria.",
-        "Verify that `contract.md` is a short approval projection of the approval-critical spec sections rather than an independent mini-spec.",
-        "Reject docs when the execution slice is narrower than the approval surface, when a helper path can substitute for the primary path, or when the reviewer would still be left with only proxy proof.",
+        "For broad/spec-driven work, verify that `spec.md` uses major sections with labeled acceptance criteria (`A1`, `A2`, `A3`, ...).",
+        "Verify that `contract.md` mirrors the spec with one top-level `M#` item per major section and one cited `M#.A#` sub-check per acceptance criterion.",
+        "Reject per-section `Non-Goals` or `Out of Scope` subsections; exclusions must be expressed in the global scope sections or in auditable acceptance criteria.",
+        "Reject docs when the execution slice is narrower than the approval surface, when a helper path can substitute for the primary path, when checked items still read as settled, or when the reviewer would still be left with only proxy proof.",
         "If the planner could fix the issue from existing context, use `changes_requested`. Use `needs_human` only for real missing user/product intent.",
     ]
     return "\n".join(lines).rstrip()
@@ -3577,9 +3750,9 @@ def format_intent_critic_protocol_block() -> str:
         "Follow this protocol in order:",
         "1. Reconstruct the real task from `source_intent.md` and current repo reality.",
         "2. Audit `task.md`, `spec.md`, and `contract.md` for completeness, precision, and execution safety.",
-        "3. For broad/spec-driven work, verify each major spec section has meaningful acceptance criteria.",
-        "4. Check that each `contract.md` item maps to one major spec section or approval-critical group.",
-        "5. Fail the docs if they would let an execution reviewer approve from a narrow local fix, a helper path, or tests-only proof.",
+        "3. For broad/spec-driven work, verify each major spec section has meaningful acceptance criteria labeled `A1`, `A2`, `A3`, and so on.",
+        "4. Check that each major spec section has its own top-level `contract.md` item and that every acceptance criterion is cited as a matching `M#.A#` sub-check.",
+        "5. Fail the docs if they would let an execution reviewer approve from a narrow local fix, a helper path, tests-only proof, or a review that ignores re-auditing previously checked items.",
         "6. Mark every planning review dimension explicitly.",
         "7. Decide whether the docs are approved for execution, need planner changes, or need human clarification.",
     ]
@@ -3733,9 +3906,9 @@ def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict, 
     posture = reviewer_posture_for_task_root(task_root, inspection, state)
     lines = [
         "Audit the current repository state, not just the generator narrative.",
-        "Treat the generator's latest message as a hypothesis about the branch, not as the scope of the review.",
-        "Use changed files as the starting surface only; approval is about current branch state for the full task.",
-        "Before approving, identify at least one way the generator's framing could still be wrong and inspect or reproduce that path.",
+        "Every reviewer turn is a fresh, deep, complete audit of the full current branch state against the canonical docs.",
+        "Treat the generator's latest message as context information only, not as the scope or center of the review.",
+        "Do not let changed files, the latest open blocker, or the latest generator summary define the audit boundary.",
         "Approval is whole-task and whole-branch, not 'the latest blocker seems fixed'.",
     ]
     if posture == "forensic":
@@ -3772,9 +3945,10 @@ def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict, 
     if has_prior_reviewer_history:
         lines.extend(
             [
-                "Do not inherit prior contract checklist state. Reassess each contract item from current branch state.",
+                "Do not inherit prior contract checklist state. Reassess every contract item and cited acceptance sub-check from current branch state, including items that were previously checked.",
+                "Previously checked items are not trusted by default; re-verify them and uncheck them again if later work regressed them.",
                 "Do not inherit prior critical-dimension state. Reassess each dimension from current branch state.",
-                "Treat prior reviewer findings as triage aids only, not as the boundary of this turn's review.",
+                "Treat prior reviewer findings as background context only, not as the boundary of this turn's review.",
                 "If a previously satisfied contract item or previously passing dimension regressed, call that regression out explicitly.",
             ]
         )
@@ -3787,6 +3961,7 @@ def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict, 
     lines.extend(
         [
             "Look for correctness gaps, regressions, hidden operational risk, and avoidable fragility.",
+            "Ask explicitly what could have regressed outside the latest fix, then inspect those paths deliberately.",
             "If any other contract item could still be open, unchanged, or only proxy-proven, keep auditing instead of collapsing the review to the latest local fix.",
             "If the generator reports a blocker or names a root cause, verify whether the claim is directly supported by evidence or only inferred from symptoms. Prefer the narrowest justified blocker wording.",
         ]
@@ -3805,23 +3980,24 @@ def format_reviewer_protocol_block(turn_dir: Path, state: dict) -> str:
     required_commands = review_required_commands_for_changed_files(council_config, changed_files)
     lines = [
         "Follow this protocol in order:",
-        "1. Reconstruct the full approval surface from the task documents before zooming into the latest generator turn.",
-        "2. Use the initial review surface to find the changed behavior, then expand to subsystem closure and reopen every approval-critical item from current branch state.",
-        "3. Ask what could still be wrong even if the generator's latest narrative is mostly true, and inspect those paths deliberately.",
-        "4. Audit code and the real execution path before trusting tests, checklist satisfaction, or generator framing.",
-        "5. Execute the required verification commands.",
-        "6. Run at least one targeted smoke or disconfirming check on the real path. For runtime enforcement, fallback, validator, integrity, or concurrency claims, try something that would fail if the claim were false.",
+        "1. Reconstruct the full approval surface from `task.md`, `spec.md`, and `contract.md` before reading the latest generator turn as context.",
+        "2. Re-audit every approval-critical contract section and every cited acceptance sub-check from current branch state, including items that were previously checked.",
+        "3. Look for regressions that should force previously checked items to become unchecked again.",
+        "4. Read the latest generator turn only as background context after the whole review surface is understood.",
+        "5. Audit code and the real execution path deeply enough to decide whether any approval-critical area regressed outside the latest fix.",
+        "6. Execute the required verification commands and at least one targeted disconfirming real-path check.",
         "7. Do not newly approve production behavior from tests/docs/fixtures/helper-seam changes unless independent evidence on the unchanged real path proves the current branch state.",
-        "8. Decide explicitly whether the branch is task-correct, subsystem-clean, and approval-ready.",
+        "8. Approval is invalid if you have only rechecked the latest fix, the latest open blocker, or the currently unchecked contract items.",
+        "9. Decide branch health and approval readiness only after the full re-audit is complete.",
     ]
-    lines.append("9. Never edit production code during review. You may add or tighten tests/fixtures only when needed to expose a risky invariant.")
+    lines.append("10. Never edit production code during review. You may add or tighten tests/fixtures only when needed to expose a risky invariant.")
     if changed_files:
         lines.extend(
             [
                 "",
-                "Latest changed surface to inspect first:",
+                "Latest generator context only (not review scope):",
                 *[f"- {item}" for item in changed_files],
-                "- Expand from this surface to the full approval surface before deciding approval.",
+                "- These changed files are context information only. Do not let them narrow the review; revisit the full approval surface, including already-checked contract items.",
             ]
         )
     if non_production_only:
@@ -3836,8 +4012,8 @@ def format_reviewer_protocol_block(turn_dir: Path, state: dict) -> str:
     lines.extend(
         [
             "",
-            "Minimum verification commands for the latest touched surface:",
-            "- These are necessary checks for the latest touched surface, not sufficient proof for approval.",
+            "Minimum context checks only (not approval proof):",
+            "- These checks are background verification on the latest context only. They do not prove approval readiness; the branch still requires a complete full-task audit.",
             *[f"- {item}" for item in required_commands],
         ]
     )
@@ -3897,16 +4073,21 @@ def build_evaluator_brief(
         "",
         f"- Posture: `{posture}`",
         f"- Why this posture: {posture_reason}",
-        "- Primary review scope: full current branch state against canonical docs.",
-        "- Latest turn artifacts: starting evidence only, not the approval boundary.",
+        "- Primary review scope: the full current branch state against `task.md`, `spec.md`, and `contract.md`.",
+        "- This turn must revisit all approval-critical areas, including already-checked contract items, to find regressions and uncheck them again if needed.",
+        "- Latest generator artifacts are background context only; they are never the review scope or approval boundary.",
         f"- Primary-path smoke required: {'yes' if review_cfg['require_primary_path_smoke'] else 'no'}",
         f"- Fallback inspection required: {'yes' if fallback_inspection_required_for_turn(task_root, inspection, initial_review_surface=initial_review_surface) else 'no'}",
     ]
     if initial_review_surface:
-        lines.extend(["", "## Initial Review Surface", ""])
+        lines.extend(["", "## Latest Generator Context Only", ""])
+        lines.append("")
+        lines.append("Use this only as background after reconstructing the full approval surface and re-auditing every approval-critical area.")
         lines.extend(f"- {path_text}" for path_text in initial_review_surface)
     if required_commands:
-        lines.extend(["", "## Required Verification", ""])
+        lines.extend(["", "## Latest-Context Background Checks Only", ""])
+        lines.append("")
+        lines.append("These checks are background context only. They do not prove approval readiness, and they never replace a full-task, full-branch re-audit.")
         lines.extend(f"- {command}" for command in required_commands)
     reopen_context = format_reopen_context_block(state)
     if reopen_context:
@@ -3927,6 +4108,12 @@ def format_reviewer_message_requirements_block(task_root: Path, inspection: dict
         "- Key Code Paths Inspected",
         "- Subsystem Closure Checked",
         "- Verification Performed",
+        "- Previously checked contract items and cited acceptance sub-checks re-audited",
+        "- Contract items or cited acceptance sub-checks unchecked again this turn, if any",
+        "- Areas audited beyond the latest generator delta",
+        "- What the latest generator turn claimed",
+        "- Why the review was not limited to that claim",
+        "- Regressions that forced reversal of prior confidence, if any",
         "- Generator Framing Risks Checked",
         "- Disconfirming Checks Run, what each was trying to falsify, and what happened",
         "- Evidence Basis for Approval-Critical Claims (`runtime repro`, `end-to-end command`, `unit/integration test`, `code inspection`)",

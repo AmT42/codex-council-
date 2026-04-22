@@ -86,7 +86,7 @@ Then load only the references needed for the chosen route:
 - For broad/spec-driven/vague/agentic work, run a planning stage before locking execution docs.
 - In that planning stage, use the planner to author docs and the intent critic to reject weak or non-faithful drafts before execution begins.
 - For broad/spec-driven work, do not stop at architecture shape. Write a **decision-complete** `spec.md` that covers the relevant runtime, state, fallback, performance, and validation consequences so the generator does not need to invent policy.
-- For broad/spec-driven work, make `contract.md` a precise approval projection of `spec.md`, not a short paraphrase. When a major spec section has multiple acceptance criteria, the contract should make those criteria explicit enough that the reviewer cannot mark the section satisfied while any linked acceptance criterion still fails.
+- For broad/spec-driven work, make `contract.md` a precise approval projection of `spec.md`, not a short paraphrase. Use one top-level `M#` item per major spec section and one cited `M#.A#` sub-check per acceptance criterion so the reviewer cannot mark the section satisfied while any linked acceptance criterion still fails.
 - When the task is agentic, workflow-driven, or prompt-sensitive, make the brief explicit about:
   - the primary user-facing path or intent
   - any maintenance/background/curation paths
@@ -156,7 +156,7 @@ When using `prepare`, `start`, `continue`, or `reopen`, also read [`references/s
 - `spec.md` is only for work that needs deeper structure than a short task brief.
 - `contract.md` is the default acceptance and approval checklist for most non-trivial runs.
 - Exception: when the user explicitly asks you to write the council brief/spec/instructions, always produce `task.md`, `review.md`, `spec.md`, and `contract.md` together.
-- For spec-driven work, prefer a contract that mirrors the major `M*` sections in `spec.md` and exposes section-level acceptance criteria as explicit checkable sub-points when collapsing them would weaken approval.
+- For spec-driven work, require a contract that mirrors the major `M*` sections in `spec.md` with top-level `M#` items and explicit nested `M#.A#` checkable sub-points for every acceptance criterion.
 - Task-local `AGENTS.md` stays behavioral and stable; do not put task-specific requirements there.
 - `github_pr_codex` special case: when the user already has a PR and wants GitHub Codex to review the live branch, local `task.md` / `review.md` / `spec.md` may be omitted if the PR and current-head review findings already form a usable brief.
 - `branch_northstar_summary.md` is optional supporting context for branch/worktree intent in that PR-driven mode.
@@ -173,7 +173,7 @@ When the user explicitly asks for a council brief/spec/instruction-writing pass:
 - do not treat the first draft as launch-ready
 - run the 3 to 5 parallel sub-reviewers after drafting
 - revise and re-run that review until all reviewers agree the brief is ready
-- make sure the final `reviewer.instructions.md` guidance preserves the rule that contract state is recomputed from current branch state every turn and that previously satisfied items may be unchecked again if later changes regress them
+- make sure the final `reviewer.instructions.md` guidance preserves the rule that contract state is recomputed from current branch state every turn and that previously satisfied section items or `M#.A#` sub-checks may be unchecked again if later changes regress them
 - only then move to `prepare`, `start`, or `reopen`
 
 ## Recovery and edge cases
