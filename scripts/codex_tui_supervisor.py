@@ -49,6 +49,16 @@ INPUT_DOC_FILENAMES = {
     "spec": SPEC_FILENAME,
     "contract": CONTRACT_FILENAME,
 }
+ROLE_ARTIFACT_FILENAMES = {
+    "prompt": "prompt.md",
+    "message": "message.md",
+    "status": "status.json",
+    "raw_output": "raw_final_output.md",
+    "capture_status": "capture_status.json",
+    "validation_error_json": "validation_error.json",
+    "validation_error_markdown": "validation_error.md",
+    "dispatch": "dispatch.json",
+}
 CANONICAL_FILE_LABELS = {
     "agents": "AGENTS.md",
     "generator": "generator.instructions.md",
@@ -1045,16 +1055,23 @@ def role_dir_for(turn_dir: Path, role: str) -> Path:
     return turn_dir / role
 
 
+def role_artifact_path(turn_dir: Path, role: str, artifact_name: str) -> Path:
+    filename = ROLE_ARTIFACT_FILENAMES.get(artifact_name)
+    if filename is None:
+        raise KeyError(f"unknown role artifact `{artifact_name}`")
+    return role_dir_for(turn_dir, role) / filename
+
+
 def role_prompt_path(turn_dir: Path, role: str) -> Path:
-    return role_dir_for(turn_dir, role) / "prompt.md"
+    return role_artifact_path(turn_dir, role, "prompt")
 
 
 def role_message_path(turn_dir: Path, role: str) -> Path:
-    return role_dir_for(turn_dir, role) / "message.md"
+    return role_artifact_path(turn_dir, role, "message")
 
 
 def role_status_path(turn_dir: Path, role: str) -> Path:
-    return role_dir_for(turn_dir, role) / "status.json"
+    return role_artifact_path(turn_dir, role, "status")
 
 
 def github_review_input_markdown_path(turn_dir: Path) -> Path:
@@ -1066,19 +1083,23 @@ def github_review_input_json_path(turn_dir: Path) -> Path:
 
 
 def role_raw_output_path(turn_dir: Path, role: str) -> Path:
-    return role_dir_for(turn_dir, role) / "raw_final_output.md"
+    return role_artifact_path(turn_dir, role, "raw_output")
 
 
 def role_capture_status_path(turn_dir: Path, role: str) -> Path:
-    return role_dir_for(turn_dir, role) / "capture_status.json"
+    return role_artifact_path(turn_dir, role, "capture_status")
 
 
 def role_validation_error_json_path(turn_dir: Path, role: str) -> Path:
-    return role_dir_for(turn_dir, role) / "validation_error.json"
+    return role_artifact_path(turn_dir, role, "validation_error_json")
 
 
 def role_validation_error_md_path(turn_dir: Path, role: str) -> Path:
-    return role_dir_for(turn_dir, role) / "validation_error.md"
+    return role_artifact_path(turn_dir, role, "validation_error_markdown")
+
+
+def role_dispatch_path(turn_dir: Path, role: str) -> Path:
+    return role_artifact_path(turn_dir, role, "dispatch")
 
 
 def inspect_task_workspace(task_root: Path) -> dict:
@@ -2967,6 +2988,98 @@ def format_review_dimensions_block() -> str:
     )
 
 
+def _format_status_enum_block(label: str, values: tuple[str, ...] | list[str] | set[str]) -> str:
+    ordered_values = tuple(values) if isinstance(values, tuple) else tuple(sorted(values))
+    return f"- `{label}`: one of " + ", ".join(f"`{value}`" for value in ordered_values)
+
+
+def _format_human_intervention_status_block(role: str) -> str:
+    human_sources = ", ".join(f"`{source}`" for source in sorted(HUMAN_SOURCES))
+    return "\n".join(
+        [
+            f"- `human_source` and `human_message`: only when `{role}` emits `needs_human`",
+            f"  - `human_source`: one of {human_sources}",
+            "  - `human_message`: short non-empty string",
+        ]
+    )
+
+
+def _format_dimension_schema_block(*, planning: bool) -> str:
+    if planning:
+        dimensions = planning_review_dimensions()
+        return "\n".join(
+            [
+                "- `critical_dimensions`: full dimension map with every key present",
+                *[
+                    f"  - `{key}`: `pass` | `fail` | `uncertain` ({label})"
+                    for key, label in dimensions
+                ],
+            ]
+        )
+    return "\n".join(
+        [
+            "- `critical_dimensions`: full dimension map with every key present",
+            *[
+                f"  - `{item['key']}`: `pass` | `fail` | `uncertain` ({item['label']})"
+                for item in load_critical_review_dimensions()
+            ],
+        ]
+    )
+
+
+def format_generator_status_schema_block() -> str:
+    return "\n".join(
+        [
+            "`generator/status.json` must use exactly this schema:",
+            _format_status_enum_block("result", tuple(sorted(GENERATOR_RESULTS))),
+            "- `summary`: short non-empty string",
+            "- `changed_files`: list of repo-tracked file paths; use `[]` when no repo-tracked files changed",
+            "- `commit_sha`, `compare_base_sha`, `branch`: optional non-empty strings when available",
+            _format_human_intervention_status_block("generator"),
+        ]
+    ).rstrip()
+
+
+def format_reviewer_status_schema_block(*, bootstrap_review: bool = False) -> str:
+    reviewer_verdicts = ("changes_requested", "blocked", "needs_human") if bootstrap_review else tuple(sorted(REVIEWER_VERDICTS))
+    lines = [
+        "`reviewer/status.json` must use exactly this schema:",
+        _format_status_enum_block("verdict", reviewer_verdicts),
+        "- `summary`: short non-empty string",
+        "- `blocking_issues`: list of strings",
+        _format_dimension_schema_block(planning=False),
+    ]
+    if not bootstrap_review:
+        lines.append("- `reviewed_commit_sha`: optional non-empty string")
+    lines.append(_format_human_intervention_status_block("reviewer"))
+    return "\n".join(lines).rstrip()
+
+
+def format_planner_status_schema_block() -> str:
+    return "\n".join(
+        [
+            "`planner/status.json` must use exactly this schema:",
+            _format_status_enum_block("result", tuple(sorted(PLANNER_RESULTS))),
+            "- `summary`: short non-empty string",
+            f"- `docs_updated`: list containing only `{TASK_FILENAME}`, `{SPEC_FILENAME}`, and/or `{CONTRACT_FILENAME}`",
+            _format_human_intervention_status_block("planner"),
+        ]
+    ).rstrip()
+
+
+def format_intent_critic_status_schema_block() -> str:
+    return "\n".join(
+        [
+            "`intent_critic/status.json` must use exactly this schema:",
+            _format_status_enum_block("verdict", tuple(sorted(INTENT_CRITIC_VERDICTS))),
+            "- `summary`: short non-empty string",
+            "- `blocking_issues`: list of strings",
+            _format_dimension_schema_block(planning=True),
+            _format_human_intervention_status_block("intent_critic"),
+        ]
+    ).rstrip()
+
+
 def format_duration_label(seconds: int) -> str:
     if seconds % 60 == 0:
         minutes = seconds // 60
@@ -3098,13 +3211,20 @@ def format_evaluator_execution_input_files_block(
     include_previous_reviewer: bool,
 ) -> str:
     groups = [
+        "\n".join(
+            [
+                "Review scope note:",
+                "- Primary review scope: full current branch state against canonical docs.",
+                "- Latest generator artifacts below are starting evidence only, not the approval boundary.",
+            ]
+        ),
         format_path_group(
             "Canonical docs",
             repo_root,
             canonical_doc_group_paths(task_root, inspection, role="reviewer"),
         ),
         format_path_group(
-            "Current turn artifacts",
+            "Latest turn evidence (not review scope)",
             repo_root,
             [
                 role_message_path(turn_dir, "generator"),
@@ -3198,8 +3318,13 @@ def format_generator_objective_block(
     lines.extend(
         [
             "Resolve root cause, not symptoms.",
+            "Do not describe a tests/docs/fixtures-only or helper-seam-only turn as a production fix unless you also verified the real path.",
+            "Do not frame a narrow turn as if it resolved the whole task. Name what this turn did not re-prove.",
             "Do not introduce bad code, new errors, unintended behavior, regressions, tech debt, or unnecessary complexity.",
             "Anticipate plausible future error cases and harden the change where reasonable.",
+            "After you believe a blocker is fixed, try at least one disconfirming check against the real path or the most likely adjacent failure path.",
+            "Call out what remains unproven instead of implying closure from passing tests or helper behavior alone.",
+            "Do not steer the reviewer toward only your latest delta. Call out adjacent surfaces that still need re-audit when the task touches them.",
             "If the available documents are contradictory or too ambiguous to continue safely, emit `needs_human` instead of guessing.",
         ]
     )
@@ -3365,6 +3490,7 @@ def format_planner_objective_block(task_root: Path) -> str:
         "Organize major behavior slices into named sections such as `M1`, `M2`, `M3` when that improves traceability.",
         "Inside each relevant major section, include `### Acceptance Criteria` with concrete, auditable, reviewer-usable checks.",
         "Then derive `contract.md` from the approval-critical sections of the spec.",
+        "If execution is likely to happen in partial turns, make it obvious that a local fix does not imply whole-task approval while other approval-critical sections remain open.",
         "Do not write shallow aspirational contract items.",
         "If a real user-intent ambiguity remains, emit `needs_human` instead of inventing policy.",
     ]
@@ -3440,6 +3566,7 @@ def format_intent_critic_focus_block() -> str:
         "Reject drafts that are vague, toy-like, or that would force the execution council to invent policy.",
         "For broad/spec-driven work, verify that `spec.md` uses major sections with section-level acceptance criteria.",
         "Verify that `contract.md` is a short approval projection of the approval-critical spec sections rather than an independent mini-spec.",
+        "Reject docs when the execution slice is narrower than the approval surface, when a helper path can substitute for the primary path, or when the reviewer would still be left with only proxy proof.",
         "If the planner could fix the issue from existing context, use `changes_requested`. Use `needs_human` only for real missing user/product intent.",
     ]
     return "\n".join(lines).rstrip()
@@ -3452,8 +3579,9 @@ def format_intent_critic_protocol_block() -> str:
         "2. Audit `task.md`, `spec.md`, and `contract.md` for completeness, precision, and execution safety.",
         "3. For broad/spec-driven work, verify each major spec section has meaningful acceptance criteria.",
         "4. Check that each `contract.md` item maps to one major spec section or approval-critical group.",
-        "5. Mark every planning review dimension explicitly.",
-        "6. Decide whether the docs are approved for execution, need planner changes, or need human clarification.",
+        "5. Fail the docs if they would let an execution reviewer approve from a narrow local fix, a helper path, or tests-only proof.",
+        "6. Mark every planning review dimension explicitly.",
+        "7. Decide whether the docs are approved for execution, need planner changes, or need human clarification.",
     ]
     return "\n".join(lines).rstrip()
 
@@ -3500,7 +3628,9 @@ def format_generator_message_requirements_block(
             "  - what it deliberately did not touch",
             "  - what the primary user-facing effect should be",
             "- What changed",
+            "- Change surface classification: production/runtime code, tests/docs/fixtures/council artifacts only, or both",
             "- Commit created for this turn, or explicitly say that no repo-tracked files changed",
+            "- Why the primary/runtime path is affected, if you claim behavior changed",
         ]
     )
     if has_review:
@@ -3522,6 +3652,9 @@ def format_generator_message_requirements_block(
             "- Changed invariants / preserved invariants",
             "- Downstream readers / consumers checked",
             "- Verification performed",
+            "- Disconfirming checks run, what each was trying to falsify, and what happened",
+            "- What remains unproven or only indirectly proven after this turn",
+            "- Which contract items or adjacent review surfaces still need reviewer re-audit",
             "- Known risks or blockers",
         ]
     )
@@ -3532,6 +3665,43 @@ def _optional_doc_text(path: Path | None) -> str:
     if path is None or not path.exists():
         return ""
     return path.read_text(encoding="utf-8")
+
+
+def normalized_path_parts(path_text: str) -> tuple[str, ...]:
+    normalized = path_text.replace("\\", "/").strip().strip("/")
+    return tuple(part.lower() for part in normalized.split("/") if part)
+
+
+def path_looks_non_production_only(path_text: str) -> bool:
+    parts = normalized_path_parts(path_text)
+    if not parts:
+        return False
+    filename = parts[-1]
+    if COUNCIL_DIRNAME in parts:
+        return True
+    if {"tests", "test", "fixtures", "docs", "__snapshots__"} & set(parts):
+        return True
+    if filename in {"readme.md", "changelog.md", "contributing.md", "license", "license.md"}:
+        return True
+    if filename.startswith("test_"):
+        return True
+    return filename.endswith(
+        (
+            "_test.py",
+            ".spec.ts",
+            ".spec.tsx",
+            ".spec.js",
+            ".spec.jsx",
+            ".test.ts",
+            ".test.tsx",
+            ".test.js",
+            ".test.jsx",
+        )
+    )
+
+
+def changed_files_are_non_production_only(changed_files: list[str]) -> bool:
+    return bool(changed_files) and all(path_looks_non_production_only(item) for item in changed_files)
 
 
 def reviewer_posture_for_task_root(task_root: Path, inspection: dict, state: dict) -> str:
@@ -3561,7 +3731,13 @@ def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict, 
     has_spec = inspection["doc_paths"]["spec"] is not None
     has_contract = inspection["doc_paths"]["contract"] is not None
     posture = reviewer_posture_for_task_root(task_root, inspection, state)
-    lines = ["Audit the current repository state, not just the generator narrative."]
+    lines = [
+        "Audit the current repository state, not just the generator narrative.",
+        "Treat the generator's latest message as a hypothesis about the branch, not as the scope of the review.",
+        "Use changed files as the starting surface only; approval is about current branch state for the full task.",
+        "Before approving, identify at least one way the generator's framing could still be wrong and inspect or reproduce that path.",
+        "Approval is whole-task and whole-branch, not 'the latest blocker seems fixed'.",
+    ]
     if posture == "forensic":
         lines.extend(
             [
@@ -3598,6 +3774,7 @@ def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict, 
             [
                 "Do not inherit prior contract checklist state. Reassess each contract item from current branch state.",
                 "Do not inherit prior critical-dimension state. Reassess each dimension from current branch state.",
+                "Treat prior reviewer findings as triage aids only, not as the boundary of this turn's review.",
                 "If a previously satisfied contract item or previously passing dimension regressed, call that regression out explicitly.",
             ]
         )
@@ -3610,6 +3787,7 @@ def format_reviewer_focus_block(task_root: Path, inspection: dict, state: dict, 
     lines.extend(
         [
             "Look for correctness gaps, regressions, hidden operational risk, and avoidable fragility.",
+            "If any other contract item could still be open, unchanged, or only proxy-proven, keep auditing instead of collapsing the review to the latest local fix.",
             "If the generator reports a blocker or names a root cause, verify whether the claim is directly supported by evidence or only inferred from symptoms. Prefer the narrowest justified blocker wording.",
         ]
     )
@@ -3622,21 +3800,47 @@ def format_reviewer_protocol_block(turn_dir: Path, state: dict) -> str:
     if generator_status_path.exists():
         generator_status = validate_generator_status(load_json(generator_status_path))
         changed_files = generator_status["changed_files"]
+    non_production_only = changed_files_are_non_production_only(changed_files)
     council_config = state.get("council_config", {"review": default_review_config()})
     required_commands = review_required_commands_for_changed_files(council_config, changed_files)
     lines = [
         "Follow this protocol in order:",
-        "1. Reconstruct scope from the current artifacts and task documents.",
-        "2. Use the initial review surface to find the changed behavior, then expand to subsystem closure.",
-        "3. Audit code before trusting tests or checklist satisfaction.",
-        "4. Execute the required verification commands.",
-        "5. Run at least one targeted smoke or falsification check when the task is workflow-heavy, user-facing, or easy to solve through the wrong adjacent path.",
-        "6. Decide explicitly whether the branch is task-correct, subsystem-clean, and approval-ready.",
+        "1. Reconstruct the full approval surface from the task documents before zooming into the latest generator turn.",
+        "2. Use the initial review surface to find the changed behavior, then expand to subsystem closure and reopen every approval-critical item from current branch state.",
+        "3. Ask what could still be wrong even if the generator's latest narrative is mostly true, and inspect those paths deliberately.",
+        "4. Audit code and the real execution path before trusting tests, checklist satisfaction, or generator framing.",
+        "5. Execute the required verification commands.",
+        "6. Run at least one targeted smoke or disconfirming check on the real path. For runtime enforcement, fallback, validator, integrity, or concurrency claims, try something that would fail if the claim were false.",
+        "7. Do not newly approve production behavior from tests/docs/fixtures/helper-seam changes unless independent evidence on the unchanged real path proves the current branch state.",
+        "8. Decide explicitly whether the branch is task-correct, subsystem-clean, and approval-ready.",
     ]
-    lines.append("7. Never edit production code during review. You may add or tighten tests/fixtures only when needed to expose a risky invariant.")
+    lines.append("9. Never edit production code during review. You may add or tighten tests/fixtures only when needed to expose a risky invariant.")
     if changed_files:
-        lines.extend(["", "Initial review surface:", *[f"- {item}" for item in changed_files]])
-    lines.extend(["", "Required verification commands:", *[f"- {item}" for item in required_commands]])
+        lines.extend(
+            [
+                "",
+                "Latest changed surface to inspect first:",
+                *[f"- {item}" for item in changed_files],
+                "- Expand from this surface to the full approval surface before deciding approval.",
+            ]
+        )
+    if non_production_only:
+        lines.extend(
+            [
+                "",
+                "Change-surface warning:",
+                "- This turn appears to touch only tests/docs/fixtures or council artifacts.",
+                "- Treat that as indirect evidence unless you independently verify the unchanged production/runtime path on current branch state.",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "Minimum verification commands for the latest touched surface:",
+            "- These are necessary checks for the latest touched surface, not sufficient proof for approval.",
+            *[f"- {item}" for item in required_commands],
+        ]
+    )
     return "\n".join(lines).rstrip()
 
 
@@ -3693,6 +3897,8 @@ def build_evaluator_brief(
         "",
         f"- Posture: `{posture}`",
         f"- Why this posture: {posture_reason}",
+        "- Primary review scope: full current branch state against canonical docs.",
+        "- Latest turn artifacts: starting evidence only, not the approval boundary.",
         f"- Primary-path smoke required: {'yes' if review_cfg['require_primary_path_smoke'] else 'no'}",
         f"- Fallback inspection required: {'yes' if fallback_inspection_required_for_turn(task_root, inspection, initial_review_surface=initial_review_surface) else 'no'}",
     ]
@@ -3721,6 +3927,11 @@ def format_reviewer_message_requirements_block(task_root: Path, inspection: dict
         "- Key Code Paths Inspected",
         "- Subsystem Closure Checked",
         "- Verification Performed",
+        "- Generator Framing Risks Checked",
+        "- Disconfirming Checks Run, what each was trying to falsify, and what happened",
+        "- Evidence Basis for Approval-Critical Claims (`runtime repro`, `end-to-end command`, `unit/integration test`, `code inspection`)",
+        "- Which claims remain indirect, proxy-based, or only partially proven, if any",
+        "- What remains unproven after this turn, if anything",
         "- Blocker Diagnosis Check when the generator emitted `blocked` or made a root-cause blocker claim",
     ]
     if has_review:
@@ -3825,12 +4036,14 @@ def build_generator_previous_reviewer_focus(
         previous_reviewer_focus = textwrap.dedent(
             f"""\
             The previous evaluator verdict was `changes_requested`.
+            Treat the prior evaluator findings as priority items to address first, not as the whole approval surface.
             Before proceeding, classify each blocking issue as `agree`, `disagree`, or `uncertain`.
             - Fix the issues you agree are valid.
             - If you disagree, explain the disagreement with direct code evidence.
             - If the remaining blocker comes from ambiguous or unsafe task documents, emit `needs_human`.
+            - Do not assume these listed blockers are the whole approval surface; the next review will reopen the full task from current branch state.
 
-            Blocking issues to address:
+            Priority findings to address first (not the whole approval surface):
             {joined_issues}
             """
         ).rstrip()
@@ -3878,6 +4091,7 @@ def build_generator_turn_prompt(
             turn_dir=turn_dir,
             previous_reviewer_status=previous_reviewer_status,
         ),
+        "generator_status_schema_block": format_generator_status_schema_block(),
         "previous_reviewer_focus_block": previous_reviewer_focus,
         "generator_message_path": repo_relative_path(repo_root, role_message_path(turn_dir, "generator")),
         "generator_status_path": repo_relative_path(repo_root, role_status_path(turn_dir, "generator")),
@@ -3928,6 +4142,9 @@ def build_reviewer_turn_prompt(
         ),
         "reviewer_protocol_block": format_reviewer_protocol_block(turn_dir, state),
         "reviewer_message_requirements_block": format_reviewer_message_requirements_block(task_root, inspection, state),
+        "reviewer_status_schema_block": format_reviewer_status_schema_block(
+            bootstrap_review=bool(bootstrap_review_block),
+        ),
         "bootstrap_review_block": bootstrap_review_block,
         "reviewer_message_path": repo_relative_path(repo_root, role_message_path(turn_dir, "reviewer")),
         "reviewer_status_path": repo_relative_path(repo_root, role_status_path(turn_dir, "reviewer")),
@@ -3968,6 +4185,7 @@ def build_planner_turn_prompt(
         ),
         "planner_objective_block": format_planner_objective_block(task_root),
         "planner_message_requirements_block": format_planner_message_requirements_block(),
+        "planner_status_schema_block": format_planner_status_schema_block(),
         "task_path": repo_relative_path(repo_root, task_root / TASK_FILENAME),
         "spec_path": repo_relative_path(repo_root, task_root / SPEC_FILENAME),
         "contract_path": repo_relative_path(repo_root, task_root / CONTRACT_FILENAME),
@@ -4009,6 +4227,7 @@ def build_intent_critic_turn_prompt(
         "intent_critic_protocol_block": format_intent_critic_protocol_block(),
         "planning_dimensions_block": format_planning_dimensions_block(),
         "intent_critic_message_requirements_block": format_intent_critic_message_requirements_block(),
+        "intent_critic_status_schema_block": format_intent_critic_status_schema_block(),
         "intent_critic_message_path": repo_relative_path(repo_root, role_message_path(turn_dir, "intent_critic")),
         "intent_critic_status_path": repo_relative_path(repo_root, role_status_path(turn_dir, "intent_critic")),
     }
@@ -4142,6 +4361,16 @@ def build_artifact_repair_prompt_for_paths(
     error_message: str,
     output_paths: list[Path],
 ) -> str:
+    if role == "generator":
+        status_schema_block = format_generator_status_schema_block()
+    elif role == "reviewer":
+        status_schema_block = format_reviewer_status_schema_block()
+    elif role == "planner":
+        status_schema_block = format_planner_status_schema_block()
+    elif role == "intent_critic":
+        status_schema_block = format_intent_critic_status_schema_block()
+    else:
+        status_schema_block = ""
     return render_template_text(
         read_template("prompts", "artifact_repair.md"),
         {
@@ -4149,6 +4378,7 @@ def build_artifact_repair_prompt_for_paths(
             "turn_name": turn_name(turn_number),
             "output_paths_block": "\n".join(f"- {path}" for path in output_paths),
             "validation_error": error_message,
+            "status_schema_block": status_schema_block,
         },
         template_name="prompts/artifact_repair.md",
     ).rstrip()

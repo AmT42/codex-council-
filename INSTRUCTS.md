@@ -428,6 +428,12 @@ Good contract items usually cover:
 - an important regression or integrity guardrail
 - required verification such as tests, reproduction, or manual validation
 
+For broad/spec-driven work, that is only the minimum bar.
+
+`contract.md` should usually mirror the major `M*` sections in `spec.md`, and when a section has multiple acceptance criteria, the contract should make those criteria explicit enough that the reviewer cannot mark the section satisfied by interpretation alone.
+
+Do not paraphrase away approval-critical details from `spec.md` just to keep the contract short.
+
 ### Task-local `AGENTS.md`
 
 Treat the injected task-local `AGENTS.md` as stable council behavior.
@@ -441,6 +447,7 @@ Before launching with `start`, the outer agent should mentally check:
 - is the request concrete enough for safe execution?
 - are the chosen docs the smallest sufficient set?
 - does `contract.md` make approval auditable?
+- is `contract.md` precise enough that each major spec section can only be approved by satisfying its linked acceptance criteria?
 - would a reviewer know how to reject a bad implementation from these docs?
 - is this really a new run, or should it be `continue` or `reopen`?
 - am I still acting as harness operator rather than drifting into doing the target task myself?

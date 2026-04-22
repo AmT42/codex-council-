@@ -126,6 +126,17 @@ class CodexTuiSupervisorTests(unittest.TestCase):
         self.assertEqual(status["result"], "implemented")
         self.assertEqual(len(status["changed_files"]), 2)
 
+    def test_validate_generator_status_rejects_unknown_result(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            MODULE.validate_generator_status(
+                {
+                    "result": "changed",
+                    "summary": "Changed parser and tests.",
+                    "changed_files": ["src/parser.py"],
+                }
+            )
+        self.assertIn("invalid generator result: changed", str(ctx.exception))
+
     def test_validate_reviewer_status_accepts_approved(self) -> None:
         status = MODULE.validate_reviewer_status(
             {
@@ -690,6 +701,9 @@ reviewer_reset_mode = "wrong"
             self.assertIn(".codex-council/demo-task/review.md", prompt)
             self.assertIn(".codex-council/demo-task/spec.md", prompt)
             self.assertIn("classify each review point as `agree`, `disagree`, or `uncertain`", prompt)
+            self.assertIn("Do not describe a tests/docs/fixtures-only or helper-seam-only turn as a production fix", prompt)
+            self.assertIn("Change surface classification: production/runtime code, tests/docs/fixtures/council artifacts only, or both", prompt)
+            self.assertIn("What remains unproven or only indirectly proven after this turn", prompt)
             self.assertIn("diagnose by evidence rather than by symptom-shaped guesses", prompt)
             self.assertIn("last confirmed progress point", prompt)
             self.assertIn("Use the narrowest proven claim", prompt)
@@ -736,6 +750,10 @@ reviewer_reset_mode = "wrong"
             self.assertIn("diagnose by evidence rather than by symptom-shaped guesses", prompt)
             self.assertIn("last confirmed progress point", prompt)
             self.assertIn("first unconfirmed next step", prompt)
+            self.assertIn("disconfirming check against the real path", prompt)
+            self.assertIn("priority items to address first, not as the whole approval surface", prompt)
+            self.assertIn("Priority findings to address first (not the whole approval surface):", prompt)
+            self.assertIn("next review will reopen the full task from current branch state", prompt)
             self.assertIn("Use the narrowest proven claim", prompt)
 
     def test_build_generator_prompt_mentions_github_review_mode(self) -> None:
@@ -766,6 +784,11 @@ reviewer_reset_mode = "wrong"
             self.assertIn("GitHub PR review mode is enabled.", prompt)
             self.assertIn("feature/demo", prompt)
             self.assertIn("https://github.com/acme/repo/pull/123", prompt)
+            self.assertIn("`generator/status.json` must use exactly this schema:", prompt)
+            self.assertIn("`implemented`", prompt)
+            self.assertIn("`no_changes_needed`", prompt)
+            self.assertIn("`blocked`", prompt)
+            self.assertIn("`needs_human`", prompt)
 
     def test_build_generator_prompt_mentions_pr_only_northstar_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -800,6 +823,47 @@ reviewer_reset_mode = "wrong"
             self.assertIn("You are working to get this PR merge-ready on the current branch/worktree.", prompt)
             self.assertIn(str(task_root / MODULE.BRANCH_NORTHSTAR_SUMMARY_FILENAME), prompt)
 
+    def test_build_planner_prompt_includes_planner_status_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "run-1"
+            turn_dir = run_dir / "turns" / "0001"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            prompt = MODULE.build_planner_turn_prompt(
+                Path("/repo"),
+                task_root,
+                run_dir,
+                turn_dir,
+                1,
+                state={},
+                inline_context=True,
+            )
+            self.assertIn("`planner/status.json` must use exactly this schema:", prompt)
+            self.assertIn("`drafted`", prompt)
+            self.assertIn("`blocked`", prompt)
+            self.assertIn("`needs_human`", prompt)
+
+    def test_build_intent_critic_prompt_includes_status_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            run_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "run-1"
+            turn_dir = run_dir / "turns" / "0001"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            prompt = MODULE.build_intent_critic_turn_prompt(
+                Path("/repo"),
+                task_root,
+                run_dir,
+                turn_dir,
+                1,
+                state={},
+                inline_context=True,
+            )
+            self.assertIn("`intent_critic/status.json` must use exactly this schema:", prompt)
+            self.assertIn("`approved`", prompt)
+            self.assertIn("`changes_requested`", prompt)
+            self.assertIn("`blocked`", prompt)
+            self.assertIn("`needs_human`", prompt)
+
     def test_build_reviewer_initial_prompt_includes_contract_checklist_only_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
@@ -823,9 +887,55 @@ reviewer_reset_mode = "wrong"
             self.assertIn("Do not repeat the same blocker without stronger evidence", prompt)
             self.assertIn("directly supported by evidence or only inferred from symptoms", prompt)
             self.assertIn("narrowest justified blocker wording", prompt)
+            self.assertIn("Treat the generator's latest message as a hypothesis about the branch", prompt)
+            self.assertIn("Approval is whole-task and whole-branch", prompt)
+            self.assertIn("Reconstruct the full approval surface", prompt)
+            self.assertIn("Review scope note:", prompt)
+            self.assertIn("Primary review scope: full current branch state against canonical docs.", prompt)
+            self.assertIn("Latest turn evidence (not review scope)", prompt)
+            self.assertIn("Latest changed surface to inspect first:", prompt)
+            self.assertIn("Expand from this surface to the full approval surface before deciding approval.", prompt)
+            self.assertIn("Minimum verification commands for the latest touched surface:", prompt)
+            self.assertIn("not sufficient proof for approval", prompt)
+            self.assertIn("Generator Framing Risks Checked", prompt)
+            self.assertIn("Disconfirming Checks Run", prompt)
+            self.assertIn("Evidence Basis for Approval-Critical Claims", prompt)
+            self.assertIn("What remains unproven after this turn", prompt)
             self.assertIn("Key Code Paths Inspected", prompt)
             self.assertIn("Verification Performed", prompt)
             self.assertIn("Branch Health Verdict", prompt)
+            self.assertIn("`reviewer/status.json` must use exactly this schema:", prompt)
+            self.assertIn("`approved`", prompt)
+            self.assertIn("`changes_requested`", prompt)
+            self.assertIn("`blocked`", prompt)
+            self.assertIn("`needs_human`", prompt)
+
+    def test_build_artifact_repair_prompt_includes_role_schema_block(self) -> None:
+        prompt = MODULE.build_artifact_repair_prompt_for_paths(
+            role="generator",
+            turn_number=3,
+            error_message="invalid generator result: changed",
+            output_paths=[Path("/tmp/message.md"), Path("/tmp/status.json")],
+        )
+        self.assertIn("invalid generator result: changed", prompt)
+        self.assertIn("`generator/status.json` must use exactly this schema:", prompt)
+        self.assertIn("`implemented`", prompt)
+
+    def test_record_prompt_dispatch_artifact_writes_dispatch_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            MODULE.record_prompt_dispatch_artifact(
+                turn_dir,
+                "generator",
+                prompt="fix the issue",
+                dispatch_reason="generator_turn",
+            )
+            dispatch_path = MODULE.role_dispatch_path(turn_dir, "generator")
+            self.assertTrue(dispatch_path.exists())
+            payload = MODULE.load_json(dispatch_path)
+            self.assertEqual(payload["dispatch_count"], 1)
+            self.assertEqual(payload["last_dispatch_reason"], "generator_turn")
+            self.assertEqual(payload["dispatches"][0]["dispatch_reason"], "generator_turn")
 
     def test_build_reviewer_followup_prompt_includes_blocker_diagnosis_check_rules(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -862,6 +972,8 @@ reviewer_reset_mode = "wrong"
             self.assertIn("Blocker Diagnosis Check", prompt)
             self.assertIn("Do not inherit prior checklist state", prompt)
             self.assertIn("previously satisfied contract item", prompt)
+            self.assertIn("identify at least one way the generator's framing could still be wrong", prompt)
+            self.assertIn("Evidence Basis for Approval-Critical Claims", prompt)
 
     def test_build_reviewer_prompt_includes_required_commands_and_evidence_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -884,7 +996,27 @@ reviewer_reset_mode = "wrong"
                 inline_context=True,
             )
             self.assertIn("Follow this protocol in order:", prompt)
+            self.assertIn("disconfirming check on the real path", prompt)
             self.assertIn("pytest -q tests/test_example.py", prompt)
+
+    def test_build_reviewer_prompt_warns_when_change_surface_is_tests_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            self.write_generator_status(turn_dir, changed_files=["tests/test_example.py", "README.md"])
+            inspection = MODULE.inspect_task_workspace(task_root)
+            prompt = MODULE.build_reviewer_turn_prompt(
+                Path("/repo"),
+                task_root,
+                turn_dir,
+                1,
+                state={"review_bridge": {"mode": "internal"}, "council_config": self.build_council_config()},
+                inspection=inspection,
+                inline_context=True,
+            )
+            self.assertIn("This turn appears to touch only tests/docs/fixtures or council artifacts.", prompt)
+            self.assertIn("independently verify the unchanged production/runtime path", prompt)
 
     def test_reviewer_posture_is_forensic_when_spec_is_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4578,21 +4710,41 @@ reviewer_reset_mode = "wrong"
         self.assertIn("regression / integrity / fallback / state guardrail", contract_template)
         self.assertIn("prompts, instructions, tools, schemas", contract_template)
         self.assertIn("approval projection of `spec.md`", contract_template)
+        self.assertIn("prove it on the real path", contract_template)
         self.assertIn("traceable to a named spec section", contract_template)
         self.assertIn("spec-contract-linking-example.md", contract_template)
         self.assertIn("decision-complete spec", planner_instructions)
         self.assertIn("tool descriptions, tool schemas", planner_instructions)
         self.assertIn("execution-safe", planner_instructions)
         self.assertIn("derive `contract.md` from the approval-critical parts of that spec", planner_instructions)
+        self.assertIn("reviewer-usable falsification hook", planner_instructions)
+        self.assertIn("local fix to one slice cannot be mistaken for whole-task approval", planner_instructions)
         self.assertIn("spec-contract-linking-example.md", planner_instructions)
         self.assertIn("strict external evaluator", intent_critic_instructions)
         self.assertIn("hidden assumptions presented as facts", intent_critic_instructions)
         self.assertIn("toy-like prompt / tool / schema descriptions", intent_critic_instructions)
+        self.assertIn("helper-only validation guidance", intent_critic_instructions)
+        self.assertIn("execution scope that is narrower than the approval scope", intent_critic_instructions)
+        self.assertIn("helper, background, repair, or maintenance paths", intent_critic_instructions)
+        self.assertIn("Reject docs that would let an execution reviewer focus only on the latest local fix", intent_critic_instructions)
         self.assertIn("spec-to-contract traceability", intent_critic_instructions)
         self.assertIn("spec-contract-linking-example.md", intent_critic_instructions)
         self.assertIn("do not compensate by inventing missing requirements", generator_instructions)
         self.assertIn("prompt, system-instruction, tool-description, and schema contracts", generator_instructions)
+        self.assertIn("tests, fixtures, docs, or a helper seam", generator_instructions)
+        self.assertIn("What remains unproven or only indirectly proven after this turn", generator_instructions)
+        self.assertIn("Do not frame a narrow turn as if it resolved the whole task", generator_instructions)
+        self.assertIn("adjacent review surfaces still need reviewer re-audit", generator_instructions)
+        self.assertIn("starting fix queue, not as the whole review boundary", generator_instructions)
         self.assertIn("vague or aspirational `contract.md` items", reviewer_instructions)
+        self.assertIn("actively try to falsify the generator's framing", reviewer_instructions)
+        self.assertIn("tests-only, docs-only, fixture-only, or council-artifact-only changes", reviewer_instructions)
+        self.assertIn("Approval is whole-task and whole-branch", reviewer_instructions)
+        self.assertIn("local fix to one surface never implies whole-task approval", reviewer_instructions)
+        self.assertIn("triage aids only, not as the review boundary", reviewer_instructions)
+        self.assertIn("Approval is invalid if you have only rechecked the latest local fix", reviewer_instructions)
+        self.assertIn("What remains unproven after this turn", reviewer_instructions)
+        self.assertIn("Evidence Basis for Approval-Critical Claims", reviewer_instructions)
         self.assertIn("decision-complete", generator_instructions)
         self.assertIn("missing implementation-critical decisions", reviewer_instructions)
         self.assertIn("Passing tests or a satisfied-looking contract are not enough for approval", reviewer_instructions)
@@ -4600,6 +4752,8 @@ reviewer_reset_mode = "wrong"
         self.assertIn("approval projection of that truth", reviewer_instructions)
         self.assertIn("spec-contract-linking-example.md", reviewer_instructions)
         self.assertIn("Code paths inspected", reviewer_instructions)
+        self.assertIn("disconfirming or adversarial check", spec_template)
+        self.assertIn("exercise the real path", spec_template)
         self.assertIn("## Core rule", linking_example)
         self.assertIn("## Good `spec.md` shape", linking_example)
         self.assertIn("## Good `contract.md` shape", linking_example)

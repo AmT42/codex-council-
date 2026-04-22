@@ -31,7 +31,7 @@ Write exactly these files:
 In `generator/message.md`, include at minimum:
 {{generator_message_requirements_block}}
 
-Use the `generator/status.json` schema documented in `generator.instructions.md`.
+{{generator_status_schema_block}}
 
 After writing the required files, print exactly:
 - `COUNCIL_TERMINAL_SUMMARY_BEGIN`

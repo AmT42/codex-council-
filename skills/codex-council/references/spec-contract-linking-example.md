@@ -20,6 +20,7 @@ For broad/spec-driven work:
 - `contract.md` is the approval projection of that spec
 - one contract checkbox should map to one major spec section or one approval-critical group
 - a contract checkbox is only checkable if **all linked acceptance criteria** are satisfied
+- if a major spec section has multiple acceptance criteria and collapsing them into one checkbox would weaken approval, the contract should expose explicit sub-checks
 
 This means:
 
@@ -287,6 +288,8 @@ Checklist state is **not monotonic**.
 Critical dimensions are **not monotonic**.
 
 They are recomputed from current branch state every turn.
+
+When a previously satisfied contract point regresses, the reviewer should uncheck it again. Old checkmarks do not survive regressions.
 
 ---
 

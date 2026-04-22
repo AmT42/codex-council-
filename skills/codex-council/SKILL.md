@@ -41,6 +41,13 @@ That includes:
 - choosing the smallest sufficient document set
 - deciding between direct answer, `prepare`, `start`, `continue`, and `reopen`
 
+When the user explicitly asks you to write or tighten the council spec/instructions themselves, override the normal minimal-doc default and materialize the full canonical bundle:
+
+- `task.md`
+- `review.md`
+- `spec.md`
+- `contract.md`
+
 ## Read order
 
 Read these first:
@@ -72,18 +79,23 @@ Then load only the references needed for the chosen route:
 - Ask only high-impact blocking questions.
 - Prefer the smallest sufficient document set.
 - Default to `contract.md` for non-trivial work.
+- Exception: when the user asks you to write the council spec/instructions or otherwise prepare the council brief itself, always write `task.md`, `review.md`, `spec.md`, and `contract.md` before launch.
 - Prefer `status` + `continue` over restarting a healthy paused run, but use `reopen` when an approved run must be superseded explicitly.
 - Do not pass vague user wording directly into the council docs.
 - Do not do the target-repo implementation work yourself when the harness is the requested tool.
 - For broad/spec-driven/vague/agentic work, run a planning stage before locking execution docs.
 - In that planning stage, use the planner to author docs and the intent critic to reject weak or non-faithful drafts before execution begins.
 - For broad/spec-driven work, do not stop at architecture shape. Write a **decision-complete** `spec.md` that covers the relevant runtime, state, fallback, performance, and validation consequences so the generator does not need to invent policy.
+- For broad/spec-driven work, make `contract.md` a precise approval projection of `spec.md`, not a short paraphrase. When a major spec section has multiple acceptance criteria, the contract should make those criteria explicit enough that the reviewer cannot mark the section satisfied while any linked acceptance criterion still fails.
 - When the task is agentic, workflow-driven, or prompt-sensitive, make the brief explicit about:
   - the primary user-facing path or intent
   - any maintenance/background/curation paths
   - forbidden substitutions between those paths
   - prompt/system-design consequences that must not be improvised in code
 - When the current run or prior findings include a blocker, timeout, or stall report, normalize that report into the strongest evidence-backed form rather than passing through a guessed root cause. Prefer the narrowest proven claim.
+- Before `prepare`, `start`, or `reopen` on a user-authored council brief, validate the docs with 3 to 5 parallel sub-reviewers whose only job is to critique clarity, completeness, scope control, and compliance with the Codex Council loop requirements.
+- Those sub-reviewers should propose improvements, point out ambiguity, and challenge any place where the generator or reviewer would still need to invent policy.
+- Do not launch the council until that sub-reviewer loop converges and all of them agree the docs are ready.
 - Do not launch `prepare`, `start`, `continue`, or `reopen` and then abandon the supervisor process.
 - This is a process-lifetime rule, not a special built-in Codex background feature.
 - A plain foreground command is fine only when you will stay attached and wait for the supervisor.
@@ -143,6 +155,8 @@ When using `prepare`, `start`, `continue`, or `reopen`, also read [`references/s
 - `review.md` is for findings-shaped input such as comments, logs, repro notes, or debugging handoff.
 - `spec.md` is only for work that needs deeper structure than a short task brief.
 - `contract.md` is the default acceptance and approval checklist for most non-trivial runs.
+- Exception: when the user explicitly asks you to write the council brief/spec/instructions, always produce `task.md`, `review.md`, `spec.md`, and `contract.md` together.
+- For spec-driven work, prefer a contract that mirrors the major `M*` sections in `spec.md` and exposes section-level acceptance criteria as explicit checkable sub-points when collapsing them would weaken approval.
 - Task-local `AGENTS.md` stays behavioral and stable; do not put task-specific requirements there.
 - `github_pr_codex` special case: when the user already has a PR and wants GitHub Codex to review the live branch, local `task.md` / `review.md` / `spec.md` may be omitted if the PR and current-head review findings already form a usable brief.
 - `branch_northstar_summary.md` is optional supporting context for branch/worktree intent in that PR-driven mode.
@@ -153,6 +167,14 @@ Use the corresponding document references before writing:
 - [`references/review-doc.md`](./references/review-doc.md)
 - [`references/spec-doc.md`](./references/spec-doc.md)
 - [`references/contract-doc.md`](./references/contract-doc.md)
+
+When the user explicitly asks for a council brief/spec/instruction-writing pass:
+
+- do not treat the first draft as launch-ready
+- run the 3 to 5 parallel sub-reviewers after drafting
+- revise and re-run that review until all reviewers agree the brief is ready
+- make sure the final `reviewer.instructions.md` guidance preserves the rule that contract state is recomputed from current branch state every turn and that previously satisfied items may be unchecked again if later changes regress them
+- only then move to `prepare`, `start`, or `reopen`
 
 ## Recovery and edge cases
 

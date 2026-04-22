@@ -25,7 +25,7 @@ Write exactly these planner artifacts:
 In `planner/message.md`, include at minimum:
 {{planner_message_requirements_block}}
 
-Use the planner status schema documented in `planner.instructions.md`.
+{{planner_status_schema_block}}
 
 After writing the required files, print exactly:
 - `COUNCIL_TERMINAL_SUMMARY_BEGIN`

@@ -67,6 +67,7 @@ If a dimension truly does not apply, say so explicitly.
   - if this section were wrong, could approval be wrong?
   - if yes, it needs a contract item or to be covered by a grouped contract item
 - A contract item is only valid if all linked acceptance criteria for that spec section are satisfied.
+- If a grouped contract item would let the reviewer approve while one linked acceptance criterion still fails, split that item into explicit sub-checks.
 - Use [`spec-contract-linking-example.md`](./spec-contract-linking-example.md) as the canonical model.
 
 ## Revision protocol

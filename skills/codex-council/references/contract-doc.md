@@ -38,6 +38,10 @@ For broad/spec-driven work:
 - prefer one checkbox per major spec section or approval-critical group
 - ensure each item is traceable to a named spec section
 - only check an item when all acceptance criteria for the linked spec section are satisfied
+- write each item precisely enough that a partially complete change cannot still satisfy it by interpretation
+- do not allow a checkbox to stand in for a broad feature claim unless its linked spec section has explicit acceptance criteria that fully define completion for that point
+- when a major spec section has multiple acceptance criteria, prefer explicit contract sub-checks rather than collapsing them into one broad paraphrase if that would weaken approval
+- if a contract sub-check drops an approval-critical detail from the linked acceptance criterion, it is too weak
 
 For a full worked example, see:
 
@@ -69,6 +73,8 @@ For broad/spec-driven work, treat those as a minimum bar rather than a nice-to-h
 
 If the contract cannot tell the reviewer why approval is justified, it is too weak.
 
+If the contract can be marked complete while the linked spec is still only partially implemented, it is too weak.
+
 ## Recommended shape
 
 Aim for roughly 3 to 6 checklist items.
@@ -80,6 +86,10 @@ Useful categories:
 - verification requirement such as tests, repro, or manual validation
 
 When the spec introduces runtime, fallback, state, persistence, or compatibility guarantees, ensure at least one checklist item makes those guarantees auditable.
+
+For spec-driven work, the reviewer may mark a contract item done only when all acceptance criteria for the linked spec section are satisfied for that item. Partial satisfaction is not enough.
+
+Reviewer contract state is recomputed from current branch state every turn. If later generator work regresses a previously satisfied contract item or sub-check, the reviewer should uncheck it again and record the regression explicitly.
 
 If the task has both a primary user-facing path and a maintenance/background/helper path, ensure at least one checklist item makes it auditable that the primary behavior is satisfied by the correct path and not merely by an adjacent helper mechanism.
 

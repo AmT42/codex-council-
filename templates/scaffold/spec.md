@@ -131,6 +131,12 @@ Describe how the work should be validated.
 
 When the spec is broad enough to need `contract.md`, ensure the validation expectations are traceable to the major spec sections so the contract can act as the approval projection of the spec.
 
+When relevant, include both:
+- a positive-path check
+- a disconfirming or adversarial check that would fail if the implementation only fixed a helper seam or adjacent path
+
+For runtime enforcement, fallback behavior, validator correctness, or state integrity, prefer validation hooks that exercise the real path, not only unit helpers.
+
 ## Open Questions
 
 List anything that is still undecided or ambiguous.

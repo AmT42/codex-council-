@@ -25,7 +25,7 @@ Write exactly these files:
 In `intent_critic/message.md`, include at minimum:
 {{intent_critic_message_requirements_block}}
 
-Use the intent critic status schema documented in `intent_critic.instructions.md`.
+{{intent_critic_status_schema_block}}
 
 After writing the required files, print exactly:
 - `COUNCIL_TERMINAL_SUMMARY_BEGIN`

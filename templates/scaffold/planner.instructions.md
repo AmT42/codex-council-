@@ -57,6 +57,9 @@
   - auditable
   - reviewer-usable
   - specific enough that an execution reviewer can mark the linked contract item `[x]` or `[ ]` without inventing missing policy
+- For runtime enforcement, fallback behavior, validator correctness, or state integrity, include at least one reviewer-usable falsification hook, not only happy-path intent.
+- When execution is likely to happen in partial turns, write the docs so a local fix to one slice cannot be mistaken for whole-task approval while other approval-critical sections remain open.
+- If the implementation work may land in a narrower slice than the eventual approval surface, spell that out explicitly instead of leaving the reviewer to infer the boundary.
 - For a complete worked example of this structure, see `spec-contract-linking-example.md`.
 
 ## Agentic-system rule

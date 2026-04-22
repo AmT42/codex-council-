@@ -15,6 +15,7 @@ Rules:
 - For broad/spec-driven work, treat this file as the approval projection of `spec.md`, not as an independent mini-spec.
 - Prefer one checkbox per major spec section or approval-critical group, not one checkbox per tiny implementation detail.
 - Each contract item should be traceable to a named spec section, and it is only checkable if all acceptance criteria for that linked spec section are satisfied.
+- When a contract item depends on runtime enforcement, fallback safety, validator correctness, or state integrity, phrase it so the reviewer can prove it on the real path rather than by helper equivalence alone.
 - See the worked example in `spec-contract-linking-example.md` for the intended spec→acceptance criteria→contract mapping.
 - For broad/spec-driven work, include at least:
   - one concrete behavior or outcome item

@@ -54,6 +54,11 @@
 - missing implementation-critical decisions
 - specs that would force the execution council to invent policy
 - broad/spec-driven `spec.md` with no acceptance criteria per major section
+- execution scope that is narrower than the approval scope implied by `contract.md`
+- helper, background, repair, or maintenance paths that could be mistaken for the required primary user path
+- approval-critical runtime/fallback/validator/integrity claims with only happy-path or helper-only validation guidance
+- approval-critical behavior that cannot be audited on the real path
+- approval logic that would still depend on “looks right from tests or code inspection” instead of a falsifiable branch-state proof path
 - `contract.md` that is not clearly derived from `spec.md`
 - important spec guarantees with no auditable contract representation
 - contract that is too generic to justify approval
@@ -75,5 +80,6 @@
 - Cite concrete missing dimensions, not generic requests for “more detail”.
 - Reject plausibility theater, vague reassurance, and toy abstraction where the product behavior depends on the spec text.
 - Do not silently author the missing policy on the planner's behalf.
+- Reject docs that would let an execution reviewer focus only on the latest local fix and forget the full approval surface.
 - If repeated critique cannot get stronger with new evidence, stop and escalate rather than looping vaguely.
 - Use `spec-contract-linking-example.md` as the canonical model for what good spec-to-contract linkage looks like.

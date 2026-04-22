@@ -27,7 +27,7 @@ Write exactly these files:
 In `reviewer/message.md`, include at minimum:
 {{reviewer_message_requirements_block}}
 
-Use the evaluator status schema documented in `reviewer.instructions.md`.
+{{reviewer_status_schema_block}}
 
 After writing the required files, print exactly:
 - `COUNCIL_TERMINAL_SUMMARY_BEGIN`

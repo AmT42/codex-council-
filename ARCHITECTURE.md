@@ -162,6 +162,10 @@ The reviewer is not merely a checklist scorer. In stronger review postures, it s
 - treat passing tests as supporting evidence rather than primary truth
 - surface fragile architecture, hidden regressions, or silent degradation even when the contract appears mostly satisfied
 
+Reviewer contract state is not monotonic across turns.
+
+If later generator work regresses a previously satisfied contract point, the reviewer should uncheck it again and record that regression explicitly rather than preserving the old checkmark.
+
 The reviewer may tighten tests or fixtures when that materially improves review evidence, but it should not directly patch production code.
 
 ### Turn artifacts
@@ -341,6 +345,10 @@ For spec-driven work, the contract should still stay short, but it should cover 
 - at least one behavior outcome
 - at least one regression / integrity / fallback / state guardrail
 - at least one verification item
+
+For broad/spec-driven work, the contract should also be a precise approval projection of the major `M*` sections in `spec.md`.
+
+When a spec section has multiple acceptance criteria, the contract should make those criteria explicit enough that the reviewer cannot satisfy the contract point while any linked acceptance criterion still fails.
 
 ### Task-local `AGENTS.md`
 
