@@ -73,7 +73,7 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py prepare my-task --dir /path/to/target-repo
 ```
 
-Only after the planning run is approved should the docs be treated as locked execution inputs for `start`.
+Planning approval is the preferred way to lock execution inputs for broad work, but `start` still validates the current canonical docs directly and does not require an approved planning run.
 
 If the latest planning run is already approved and canonical docs are unchanged, `prepare` may exit immediately and report that the docs are already prepared for execution. Use `--new-run` or new `--intent` when you want a fresh planning pass.
 
@@ -87,7 +87,7 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --d
 
 Before `start`, ensure the docs are strong enough to survive runtime validation.
 
-If planning runs already exist for the task, `start` should only proceed when the latest planning run is approved and still matches the current canonical docs.
+If planning runs already exist for the task, treat them as advisory context. `start` should validate the current canonical docs directly instead of requiring the latest planning run to be approved or unchanged.
 
 Default to the current auto role routing.
 

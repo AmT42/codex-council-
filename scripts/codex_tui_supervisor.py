@@ -5113,44 +5113,6 @@ def validate_task_workspace_for_start(task_root: Path, inspection: dict, *, revi
         print(f"warning: {warning}")
 
 
-def validate_planning_state_for_start(task_root: Path) -> None:
-    runs_root = planning_runs_root_for(task_root)
-    if not runs_root.exists():
-        return
-    candidates = sorted((path for path in runs_root.iterdir() if path.is_dir()), key=run_directory_sort_key)
-    if not candidates:
-        return
-    latest_run_dir = candidates[-1]
-    state_path = latest_run_dir / "state.json"
-    if not state_path.exists():
-        raise SystemExit(
-            f"latest planning run is missing state: {state_path}\n"
-            f"Inspect `status {task_root.name} --planning` or run `prepare {task_root.name} --new-run`."
-        )
-    latest_state = load_json(state_path)
-    plan = inspect_planning_continuation_plan(latest_run_dir, latest_state)
-    if plan["mode"] == "error":
-        raise SystemExit(
-            f"latest planning run cannot be resumed cleanly: {plan['reason']}\n"
-            f"Inspect `status {task_root.name} --planning` and repair or supersede that planning run before `start`."
-        )
-    if plan["mode"] == "continue":
-        raise SystemExit(
-            f"latest planning run `{latest_run_dir.name}` is still in progress (`{plan['continuation_state']}`).\n"
-            f"Run `prepare {task_root.name}` or inspect `status {task_root.name} --planning` before `start`."
-        )
-    if plan["continuation_state"] != "intent_critic_approved":
-        raise SystemExit(
-            f"latest planning run `{latest_run_dir.name}` ended as `{plan['continuation_state']}`.\n"
-            f"Run `prepare {task_root.name}` before `start`."
-        )
-    if not planning_run_docs_still_approved(latest_run_dir, task_root):
-        raise SystemExit(
-            f"latest planning run `{latest_run_dir.name}` was approved, but canonical docs changed afterward.\n"
-            f"Run `prepare {task_root.name} --new-run` or pass new `--intent` before `start`."
-        )
-
-
 def determine_start_role(
     *,
     inspection: dict,
@@ -9153,7 +9115,6 @@ def start_run(args: argparse.Namespace) -> int:
     if not is_git and fork_enabled:
         raise SystemExit("fork start requires a git worktree and cannot be used with --allow-non-git")
     validate_task_workspace_for_start(task_root, inspection, review_mode=review_mode)
-    validate_planning_state_for_start(task_root)
     start_role, bootstrap_phase = determine_start_role(
         inspection=inspection,
         fork_enabled=fork_enabled,

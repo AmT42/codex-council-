@@ -4500,7 +4500,7 @@ reviewer_reset_mode = "wrong"
             self.assertEqual(final_state["status"], "max_turns_reached")
             self.assertFalse((run_dir / "turns" / "0005").exists())
 
-    def test_start_run_rejects_in_progress_planning_run(self) -> None:
+    def test_start_run_ignores_in_progress_planning_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir) / "repo"
             self.init_git_repo(repo_root)
@@ -4530,6 +4530,7 @@ reviewer_reset_mode = "wrong"
             MODULE.write_text(planning_run_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
             turn_one = MODULE.prepare_planning_turn(planning_run_dir, 1, task_root)
             self.write_planner_status(turn_one, result="drafted")
+            self.commit_repo_changes(repo_root, message="prepare docs without approved planning run")
             args = argparse.Namespace(
                 task_name="demo-task",
                 dir=str(repo_root),
@@ -4546,14 +4547,27 @@ reviewer_reset_mode = "wrong"
                 github_base=None,
                 start_role="auto",
             )
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.start_run(args)
-            self.assertIn("planning run", str(ctx.exception))
+            with mock.patch.object(MODULE, "build_review_bridge_state", return_value={"mode": "internal"}), mock.patch.object(
+                MODULE,
+                "run_supervisor_for_initialized_run",
+                return_value=0,
+            ):
+                result = MODULE.start_run(args)
+            self.assertEqual(result, 0)
 
-    def test_validate_planning_state_for_start_rejects_latest_blocked_planning_run(self) -> None:
+    def test_start_run_ignores_latest_blocked_planning_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            repo_root = Path(tmp_dir)
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
             task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix the retry path so duplicate rows are not created during sync.\n\n## Context\n\nThe sync worker currently retries after a transient timeout and may write the same row twice.\n\n## Success Signal\n\nA retry no longer creates duplicate rows and the changed path is covered by verification.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] The retry path no longer writes duplicate rows during sync.\n- [ ] Required verification for the changed retry path is present and passing.\n",
+                encoding="utf-8",
+            )
             blocked_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "blocked-run"
             (blocked_dir / "turns").mkdir(parents=True)
             state = MODULE.create_planning_run_state(
@@ -4573,17 +4587,44 @@ reviewer_reset_mode = "wrong"
             turn_one = MODULE.prepare_planning_turn(blocked_dir, 1, task_root)
             self.write_planner_status(turn_one, result="drafted")
             self.write_intent_critic_status(turn_one, verdict="blocked")
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.validate_planning_state_for_start(task_root)
-            self.assertIn("ended as `intent_critic_blocked`", str(ctx.exception))
+            self.commit_repo_changes(repo_root, message="prepare docs with blocked planning run present")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id=None,
+                generator_session=None,
+                reviewer_session=None,
+                fork_session_id=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+                review_mode="internal",
+                github_pr=None,
+                github_branch=None,
+                github_base=None,
+                start_role="auto",
+            )
+            with mock.patch.object(MODULE, "build_review_bridge_state", return_value={"mode": "internal"}), mock.patch.object(
+                MODULE,
+                "run_supervisor_for_initialized_run",
+                return_value=0,
+            ):
+                result = MODULE.start_run(args)
+            self.assertEqual(result, 0)
 
-    def test_validate_planning_state_for_start_rejects_latest_approved_run_with_doc_drift(self) -> None:
+    def test_start_run_ignores_latest_approved_planning_run_with_doc_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            repo_root = Path(tmp_dir)
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
             task_root = self.scaffold_base_workspace(repo_root)
-            (task_root / MODULE.TASK_FILENAME).write_text("# Task\n\n## Request\n\nPlan it well enough for a validation gate.\n\n## Context\n\nContext that is long enough to be meaningful.\n\n## Success Signal\n\nThe docs are approved and still match the current canonical files.\n", encoding="utf-8")
-            (task_root / MODULE.SPEC_FILENAME).write_text("# Spec\n\n## Goal\n\ngoal text here\n\n## User Outcome\n\noutcome text here\n\n## In Scope\n\n- one\n\n## Out of Scope\n\n- two\n\n## Constraints\n\n- three\n\n## Existing Context\n\nctx\n\n## Desired Behavior\n\nbody body body body body body\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate validation validation validation\n\n## Open Questions\n\n- none\n", encoding="utf-8")
-            (task_root / MODULE.CONTRACT_FILENAME).write_text("# Definition of Done\n\n- [ ] Concrete behavior remains correct.\n- [ ] Required validation passes.\n", encoding="utf-8")
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix the retry path so duplicate rows are not created during sync.\n\n## Context\n\nThe sync worker currently retries after a transient timeout and may write the same row twice.\n\n## Success Signal\n\nA retry no longer creates duplicate rows and the changed path is covered by verification.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] The retry path no longer writes duplicate rows during sync.\n- [ ] Required verification for the changed retry path is present and passing.\n",
+                encoding="utf-8",
+            )
             approved_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "approved-run"
             (approved_dir / "turns").mkdir(parents=True)
             state = MODULE.create_planning_run_state(
@@ -4591,7 +4632,7 @@ reviewer_reset_mode = "wrong"
                 task_root=task_root,
                 task_name="demo-task",
                 run_id="approved-run",
-                workspace_profile="task+spec+contract",
+                workspace_profile="task+contract",
                 council_config=self.build_council_config(),
                 planner_session="planner-session",
                 critic_session="critic-session",
@@ -4604,12 +4645,36 @@ reviewer_reset_mode = "wrong"
             self.write_planner_status(turn_one, result="drafted")
             self.write_intent_critic_status(turn_one, verdict="approved")
             MODULE.refresh_planning_turn_context_manifest(approved_dir, task_root, turn_one)
-            (task_root / MODULE.CONTRACT_FILENAME).write_text("# Definition of Done\n\n- [ ] Concrete behavior changed after approval.\n- [ ] Required validation passes.\n", encoding="utf-8")
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.validate_planning_state_for_start(task_root)
-            self.assertIn("changed afterward", str(ctx.exception))
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition of Done\n\n- [ ] The retry path no longer writes duplicate rows during sync after drift.\n- [ ] Required verification for the changed retry path is present and passing.\n",
+                encoding="utf-8",
+            )
+            self.commit_repo_changes(repo_root, message="canonical docs drift after planning approval")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id=None,
+                generator_session=None,
+                reviewer_session=None,
+                fork_session_id=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+                review_mode="internal",
+                github_pr=None,
+                github_branch=None,
+                github_base=None,
+                start_role="auto",
+            )
+            with mock.patch.object(MODULE, "build_review_bridge_state", return_value={"mode": "internal"}), mock.patch.object(
+                MODULE,
+                "run_supervisor_for_initialized_run",
+                return_value=0,
+            ):
+                result = MODULE.start_run(args)
+            self.assertEqual(result, 0)
 
-    def test_start_run_uses_newest_planning_run_by_created_at(self) -> None:
+    def test_start_run_ignores_newest_planning_run_by_created_at(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir) / "repo"
             self.init_git_repo(repo_root)
@@ -4660,6 +4725,7 @@ reviewer_reset_mode = "wrong"
             MODULE.refresh_planning_turn_context_manifest(older_dir, task_root, older_turn)
             newer_turn = MODULE.prepare_planning_turn(newer_dir, 1, task_root)
             self.write_planner_status(newer_turn, result="drafted")
+            self.commit_repo_changes(repo_root, message="execution docs are ready despite newer planning run")
             args = argparse.Namespace(
                 task_name="demo-task",
                 dir=str(repo_root),
@@ -4676,9 +4742,13 @@ reviewer_reset_mode = "wrong"
                 github_base=None,
                 start_role="auto",
             )
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.start_run(args)
-            self.assertIn("`a-new`", str(ctx.exception))
+            with mock.patch.object(MODULE, "build_review_bridge_state", return_value={"mode": "internal"}), mock.patch.object(
+                MODULE,
+                "run_supervisor_for_initialized_run",
+                return_value=0,
+            ):
+                result = MODULE.start_run(args)
+            self.assertEqual(result, 0)
 
     def test_start_run_allows_latest_approved_planning_run_without_doc_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

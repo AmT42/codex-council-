@@ -178,7 +178,7 @@ Planning-stage runtime rule:
 - `status --planning` inspects that planning loop
 - if the latest planning run is already approved and canonical docs are unchanged, `prepare` may report that the docs are already prepared instead of launching a new live planning supervisor
 - use `--new-run` or new `--intent` when you intentionally want a fresh planning pass after approval
-- only after planning approval should the outer agent treat the docs as execution-ready inputs for `start`
+- planning approval is the preferred way to lock execution docs for broad work, but `start` still validates the current canonical docs directly and does not require an approved planning run
 
 ## Evidence-First Diagnosis
 

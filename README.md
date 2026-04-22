@@ -401,6 +401,8 @@ Start the execution council:
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo
 ```
 
+`start` validates the current canonical docs directly. An existing planning run is recommended guidance, not a hard prerequisite.
+
 GitHub PR Codex example:
 
 ```bash
