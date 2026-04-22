@@ -40,6 +40,13 @@ If the user says “use this repo to add feature X”, interpret that as:
 - `council-agent` is the tool you must operate
 - your first move is to prepare the council run, not to code the feature directly
 
+If the user points at an existing GitHub PR and says “use Codex Council on this PR” or equivalent, interpret that as:
+
+- they want the PR-driven review bridge by default
+- the correct default route is `--review-mode github_pr_codex`
+- the PR and current-head GitHub Codex findings are the effective brief unless the user explicitly asks for a stronger local brief
+- do not default to the internal reviewer loop unless the user explicitly asks for generator/reviewer mode
+
 ## Non-Negotiable Process Boundary
 
 `prepare`, `start`, `continue`, and `reopen` are supervisor-facing lifecycle commands.
@@ -246,6 +253,7 @@ Behavior:
 - after writing the needed docs, run `start`
 - do not directly implement the target feature yourself when the harness is the requested tool
 - special case: for `github_pr_codex` on an existing PR, the PR and current-head review findings can be enough to start without local `task.md`, `review.md`, or `spec.md`
+- strong default: if the user references a live PR and asks to use the harness on that PR, use `github_pr_codex` unless they explicitly ask for the internal reviewer loop
 
 ### 4. Findings-driven fix
 
@@ -254,10 +262,12 @@ Use this for:
 - “Address these PR review comments”
 - “Here are the logs from the failing deployment”
 - “Fix these reviewer findings”
+- “Work on this PR until Codex has no more major comments”
 
 Behavior:
 
 - default document set: `review.md` + `contract.md`
+- for a live GitHub PR, default to `github_pr_codex` and let the PR plus current-head review findings drive the loop
 - add `task.md` only if a short brief materially improves generator intent
 - run `start` once the docs are ready
 - do not bypass the council by fixing the findings yourself unless the user explicitly switched tasks and asked you to modify the target repo directly

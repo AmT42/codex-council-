@@ -238,6 +238,7 @@ Recommended defaults for outer-agent routing:
 - findings-driven fix
   - `review.md` + `contract.md`
 - GitHub PR Codex loop on an existing PR
+  - if the user points at a live PR and asks to use Codex Council on that PR, this is the default route
   - `github_pr_codex` may start without local `task.md`, `review.md`, or `spec.md`
   - use the PR plus current-head GitHub review findings as the effective brief
   - add `branch_northstar_summary.md` when the branch/worktree intent needs durable context
@@ -282,6 +283,7 @@ Use when the user provides review comments, logs, repro notes, or debugging find
 - default to `review.md` + `contract.md`
 - add `task.md` only if it materially clarifies the implementation target
 - special case: when using `github_pr_codex` against an existing PR, local `task.md` / `review.md` / `spec.md` may be omitted if the PR and current-head review findings already provide a usable brief
+- if the user references a live PR and asks to use Codex Council on that PR, prefer `github_pr_codex` over the internal reviewer loop unless they explicitly request generator/reviewer mode
 
 ### 5. Broad feature or spec work
 

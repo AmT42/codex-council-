@@ -12,6 +12,22 @@ The correct route matters because it determines:
 - whether to ask questions
 - whether to use `prepare`, `start`, `continue`, or `reopen`
 
+## Live PR default
+
+If the user points at an existing GitHub PR by URL or PR number and says things like:
+
+- "use Codex Council on this PR"
+- "work on PR #123"
+- "use the skill for this pull request"
+- "continue this PR until Codex has no more major comments"
+
+default to the GitHub PR bridge route:
+
+- use `start` or `continue` with `--review-mode github_pr_codex`
+- treat the PR plus current-head GitHub Codex findings as the effective review brief
+- do not default to the internal reviewer loop unless the user explicitly asks for generator/reviewer mode
+- add `branch_northstar_summary.md` only when branch intent needs durable local context
+
 ## Mode 1: Direct answer only
 
 Use when the user is asking about:
@@ -63,6 +79,7 @@ Default docs:
 Question policy:
 
 - ask nothing unless a missing detail would materially change the implementation target
+- if the request is specifically about a live PR, route to `github_pr_codex` instead of the internal reviewer loop by default
 
 ## Mode 4: Findings-driven fix
 
@@ -84,6 +101,7 @@ Optional:
 - add `task.md` only when a short brief materially clarifies what the generator should do
 - if the findings already live on an existing PR and the operator is using `github_pr_codex`, local `review.md` can be omitted and the PR review findings can drive the loop directly
 - add `branch_northstar_summary.md` when the branch/worktree intent needs durable context without promoting that context into `task.md`
+- if the user gave a PR URL/number and asked to use the harness on that PR, this is the default route unless they explicitly requested the internal reviewer loop
 
 ## Mode 5: Broad feature or spec work
 

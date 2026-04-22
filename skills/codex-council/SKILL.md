@@ -1,6 +1,6 @@
 ---
 name: codex-council
-description: Operate the Codex Council harness from an outer Codex agent. Use when a user wants help turning vague or precise software requests into strong task.md, review.md, spec.md, and contract.md documents, then starting, inspecting, continuing, or reopening a generator/reviewer council run in a target repository.
+description: Operate the Codex Council harness from an outer Codex agent. Use when a user wants help turning vague or precise software requests into strong task.md, review.md, spec.md, and contract.md documents, or when they want the GitHub PR Codex bridge operated against an existing PR, then start, inspect, continue, or reopen the right council run in a target repository.
 ---
 
 # Codex Council
@@ -79,6 +79,7 @@ Then load only the references needed for the chosen route:
 - Ask only high-impact blocking questions.
 - Prefer the smallest sufficient document set.
 - Default to `contract.md` for non-trivial work.
+- If the user points at an existing GitHub PR and asks you to use Codex Council on that PR, default to the PR bridge route with `--review-mode github_pr_codex`; do not start the internal reviewer loop unless the user explicitly asks for the internal generator/reviewer mode.
 - Exception: when the user asks you to write the council spec/instructions or otherwise prepare the council brief itself, always write `task.md`, `review.md`, `spec.md`, and `contract.md` before launch.
 - Prefer `status` + `continue` over restarting a healthy paused run, but use `reopen` when an approved run must be superseded explicitly.
 - Do not pass vague user wording directly into the council docs.
@@ -159,6 +160,7 @@ When using `prepare`, `start`, `continue`, or `reopen`, also read [`references/s
 - For spec-driven work, require a contract that mirrors the major `M*` sections in `spec.md` with top-level `M#` items and explicit nested `M#.A#` checkable sub-points for every acceptance criterion.
 - Task-local `AGENTS.md` stays behavioral and stable; do not put task-specific requirements there.
 - `github_pr_codex` special case: when the user already has a PR and wants GitHub Codex to review the live branch, local `task.md` / `review.md` / `spec.md` may be omitted if the PR and current-head review findings already form a usable brief.
+- Strong default: user wording like “use Codex Council on this PR”, “work on PR #123”, or a pasted GitHub PR URL should be interpreted as a request for `github_pr_codex` unless they explicitly ask for the internal reviewer loop instead.
 - `branch_northstar_summary.md` is optional supporting context for branch/worktree intent in that PR-driven mode.
 
 Use the corresponding document references before writing:

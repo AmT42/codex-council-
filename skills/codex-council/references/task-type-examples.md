@@ -39,6 +39,20 @@ Route:
 - optional: add `task.md` only if a short brief would clarify the requested outcome
 - commands: `init` if needed, fill the docs directly, then `start`
 
+## Existing PR review loop
+
+User:
+
+> Use Codex Council on PR #123 and keep working until Codex stops reporting major issues.
+
+Route:
+
+- mode: findings-driven fix
+- execution mode: `github_pr_codex`
+- docs: PR and current-head GitHub Codex review findings are the effective brief; add `branch_northstar_summary.md` only if branch intent needs durable local context
+- commands: `init` if needed, then `start --review-mode github_pr_codex --github-pr <pr-url>`
+- do not default to the internal reviewer loop unless the user explicitly asks for generator/reviewer mode
+
 ## Broad feature work
 
 User:
