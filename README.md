@@ -412,6 +412,16 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
   --github-pr https://github.com/acme/repo/pull/123
 ```
 
+Optional internal outer-review example:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
+  --dir /path/to/target-repo \
+  --outer-review-session-id <codex_session_id>
+```
+
+The outer-review session id is a resumable Codex session id, not a generic thread label. This additive layer applies only to the normal internal generator/reviewer mode, not to `github_pr_codex`.
+
 Inspect or resume later:
 
 ```bash
@@ -419,6 +429,17 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task --dir /path/to/target-repo
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py reopen my-task --dir /path/to/target-repo --run-id latest --reason-kind false_approved --reason "The approval missed a blocking fallback bug."
 ```
+
+Internal outer-review loop:
+
+- when an internal run with `--outer-review-session-id` reaches reviewer `approved`, the harness records that approval and writes an `outer_review_handoff.*` artifact pair
+- the outer agent re-verifies the whole task against current branch state and intended behavior
+- only `reopen --reason-kind false_approved` on that approved internal run with a prior outer-review handoff enters the explicit outer-review path
+- the first generator turn of that reopen is triage-only and must classify every active finding as `agree`, `disagree`, or `uncertain`
+- after triage, the harness pauses for outer finalization through canonical `review.md`
+- the outer agent must run `continue` even if `review.md` is unchanged so the harness can write `outer_review_finalization_ack.*`
+- if finalization clears every remaining finding, the run closes as `closed_no_remaining_outer_findings` instead of pretending it earned a fresh internal approval
+- if findings remain, `continue` resumes the next normal generator/reviewer cycle from that finalized remaining set
 
 GitHub PR Codex recovery example:
 
@@ -464,6 +485,8 @@ The TUI supervisor:
 - can start `github_pr_codex` generator-first without local `task.md`, `review.md`, or `spec.md`
 - materializes current-head GitHub review findings into turn-scoped review input artifacts for the generator
 - resumes blocked `github_pr_codex` reviewer turns on the same turn instead of forcing a new turn
+- can add an internal-mode-only outer-review layer driven by a resumable Codex session id
+- keeps approved internal runs terminal for `continue`, but can write durable outer-review handoff/finalization artifacts around that approval lifecycle
 
 `continue` is the intended path after:
 
@@ -471,6 +494,7 @@ The TUI supervisor:
 - a `needs_human` pause
 - a `changes_requested` reviewer verdict
 - a stopped session whose validated artifacts still exist
+- an outer-review finalization pause where canonical `review.md` has been finalized and the harness still needs to write `outer_review_finalization_ack.*`
 
 `reopen` is the intended path after an approved run when:
 
@@ -480,6 +504,13 @@ The TUI supervisor:
   - use `--reason-kind requirements_changed_after_approval`
 
 `reopen` creates a fresh run from the current canonical docs, records the superseded run and turn, stores doc-diff metadata, and appends an audit entry under `.codex-council/reopen-events.jsonl`.
+
+For the internal outer-review layer, the exact reopen trigger matters:
+
+- only `false_approved` on an internally approved run with configured outer review and a recorded `outer_review_handoff.json` enters the special outer-review triage/finalization path
+- `requirements_changed_after_approval` remains the normal approved-run supersession path even if the earlier run had outer review configured
+- `reopen --outer-review-session-id <codex_session_id>` overrides the inherited internal outer-review session id for the new run
+- `reopen --clear-outer-review-session-id` disables inherited internal outer review for the new run
 
 ## Supervisor Lifetime
 

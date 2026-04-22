@@ -8,6 +8,7 @@
 - the docs are too weak to justify `start`
 - the supervisor died while a role session was still running
 - an approved run was wrong or the canonical docs changed after approval
+- an outer-review false-approved reopen is paused waiting for outer-review finalization through canonical `review.md`
 
 ## Weak-doc failure
 
@@ -55,6 +56,13 @@ If `status` shows that the selected run is already approved, but that approval i
 - use `reopen` to create a fresh linked run
 - use `false_approved` when the prior approval was wrong under the old intended requirements
 - use `requirements_changed_after_approval` when the canonical docs changed afterward and now supersede the old approval
+
+Internal outer-review special case:
+
+- if the approved internal run had configured outer review, expect `outer_review_handoff.*` after approval
+- if the outer agent finds blockers under unchanged requirements, update canonical `review.md` and use `reopen --reason-kind false_approved`
+- after the first triage-only generator turn of that reopen, use `continue` only after canonical `review.md` has been finalized
+- unchanged `review.md` still requires `continue`; the harness must write `outer_review_finalization_ack.*`
 
 ## Human intervention failure
 

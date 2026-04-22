@@ -528,6 +528,20 @@ Only fill the minimal required document set for the chosen route.
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo
 ```
 
+Optional internal outer-review layer:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
+  --dir /path/to/target-repo \
+  --outer-review-session-id <codex_session_id>
+```
+
+Rules:
+
+- the identifier is a resumable Codex session id, not a generic thread label
+- this layer is internal-review-mode-only for the first implementation
+- do not pass `--outer-review-session-id` with `--review-mode github_pr_codex`
+
 Prefer the default auto role selection unless a special case requires otherwise.
 
 Process rule:
@@ -558,6 +572,7 @@ Use `continue` after:
 - human edits to canonical task docs
 - session loss where validated artifacts still exist
 - stale runs where the supervisor died but `status` now shows the correct derived continuation
+- an outer-review finalization pause after the first triage-only generator turn on an outer-review `false_approved` reopen
 
 Like `start`, `continue` must also be kept alive. The same lifetime rule applies to `reopen`.
 
@@ -567,6 +582,13 @@ Preferred default for an outer Codex agent:
 - otherwise launch the supervisor command inside a dedicated `tmux` session and keep that session alive
 
 Approved runs are terminal for `continue`. If `status` shows an approved run and that approval must be superseded, use `reopen` instead.
+
+Internal outer-review special case:
+
+- after the triage-only generator turn, the harness pauses and requires outer finalization through canonical `review.md`
+- the outer agent must still run `continue`, even if `review.md` stayed unchanged, because the harness needs to write `outer_review_finalization_ack.*`
+- if no points remain after that finalization step, the run closes as `closed_no_remaining_outer_findings`
+- if points remain, `continue` writes the acknowledgment artifact first and only then resumes a fresh normal generator/reviewer cycle
 
 ### Reopen an approved run
 
@@ -582,6 +604,17 @@ Use `reopen` only when the selected run is already approved and that approval mu
   - the canonical docs changed after approval and now supersede it
 
 `reopen` creates a fresh run, preserves the approved run unchanged, records a reopen entry in `.codex-council/reopen-events.jsonl`, and carries the reopen reason plus doc-diff metadata into the new generator/reviewer prompts.
+
+Internal outer-review exact path:
+
+- an internally approved run with configured outer review writes `outer_review_handoff.*` when approval is recorded
+- only `reopen --reason-kind false_approved` on that internally approved run with a recorded handoff enters the explicit outer-review path
+- the first generator turn of that reopen is triage-only
+- after triage, the outer agent finalizes the surviving findings through canonical `review.md` and runs `continue`
+- unchanged `review.md` still requires `continue`; unchanged text alone is not the proof artifact
+- if finalization removes every remaining point, the run closes terminally as `closed_no_remaining_outer_findings` instead of minting a fresh internal approval
+- use `reopen --outer-review-session-id <codex_session_id>` to override the inherited internal outer-review session id for the new run
+- use `reopen --clear-outer-review-session-id` to disable inherited internal outer review for the new run
 
 ## Continue Policy
 

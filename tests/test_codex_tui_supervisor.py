@@ -137,6 +137,61 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             )
         self.assertIn("invalid generator result: changed", str(ctx.exception))
 
+    def test_validate_generator_status_accepts_outer_review_triage(self) -> None:
+        status = MODULE.validate_generator_status(
+            {
+                "result": "no_changes_needed",
+                "summary": "Recorded triage only.",
+                "changed_files": [],
+                "outer_review_triage": {
+                    "cycle_id": "run-2.C1",
+                    "points": [
+                        {
+                            "point_id": "run-2.C1.P1",
+                            "classification": "agree",
+                            "evidence_summary": "The current branch still misses the required handoff artifact.",
+                        }
+                    ],
+                },
+            }
+        )
+        self.assertEqual(status["outer_review_triage"]["cycle_id"], "run-2.C1")
+
+    def test_validate_generator_status_for_turn_requires_complete_outer_review_triage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            turn_dir = Path(tmp_dir) / "turns" / "0001"
+            turn_dir.mkdir(parents=True)
+            MODULE.save_json(
+                turn_dir / MODULE.OUTER_REVIEW_INPUT_JSON_FILENAME,
+                {
+                    "cycle_id": "run-2.C1",
+                    "points": [
+                        {"point_id": "run-2.C1.P1"},
+                        {"point_id": "run-2.C1.P2"},
+                    ],
+                },
+            )
+            with self.assertRaises(ValueError) as ctx:
+                MODULE.validate_generator_status_for_turn(
+                    turn_dir,
+                    {
+                        "result": "no_changes_needed",
+                        "summary": "Only triaged one point.",
+                        "changed_files": [],
+                        "outer_review_triage": {
+                            "cycle_id": "run-2.C1",
+                            "points": [
+                                {
+                                    "point_id": "run-2.C1.P1",
+                                    "classification": "agree",
+                                    "evidence_summary": "First point only.",
+                                }
+                            ],
+                        },
+                    },
+                )
+            self.assertIn("must contain every active outer-review point", str(ctx.exception))
+
     def test_validate_reviewer_status_accepts_approved(self) -> None:
         status = MODULE.validate_reviewer_status(
             {
@@ -3522,6 +3577,510 @@ reviewer_reset_mode = "wrong"
             events_text = MODULE.events_path_for(run_dir).read_text(encoding="utf-8")
             self.assertIn("\"event\": \"blocked_invalid_artifacts\"", events_text)
 
+    def test_build_outer_review_state_for_start_rejects_github_mode(self) -> None:
+        args = argparse.Namespace(outer_review_session_id="sess-123")
+        with self.assertRaises(SystemExit) as ctx:
+            MODULE.build_outer_review_state_for_start("github_pr_codex", args)
+        self.assertIn("--outer-review-session-id", str(ctx.exception))
+
+    def test_start_run_rejects_outer_review_session_id_for_github_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix a bug.\n\n## Context\n\n- narrow scope\n\n## Success Signal\n\nA concrete regression is fixed.\n",
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                generator_session=None,
+                reviewer_session=None,
+                fork_session_id=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+                review_mode="github_pr_codex",
+                github_pr="42",
+                github_branch=None,
+                github_base=None,
+                outer_review_session_id="sess-123",
+                start_role="auto",
+            )
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.start_run(args)
+            self.assertIn("--outer-review-session-id", str(ctx.exception))
+
+    def test_write_outer_review_input_artifacts_uses_findings_section_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.REVIEW_FILENAME).write_text(
+                "# Review\n\n## Findings\n\n- Fix the missing handoff artifact.\n\n## Context\n\n- This context bullet must not become an active point.\n",
+                encoding="utf-8",
+            )
+            run_dir = task_root / "runs" / "run-2"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-2",
+                workspace_profile="review",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(codex_session_id=None),
+                reopen_context={
+                    "reason_kind": "false_approved",
+                    "outer_review_path": True,
+                    "reopened_from": {"run_id": "run-1", "turn": "0001"},
+                },
+            )
+
+            payload = MODULE.write_outer_review_input_artifacts(
+                run_dir,
+                task_root,
+                turn_one,
+                state=state,
+            )
+
+            self.assertEqual(payload["point_extraction_mode"], "findings_section_bullets")
+            self.assertEqual(len(payload["points"]), 1)
+            self.assertEqual(payload["points"][0]["text"], "Fix the missing handoff artifact.")
+
+    def test_outer_review_input_ledger_uses_exact_text_lineage_on_reopen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            previous_run_dir = task_root / "runs" / "run-1"
+            new_run_dir = task_root / "runs" / "run-2"
+            previous_state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="review",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen-old",
+                reviewer_session="rev-old",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(codex_session_id="sess-old"),
+            )
+            previous_state["outer_review"]["active_cycle_id"] = "run-1.C1"
+            MODULE.save_run_state(previous_run_dir, previous_state)
+            MODULE.save_outer_review_ledger(
+                previous_run_dir,
+                {
+                    "version": 1,
+                    "cycles": [
+                        {
+                            "cycle_id": "run-1.C1",
+                            "active_points": [
+                                {
+                                    "point_id": "run-1.C1.P1",
+                                    "ordinal": 1,
+                                    "raw_line": "- Keep the handoff artifact deterministic.",
+                                    "text": "Keep the handoff artifact deterministic.",
+                                    "normalized_text": "keep the handoff artifact deterministic.",
+                                    "cycle_id": "run-1.C1",
+                                },
+                                {
+                                    "point_id": "run-1.C1.P2",
+                                    "ordinal": 2,
+                                    "raw_line": "- Require explicit finalization acknowledgment.",
+                                    "text": "Require explicit finalization acknowledgment.",
+                                    "normalized_text": "require explicit finalization acknowledgment.",
+                                    "cycle_id": "run-1.C1",
+                                },
+                            ],
+                            "handoff_turns": ["0003"],
+                        }
+                    ],
+                    "point_history": {
+                        "run-1.C1.P1": {
+                            "point_id": "run-1.C1.P1",
+                            "cycle_id": "run-1.C1",
+                            "later_reviewer_disposition": "cleared",
+                            "finalization_outcome": "carried_forward_unchanged",
+                            "lineage_kind": "new_in_cycle",
+                            "derived_from_point_ids": [],
+                        },
+                        "run-1.C1.P2": {
+                            "point_id": "run-1.C1.P2",
+                            "cycle_id": "run-1.C1",
+                            "later_reviewer_disposition": "cleared",
+                            "finalization_outcome": "carried_forward_unchanged",
+                            "lineage_kind": "new_in_cycle",
+                            "derived_from_point_ids": [],
+                        },
+                    },
+                },
+            )
+            MODULE.clone_outer_review_ledger(previous_run_dir, new_run_dir)
+            (task_root / MODULE.REVIEW_FILENAME).write_text(
+                "# Review\n\n## Findings\n\n- Keep the handoff artifact deterministic.\n- Require an explicit acknowledgment artifact before resume.\n",
+                encoding="utf-8",
+            )
+            turn_one = MODULE.prepare_turn(new_run_dir, 1, task_root)
+            new_state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-2",
+                workspace_profile="review",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(codex_session_id=None),
+                reopen_context={
+                    "reason_kind": "false_approved",
+                    "outer_review_path": True,
+                    "reopened_from": {
+                        "run_id": "run-1",
+                        "turn": "0003",
+                        "run_dir": str(previous_run_dir),
+                    },
+                },
+            )
+
+            MODULE.write_outer_review_input_artifacts(
+                new_run_dir,
+                task_root,
+                turn_one,
+                state=new_state,
+            )
+
+            ledger = MODULE.load_outer_review_ledger(new_run_dir)
+            point_history = ledger["point_history"]
+            self.assertEqual(point_history["run-2.C1.P1"]["lineage_kind"], "carried_forward_unchanged")
+            self.assertEqual(point_history["run-2.C1.P1"]["derived_from_point_ids"], ["run-1.C1.P1"])
+            self.assertEqual(point_history["run-2.C1.P2"]["lineage_kind"], "new_in_cycle")
+            self.assertEqual(point_history["run-2.C1.P2"]["derived_from_point_ids"], [])
+            self.assertEqual(point_history["run-1.C1.P1"]["later_reviewer_disposition"], "upheld")
+            self.assertEqual(point_history["run-1.C1.P2"]["later_reviewer_disposition"], "cleared")
+
+    def test_write_outer_review_handoff_artifacts_updates_state_and_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state={
+                    "current_branch": MODULE.git_current_branch(repo_root),
+                    "last_generator_commit_sha": MODULE.git_head_sha(repo_root),
+                },
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(codex_session_id="sess-123"),
+            )
+            MODULE.save_run_state(run_dir, state)
+            with mock.patch.object(
+                MODULE,
+                "dispatch_outer_review_prompt",
+                return_value=("confirmed_prompt_dispatch", "outer-thread"),
+            ):
+                MODULE.write_outer_review_handoff_artifacts(run_dir, state, task_root, turn_one, 1)
+
+            payload = MODULE.load_json(turn_one / MODULE.OUTER_REVIEW_HANDOFF_JSON_FILENAME)
+            updated_state = MODULE.load_json(run_dir / "state.json")
+            self.assertEqual(payload["dispatch_status"], "confirmed_prompt_dispatch")
+            self.assertIn("false_approved", payload["request_text"])
+            self.assertIn("requirements_changed_after_approval", payload["request_text"])
+            self.assertEqual(updated_state["outer_review"]["latest_handoff_turn"], "0001")
+            self.assertEqual(updated_state["outer_review"]["latest_handoff_dispatch_status"], "confirmed_prompt_dispatch")
+            self.assertEqual(updated_state["outer_review"]["codex_thread_name"], "outer-thread")
+
+    def test_continue_run_closes_when_outer_review_finalization_clears_all_points(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.REVIEW_FILENAME).write_text(
+                "# Review\n\n## Findings\n\n",
+                encoding="utf-8",
+            )
+            run_dir = task_root / "runs" / "run-2"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            MODULE.save_json(
+                turn_one / MODULE.OUTER_REVIEW_INPUT_JSON_FILENAME,
+                {
+                    "cycle_id": "run-2.C1",
+                    "source": {
+                        "review_path": str(task_root / MODULE.REVIEW_FILENAME),
+                        "reopened_from_run_id": "run-1",
+                        "reopened_from_turn": "0001",
+                        "reopen_reason_kind": "false_approved",
+                    },
+                    "point_extraction_mode": "findings_section_bullets",
+                    "points": [
+                        {
+                            "point_id": "run-2.C1.P1",
+                            "ordinal": 1,
+                            "raw_line": "- Keep the handoff deterministic.",
+                            "text": "Keep the handoff deterministic.",
+                            "normalized_text": "keep the handoff deterministic.",
+                            "cycle_id": "run-2.C1",
+                        }
+                    ],
+                },
+            )
+            MODULE.save_json(
+                turn_one / MODULE.OUTER_REVIEW_FINALIZATION_JSON_FILENAME,
+                {
+                    "cycle_id": "run-2.C1",
+                    "review_snapshot_sha256_before_finalization": "before-sha",
+                    "triage": {
+                        "cycle_id": "run-2.C1",
+                        "points": [
+                            {
+                                "point_id": "run-2.C1.P1",
+                                "classification": "agree",
+                                "evidence_summary": "The branch still lacks the handoff artifact.",
+                            }
+                        ],
+                    },
+                },
+            )
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-2",
+                workspace_profile="review",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(codex_session_id=None),
+            )
+            state["status"] = "paused_needs_human"
+            state["current_turn"] = 1
+            state["outer_review"]["active_cycle_id"] = "run-2.C1"
+            state["outer_review"]["pending_outer_finalization"] = True
+            MODULE.save_run_state(run_dir, state)
+
+            args = argparse.Namespace(task_name="demo-task", dir=str(repo_root), allow_non_git=False, run_id="run-2")
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = MODULE.continue_run(args)
+
+            self.assertEqual(result, 0)
+            final_state = MODULE.load_json(run_dir / "state.json")
+            ack = MODULE.load_json(turn_one / MODULE.OUTER_REVIEW_FINALIZATION_ACK_JSON_FILENAME)
+            self.assertEqual(final_state["status"], "closed_no_remaining_outer_findings")
+            self.assertEqual(ack["confirmation_mode"], "cleared_all_points")
+
+    def test_continue_run_acknowledges_unchanged_outer_review_and_resumes_generator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.REVIEW_FILENAME).write_text(
+                "# Review\n\n## Findings\n\n- Keep the handoff deterministic.\n",
+                encoding="utf-8",
+            )
+            run_dir = task_root / "runs" / "run-2"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            review_text = (task_root / MODULE.REVIEW_FILENAME).read_text(encoding="utf-8")
+            MODULE.save_json(
+                turn_one / MODULE.OUTER_REVIEW_INPUT_JSON_FILENAME,
+                {
+                    "cycle_id": "run-2.C1",
+                    "source": {
+                        "review_path": str(task_root / MODULE.REVIEW_FILENAME),
+                        "reopened_from_run_id": "run-1",
+                        "reopened_from_turn": "0001",
+                        "reopen_reason_kind": "false_approved",
+                    },
+                    "point_extraction_mode": "findings_section_bullets",
+                    "points": [
+                        {
+                            "point_id": "run-2.C1.P1",
+                            "ordinal": 1,
+                            "raw_line": "- Keep the handoff deterministic.",
+                            "text": "Keep the handoff deterministic.",
+                            "normalized_text": "keep the handoff deterministic.",
+                            "cycle_id": "run-2.C1",
+                        }
+                    ],
+                },
+            )
+            MODULE.save_json(
+                turn_one / MODULE.OUTER_REVIEW_FINALIZATION_JSON_FILENAME,
+                {
+                    "cycle_id": "run-2.C1",
+                    "review_snapshot_sha256_before_finalization": MODULE.hash_text(review_text),
+                    "triage": {
+                        "cycle_id": "run-2.C1",
+                        "points": [
+                            {
+                                "point_id": "run-2.C1.P1",
+                                "classification": "agree",
+                                "evidence_summary": "The branch still lacks the handoff artifact.",
+                            }
+                        ],
+                    },
+                },
+            )
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-2",
+                workspace_profile="review",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(codex_session_id=None),
+            )
+            state["status"] = "paused_needs_human"
+            state["current_turn"] = 1
+            state["outer_review"]["active_cycle_id"] = "run-2.C1"
+            state["outer_review"]["pending_outer_finalization"] = True
+            MODULE.save_run_state(run_dir, state)
+
+            args = argparse.Namespace(task_name="demo-task", dir=str(repo_root), allow_non_git=False, run_id="run-2")
+            with mock.patch.object(MODULE, "ensure_active_role_sessions_ready", return_value=None), mock.patch.object(
+                MODULE,
+                "supervisor_loop_from",
+                return_value=None,
+            ) as supervisor_loop, contextlib.redirect_stdout(io.StringIO()):
+                result = MODULE.continue_run(args)
+
+            self.assertEqual(result, 0)
+            ack = MODULE.load_json(turn_one / MODULE.OUTER_REVIEW_FINALIZATION_ACK_JSON_FILENAME)
+            self.assertEqual(ack["confirmation_mode"], "review_unchanged_confirmed")
+            supervisor_loop.assert_called_once()
+            self.assertEqual(supervisor_loop.call_args.kwargs["start_turn"], 2)
+            self.assertEqual(supervisor_loop.call_args.kwargs["start_role"], "generator")
+
+    def test_determine_continue_target_rejects_closed_no_remaining_outer_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text="Fix bug")
+            run_dir = task_root / "runs" / "run-1"
+            MODULE.prepare_turn(run_dir, 1, task_root)
+            state = {
+                "status": "closed_no_remaining_outer_findings",
+                "current_turn": 1,
+                "review_bridge": {"mode": "internal"},
+            }
+            with self.assertRaises(SystemExit) as ctx:
+                MODULE.determine_continue_target(run_dir, state)
+            self.assertIn("closed_no_remaining_outer_findings", str(ctx.exception))
+
+    def test_reopen_run_enters_outer_review_path_only_for_false_approved_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.REVIEW_FILENAME).write_text(
+                "# Review\n\n## Findings\n\n- The approved branch still misses the outer handoff lifecycle.\n",
+                encoding="utf-8",
+            )
+            previous_run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(previous_run_dir, 1, task_root)
+            MODULE.write_text(turn_one / "generator" / "message.md", "generator message")
+            MODULE.save_json(
+                turn_one / "generator" / "status.json",
+                {"result": "implemented", "summary": "done", "changed_files": ["src/app.py"]},
+            )
+            MODULE.write_text(turn_one / "reviewer" / "message.md", "reviewer message")
+            MODULE.save_json(
+                turn_one / "reviewer" / "status.json",
+                {
+                    "verdict": "approved",
+                    "summary": "approved before outer verification",
+                    "blocking_issues": [],
+                    "critical_dimensions": {key: "pass" for key in MODULE.critical_review_dimension_keys()},
+                },
+            )
+            MODULE.save_turn_metadata(turn_one, 1, "approved", role="reviewer")
+            previous_state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="review",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen-old",
+                reviewer_session="rev-old",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(codex_session_id="sess-123"),
+            )
+            previous_state["status"] = "approved"
+            previous_state["current_turn"] = 1
+            previous_state["outer_review"]["latest_handoff_turn"] = "0001"
+            previous_state["outer_review"]["latest_handoff_artifact_json"] = str(
+                turn_one / MODULE.OUTER_REVIEW_HANDOFF_JSON_FILENAME
+            )
+            previous_state["outer_review"]["latest_handoff_artifact_md"] = str(
+                turn_one / MODULE.OUTER_REVIEW_HANDOFF_MARKDOWN_FILENAME
+            )
+            MODULE.save_run_state(previous_run_dir, previous_state)
+            MODULE.save_json(
+                turn_one / MODULE.OUTER_REVIEW_HANDOFF_JSON_FILENAME,
+                {
+                    "task_name": "demo-task",
+                    "run_id": "run-1",
+                    "approved_turn": "0001",
+                    "request_text": "reopen with false_approved if needed",
+                },
+            )
+            MODULE.write_text(
+                turn_one / MODULE.OUTER_REVIEW_HANDOFF_MARKDOWN_FILENAME,
+                "# Outer Review Handoff\n",
+            )
+            self.commit_repo_changes(repo_root, "record outer review handoff")
+
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                reason_kind="false_approved",
+                reason="The approved run still misses the required outer-review gate.",
+                outer_review_session_id=None,
+                clear_outer_review_session_id=False,
+            )
+            with mock.patch.object(MODULE, "run_id_value", return_value="run-2"), mock.patch.object(
+                MODULE, "read_codex_session_index", return_value=[]
+            ), mock.patch.object(
+                MODULE, "create_tmux_sessions", return_value=None
+            ), mock.patch.object(
+                MODULE, "wait_for_tmux_sessions_ready", return_value=None
+            ), mock.patch.object(
+                MODULE, "supervisor_loop_from", return_value=None
+            ), contextlib.redirect_stdout(io.StringIO()):
+                result = MODULE.reopen_run(args)
+
+            self.assertEqual(result, 0)
+            new_state = MODULE.load_json(task_root / "runs" / "run-2" / "state.json")
+            self.assertTrue(new_state["reopen"]["outer_review_path"])
+            self.assertTrue((task_root / "runs" / "run-2" / MODULE.OUTER_REVIEW_LEDGER_FILENAME).exists())
+
     def test_reopen_run_creates_new_run_metadata_index_and_prompt_context_for_review_only_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir) / "repo"
@@ -3865,6 +4424,30 @@ reviewer_reset_mode = "wrong"
         self.assertEqual(reopen_args.reason_kind, "false_approved")
         self.assertEqual(reopen_args.reason, "Approval was wrong.")
         self.assertTrue(status_args.planning)
+
+    def test_build_parser_exposes_outer_review_session_args(self) -> None:
+        parser = MODULE.build_parser()
+        start_args = parser.parse_args(
+            [
+                "start",
+                "demo-task",
+                "--outer-review-session-id",
+                "sess-123",
+            ]
+        )
+        reopen_args = parser.parse_args(
+            [
+                "reopen",
+                "demo-task",
+                "--reason-kind",
+                "false_approved",
+                "--reason",
+                "Approval was wrong.",
+                "--clear-outer-review-session-id",
+            ]
+        )
+        self.assertEqual(start_args.outer_review_session_id, "sess-123")
+        self.assertTrue(reopen_args.clear_outer_review_session_id)
 
     def test_prepare_run_scaffolds_planning_workspace_and_source_intent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4886,6 +5469,27 @@ reviewer_reset_mode = "wrong"
         self.assertIn("requirements_changed_after_approval", run_lifecycle)
         self.assertIn("`reopen`", failure_recovery)
         self.assertIn("`reopen`", routing)
+
+    def test_consumer_docs_describe_internal_outer_review_loop(self) -> None:
+        repo_root = MODULE_PATH.parents[1]
+        readme = (repo_root / "README.md").read_text(encoding="utf-8")
+        architecture = (repo_root / "ARCHITECTURE.md").read_text(encoding="utf-8")
+        instructs = (repo_root / "INSTRUCTS.md").read_text(encoding="utf-8")
+        skill = (repo_root / "skills" / "codex-council" / "SKILL.md").read_text(encoding="utf-8")
+        run_lifecycle = (repo_root / "skills" / "codex-council" / "references" / "run-lifecycle.md").read_text(encoding="utf-8")
+        failure_recovery = (repo_root / "skills" / "codex-council" / "references" / "failure-recovery.md").read_text(encoding="utf-8")
+        routing = (repo_root / "skills" / "codex-council" / "references" / "routing.md").read_text(encoding="utf-8")
+
+        for text in (readme, instructs, run_lifecycle):
+            self.assertIn("--outer-review-session-id", text)
+            self.assertIn("resumable Codex session id", text)
+            self.assertIn("closed_no_remaining_outer_findings", text)
+            self.assertIn("triage-only", text)
+
+        self.assertIn("outer-review finalization", failure_recovery)
+        self.assertIn("false_approved", routing)
+        self.assertIn("outer review", skill.lower())
+        self.assertIn("outer-review handoff", architecture.lower())
 
     def test_codex_council_skill_reference_pack_is_present_and_linked(self) -> None:
         repo_root = MODULE_PATH.parents[1]

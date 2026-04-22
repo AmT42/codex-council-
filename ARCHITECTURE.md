@@ -310,6 +310,17 @@ If the approval was wrong or the canonical requirements changed afterward, the r
 - creates a fresh linked run from the current canonical docs
 - records reopen metadata and doc-change context durably
 
+Internal-mode outer review is an additive lifecycle on top of that rule, not an exception to it.
+
+- an internal run may optionally carry an outer-review resumable Codex session id
+- when such a run reaches reviewer `approved`, the run stays terminal for `continue`
+- the supervisor writes durable outer-review handoff `outer_review_handoff.*` artifacts and may attempt a best-effort dispatch to that configured outer session id
+- if the outer agent later finds blockers under unchanged requirements, the re-entry path is still explicit `reopen --reason-kind false_approved`
+- only that precise false-approved reopen of an internally approved run with a prior outer-review handoff enters the outer-review path
+- the first generator turn of that reopen is triage-only
+- after triage, the run pauses for outer finalization through canonical `review.md`
+- `continue` must write `outer_review_finalization_ack.*` before it can either resume the next normal cycle or close as `closed_no_remaining_outer_findings`
+
 ### 5. Approval discipline
 
 Approval is structured, not narrative.

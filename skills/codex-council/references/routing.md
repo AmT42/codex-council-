@@ -60,6 +60,7 @@ Action:
 - prefer `prepare` when the existing planning run is still the right one
 - prefer `reopen` when the selected run is already approved but must be superseded explicitly
 - avoid overwriting docs unless the repo state clearly requires it
+- if `status` shows a pause waiting for outer-review finalization, finalize canonical `review.md` and then use `continue`; do not create a new run for that step
 
 ## Mode 3: Concrete execution request
 
@@ -102,6 +103,7 @@ Optional:
 - if the findings already live on an existing PR and the operator is using `github_pr_codex`, local `review.md` can be omitted and the PR review findings can drive the loop directly
 - add `branch_northstar_summary.md` when the branch/worktree intent needs durable context without promoting that context into `task.md`
 - if the user gave a PR URL/number and asked to use the harness on that PR, this is the default route unless they explicitly requested the internal reviewer loop
+- for internal-mode outer review, findings that invalidate an earlier approval should update canonical `review.md` and route through `reopen --reason-kind false_approved`, not through `continue`
 
 ## Mode 5: Broad feature or spec work
 

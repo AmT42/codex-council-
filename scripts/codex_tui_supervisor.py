@@ -42,6 +42,15 @@ CONTRACT_FILENAME = "contract.md"
 BRANCH_NORTHSTAR_SUMMARY_FILENAME = "branch_northstar_summary.md"
 GITHUB_REVIEW_INPUT_MARKDOWN_FILENAME = "github_review_input.md"
 GITHUB_REVIEW_INPUT_JSON_FILENAME = "github_review_input.json"
+OUTER_REVIEW_HANDOFF_MARKDOWN_FILENAME = "outer_review_handoff.md"
+OUTER_REVIEW_HANDOFF_JSON_FILENAME = "outer_review_handoff.json"
+OUTER_REVIEW_INPUT_MARKDOWN_FILENAME = "outer_review_input.md"
+OUTER_REVIEW_INPUT_JSON_FILENAME = "outer_review_input.json"
+OUTER_REVIEW_FINALIZATION_MARKDOWN_FILENAME = "outer_review_finalization.md"
+OUTER_REVIEW_FINALIZATION_JSON_FILENAME = "outer_review_finalization.json"
+OUTER_REVIEW_FINALIZATION_ACK_MARKDOWN_FILENAME = "outer_review_finalization_ack.md"
+OUTER_REVIEW_FINALIZATION_ACK_JSON_FILENAME = "outer_review_finalization_ack.json"
+OUTER_REVIEW_LEDGER_FILENAME = "outer_review_ledger.json"
 INPUT_DOC_ORDER = ("task", "review", "spec", "contract")
 INPUT_DOC_FILENAMES = {
     "task": TASK_FILENAME,
@@ -78,6 +87,13 @@ GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked", "needs_human
 REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
 PLANNER_RESULTS = {"drafted", "blocked", "needs_human"}
 INTENT_CRITIC_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
+OUTER_REVIEW_DISPATCH_STATUSES = {
+    "skipped_unconfigured",
+    "confirmed_prompt_dispatch",
+    "attempted_unconfirmed",
+    "failed_unresolved_session",
+}
+OUTER_REVIEW_TRIAGE_CLASSIFICATIONS = {"agree", "disagree", "uncertain"}
 HUMAN_SOURCES = {
     TASK_FILENAME,
     REVIEW_FILENAME,
@@ -1085,6 +1101,42 @@ def github_review_input_markdown_path(turn_dir: Path) -> Path:
 
 def github_review_input_json_path(turn_dir: Path) -> Path:
     return turn_dir / GITHUB_REVIEW_INPUT_JSON_FILENAME
+
+
+def outer_review_handoff_markdown_path(turn_dir: Path) -> Path:
+    return turn_dir / OUTER_REVIEW_HANDOFF_MARKDOWN_FILENAME
+
+
+def outer_review_handoff_json_path(turn_dir: Path) -> Path:
+    return turn_dir / OUTER_REVIEW_HANDOFF_JSON_FILENAME
+
+
+def outer_review_input_markdown_path(turn_dir: Path) -> Path:
+    return turn_dir / OUTER_REVIEW_INPUT_MARKDOWN_FILENAME
+
+
+def outer_review_input_json_path(turn_dir: Path) -> Path:
+    return turn_dir / OUTER_REVIEW_INPUT_JSON_FILENAME
+
+
+def outer_review_finalization_markdown_path(turn_dir: Path) -> Path:
+    return turn_dir / OUTER_REVIEW_FINALIZATION_MARKDOWN_FILENAME
+
+
+def outer_review_finalization_json_path(turn_dir: Path) -> Path:
+    return turn_dir / OUTER_REVIEW_FINALIZATION_JSON_FILENAME
+
+
+def outer_review_finalization_ack_markdown_path(turn_dir: Path) -> Path:
+    return turn_dir / OUTER_REVIEW_FINALIZATION_ACK_MARKDOWN_FILENAME
+
+
+def outer_review_finalization_ack_json_path(turn_dir: Path) -> Path:
+    return turn_dir / OUTER_REVIEW_FINALIZATION_ACK_JSON_FILENAME
+
+
+def outer_review_ledger_path(run_dir: Path) -> Path:
+    return run_dir / OUTER_REVIEW_LEDGER_FILENAME
 
 
 def role_raw_output_path(turn_dir: Path, role: str) -> Path:
@@ -2425,6 +2477,24 @@ def extra_context_files(task_root: Path, turn_dir: Path | None = None) -> dict[s
             files["github_review_input_markdown"] = review_markdown_path
         if review_json_path.exists():
             files["github_review_input_json"] = review_json_path
+        outer_review_markdown = outer_review_input_markdown_path(turn_dir)
+        outer_review_json = outer_review_input_json_path(turn_dir)
+        if outer_review_markdown.exists():
+            files["outer_review_input_markdown"] = outer_review_markdown
+        if outer_review_json.exists():
+            files["outer_review_input_json"] = outer_review_json
+        finalization_markdown = outer_review_finalization_markdown_path(turn_dir)
+        finalization_json = outer_review_finalization_json_path(turn_dir)
+        if finalization_markdown.exists():
+            files["outer_review_finalization_markdown"] = finalization_markdown
+        if finalization_json.exists():
+            files["outer_review_finalization_json"] = finalization_json
+        finalization_ack_markdown = outer_review_finalization_ack_markdown_path(turn_dir)
+        finalization_ack_json = outer_review_finalization_ack_json_path(turn_dir)
+        if finalization_ack_markdown.exists():
+            files["outer_review_finalization_ack_markdown"] = finalization_ack_markdown
+        if finalization_ack_json.exists():
+            files["outer_review_finalization_ack_json"] = finalization_ack_json
     return files
 
 
@@ -2904,6 +2974,372 @@ def normalize_optional_text(value, *, field_name: str) -> str | None:
     return normalized or None
 
 
+def normalize_outer_review_dispatch_status(value, *, field_name: str) -> str | None:
+    normalized = normalize_optional_text(value, field_name=field_name)
+    if normalized is None:
+        return None
+    if normalized not in OUTER_REVIEW_DISPATCH_STATUSES:
+        raise ValueError(
+            f"{field_name} must be one of: {', '.join(sorted(OUTER_REVIEW_DISPATCH_STATUSES))}"
+        )
+    return normalized
+
+
+def load_outer_review_thread_name(session_id: str | None) -> str | None:
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    session_entry = find_codex_session_entry(session_id)
+    if session_entry is None:
+        return None
+    thread_name = session_entry.get("thread_name")
+    return thread_name if isinstance(thread_name, str) and thread_name.strip() else None
+
+
+def new_outer_review_state(*, codex_session_id: str | None) -> dict:
+    configured = bool(codex_session_id)
+    return {
+        "configured": configured,
+        "identifier_kind": "codex_session_id" if configured else None,
+        "codex_session_id": codex_session_id,
+        "codex_thread_name": load_outer_review_thread_name(codex_session_id),
+        "latest_handoff_turn": None,
+        "latest_handoff_artifact_json": None,
+        "latest_handoff_artifact_md": None,
+        "latest_handoff_dispatch_status": (
+            None if configured else "skipped_unconfigured"
+        ),
+        "latest_triage_turn": None,
+        "latest_triage_artifact_json": None,
+        "latest_triage_artifact_md": None,
+        "latest_finalization_turn": None,
+        "latest_finalization_artifact_json": None,
+        "latest_finalization_artifact_md": None,
+        "latest_finalization_dispatch_status": (
+            None if configured else "skipped_unconfigured"
+        ),
+        "latest_finalization_ack_turn": None,
+        "latest_finalization_ack_artifact_json": None,
+        "latest_finalization_ack_artifact_md": None,
+        "latest_finalized_review_sha256": None,
+        "latest_finalized_confirmation_mode": None,
+        "active_cycle_id": None,
+        "pending_outer_finalization": False,
+    }
+
+
+def clone_outer_review_state_for_new_run(
+    previous_state: dict,
+    *,
+    override_session_id: str | None,
+    clear_session_id: bool,
+) -> dict | None:
+    if review_bridge_mode(previous_state) != "internal":
+        return None
+    previous_outer_review = previous_state.get("outer_review")
+    inherited_session_id = None
+    if isinstance(previous_outer_review, dict) and previous_outer_review.get("configured"):
+        inherited_session_id = normalize_optional_text(
+            previous_outer_review.get("codex_session_id"),
+            field_name="outer review codex_session_id",
+        )
+    if clear_session_id:
+        inherited_session_id = None
+    elif override_session_id is not None:
+        inherited_session_id = override_session_id
+    return new_outer_review_state(codex_session_id=inherited_session_id)
+
+
+def outer_review_state(state: dict) -> dict | None:
+    value = state.get("outer_review")
+    return value if isinstance(value, dict) else None
+
+
+def outer_review_is_configured(state: dict) -> bool:
+    outer_review = outer_review_state(state)
+    return bool(isinstance(outer_review, dict) and outer_review.get("configured"))
+
+
+def outer_review_pending_finalization(state: dict) -> bool:
+    outer_review = outer_review_state(state)
+    return bool(isinstance(outer_review, dict) and outer_review.get("pending_outer_finalization"))
+
+
+def outer_review_reopen_path_enabled(state: dict) -> bool:
+    reopen = state.get("reopen")
+    return bool(isinstance(reopen, dict) and reopen.get("outer_review_path"))
+
+
+def outer_review_review_points(review_text: str) -> tuple[str, list[str]]:
+    findings_section = extract_markdown_section(review_text, "## Findings")
+    if findings_section:
+        return "findings_section_bullets", review_items(findings_section)
+    return "whole_review_bullets_legacy", review_items(review_text)
+
+
+def build_outer_review_point_snapshot(*, cycle_id: str, review_text: str) -> tuple[str, list[dict]]:
+    extraction_mode, raw_points = outer_review_review_points(review_text)
+    points: list[dict] = []
+    for ordinal, raw_line in enumerate(raw_points, start=1):
+        text = strip_bullet_prefix(raw_line)
+        points.append(
+            {
+                "point_id": f"{cycle_id}.P{ordinal}",
+                "ordinal": ordinal,
+                "raw_line": raw_line,
+                "text": text,
+                "normalized_text": normalize_projection_text(text),
+                "cycle_id": cycle_id,
+            }
+        )
+    return extraction_mode, points
+
+
+def outer_review_triage_required(turn_dir: Path) -> bool:
+    return outer_review_input_json_path(turn_dir).exists()
+
+
+def outer_review_cycle_id_for_run(run_id: str) -> str:
+    return f"{run_id}.C1"
+
+
+def outer_review_point_number(point_id: str) -> int | None:
+    match = re.search(r"\.P(\d+)$", point_id)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def new_outer_review_ledger() -> dict:
+    return {
+        "version": 1,
+        "cycles": [],
+        "point_history": {},
+    }
+
+
+def load_outer_review_ledger(run_dir: Path) -> dict:
+    path = outer_review_ledger_path(run_dir)
+    if not path.exists():
+        return new_outer_review_ledger()
+    ledger = load_json(path)
+    if not isinstance(ledger, dict):
+        raise SystemExit(f"invalid outer review ledger: {path}")
+    ledger.setdefault("version", 1)
+    ledger.setdefault("cycles", [])
+    ledger.setdefault("point_history", {})
+    if not isinstance(ledger["cycles"], list):
+        raise SystemExit(f"invalid outer review ledger cycles: {path}")
+    if not isinstance(ledger["point_history"], dict):
+        raise SystemExit(f"invalid outer review ledger point_history: {path}")
+    return ledger
+
+
+def save_outer_review_ledger(run_dir: Path, ledger: dict) -> None:
+    save_json(outer_review_ledger_path(run_dir), ledger)
+
+
+def clone_outer_review_ledger(previous_run_dir: Path, run_dir: Path) -> None:
+    previous_path = outer_review_ledger_path(previous_run_dir)
+    if previous_path.exists():
+        save_json(outer_review_ledger_path(run_dir), load_json(previous_path))
+        return
+    save_outer_review_ledger(run_dir, new_outer_review_ledger())
+
+
+def outer_review_cycle_entry(ledger: dict, cycle_id: str) -> dict | None:
+    cycles = ledger.get("cycles")
+    if not isinstance(cycles, list):
+        return None
+    for cycle in cycles:
+        if isinstance(cycle, dict) and cycle.get("cycle_id") == cycle_id:
+            return cycle
+    return None
+
+
+def ensure_outer_review_cycle_entry(
+    ledger: dict,
+    *,
+    cycle_id: str,
+    source: dict,
+    point_extraction_mode: str,
+    input_points: list[dict],
+) -> dict:
+    cycle = outer_review_cycle_entry(ledger, cycle_id)
+    if cycle is None:
+        cycle = {
+            "cycle_id": cycle_id,
+            "source": source,
+            "point_extraction_mode": point_extraction_mode,
+            "input_points": input_points,
+            "active_points": input_points,
+            "triage_points": [],
+            "finalization": None,
+            "handoff_turns": [],
+        }
+        ledger.setdefault("cycles", []).append(cycle)
+    else:
+        cycle["source"] = source
+        cycle["point_extraction_mode"] = point_extraction_mode
+        cycle["input_points"] = input_points
+        cycle.setdefault("active_points", input_points)
+        cycle.setdefault("triage_points", [])
+        cycle.setdefault("handoff_turns", [])
+    return cycle
+
+
+def upsert_outer_review_point_history(
+    ledger: dict,
+    *,
+    point: dict,
+    source_run_id: str,
+    source_turn: str | None,
+    lineage_kind: str,
+    derived_from_point_ids: list[str],
+) -> dict:
+    history = ledger.setdefault("point_history", {})
+    point_id = point["point_id"]
+    entry = history.get(point_id) if isinstance(history, dict) else None
+    if not isinstance(entry, dict):
+        entry = {
+            "point_id": point_id,
+            "cycle_id": point["cycle_id"],
+            "source_run_id": source_run_id,
+            "source_turn": source_turn,
+            "raw_line": point["raw_line"],
+            "text": point["text"],
+            "normalized_text": point["normalized_text"],
+            "latest_triage_result": None,
+            "lineage_kind": lineage_kind,
+            "derived_from_point_ids": derived_from_point_ids,
+            "finalization_outcome": "not_finalized",
+            "later_reviewer_disposition": "not_reached",
+            "last_handoff_turn": None,
+        }
+        history[point_id] = entry
+    else:
+        entry.update(
+            {
+                "raw_line": point["raw_line"],
+                "text": point["text"],
+                "normalized_text": point["normalized_text"],
+                "lineage_kind": lineage_kind,
+                "derived_from_point_ids": derived_from_point_ids,
+            }
+        )
+    return entry
+
+
+def previous_outer_review_active_points(previous_run_dir: Path, previous_state: dict) -> list[dict]:
+    previous_outer_review = outer_review_state(previous_state)
+    if not isinstance(previous_outer_review, dict):
+        return []
+    active_cycle_id = previous_outer_review.get("active_cycle_id")
+    if not isinstance(active_cycle_id, str) or not active_cycle_id:
+        return []
+    ledger = load_outer_review_ledger(previous_run_dir)
+    cycle = outer_review_cycle_entry(ledger, active_cycle_id)
+    if not isinstance(cycle, dict):
+        return []
+    active_points = cycle.get("active_points")
+    return [item for item in active_points if isinstance(item, dict)] if isinstance(active_points, list) else []
+
+
+def match_outer_review_points(
+    *,
+    cycle_id: str,
+    prior_active_points: list[dict],
+    current_points: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    unmatched_prior = [point for point in prior_active_points if isinstance(point, dict)]
+    next_point_number = max(
+        (outer_review_point_number(point["point_id"]) or 0)
+        for point in unmatched_prior
+    ) if unmatched_prior else 0
+    finalized_points: list[dict] = []
+    for ordinal, point in enumerate(current_points, start=1):
+        match_index = next(
+            (
+                index
+                for index, prior in enumerate(unmatched_prior)
+                if prior.get("normalized_text") == point["normalized_text"]
+            ),
+            None,
+        )
+        if match_index is not None:
+            matched_point = unmatched_prior.pop(match_index)
+            point_id = matched_point["point_id"]
+            lineage_kind = "carried_forward_unchanged"
+            derived_from_point_ids = [matched_point["point_id"]]
+        else:
+            next_point_number += 1
+            point_id = f"{cycle_id}.P{next_point_number}"
+            lineage_kind = "new_in_cycle"
+            derived_from_point_ids = []
+        finalized_points.append(
+            {
+                **point,
+                "point_id": point_id,
+                "ordinal": ordinal,
+                "lineage_kind": lineage_kind,
+                "derived_from_point_ids": derived_from_point_ids,
+            }
+        )
+    return finalized_points, unmatched_prior
+
+
+def outer_review_ledger_cycle_summary(ledger: dict) -> list[dict]:
+    history = ledger.get("point_history", {})
+    if not isinstance(history, dict):
+        return []
+    cycles = ledger.get("cycles")
+    if not isinstance(cycles, list):
+        return []
+    summaries: list[dict] = []
+    for cycle in cycles:
+        if not isinstance(cycle, dict):
+            continue
+        cycle_id = cycle.get("cycle_id")
+        if not isinstance(cycle_id, str):
+            continue
+        points = [
+            value
+            for value in history.values()
+            if isinstance(value, dict) and value.get("cycle_id") == cycle_id
+        ]
+        summaries.append(
+            {
+                "cycle_id": cycle_id,
+                "handoff_turns": cycle.get("handoff_turns", []),
+                "new_in_cycle": [
+                    item["point_id"]
+                    for item in points
+                    if item.get("lineage_kind") == "new_in_cycle"
+                ],
+                "carried_forward_unchanged": [
+                    item["point_id"]
+                    for item in points
+                    if item.get("lineage_kind") == "carried_forward_unchanged"
+                ],
+                "withdrawn_during_finalization": [
+                    item["point_id"]
+                    for item in points
+                    if item.get("finalization_outcome") == "withdrawn_during_finalization"
+                ],
+                "cleared": [
+                    item["point_id"]
+                    for item in points
+                    if item.get("later_reviewer_disposition") == "cleared"
+                ],
+                "upheld": [
+                    item["point_id"]
+                    for item in points
+                    if item.get("later_reviewer_disposition") == "upheld"
+                ],
+            }
+        )
+    return summaries
+
+
 def normalize_required_text(value, *, field_name: str) -> str:
     normalized = normalize_optional_text(value, field_name=field_name)
     if normalized is None:
@@ -3076,6 +3512,47 @@ def validate_generator_status(data: dict) -> dict:
     }.items():
         if value is not None and not value:
             raise ValueError(f"generator {field_name} must be a non-empty string when present")
+    outer_review_triage = data.get("outer_review_triage")
+    normalized_outer_review_triage = None
+    if outer_review_triage is not None:
+        if not isinstance(outer_review_triage, dict):
+            raise ValueError("generator outer_review_triage must be a dict when present")
+        cycle_id = outer_review_triage.get("cycle_id")
+        if not isinstance(cycle_id, str) or not cycle_id.strip():
+            raise ValueError("generator outer_review_triage.cycle_id must be a non-empty string")
+        points = outer_review_triage.get("points")
+        if not isinstance(points, list):
+            raise ValueError("generator outer_review_triage.points must be a list")
+        normalized_points: list[dict[str, str]] = []
+        for item in points:
+            if not isinstance(item, dict):
+                raise ValueError("generator outer_review_triage.points entries must be objects")
+            point_id = item.get("point_id")
+            classification = item.get("classification")
+            evidence_summary = item.get("evidence_summary")
+            if not isinstance(point_id, str) or not point_id.strip():
+                raise ValueError("generator outer_review_triage point_id must be a non-empty string")
+            if (
+                not isinstance(classification, str)
+                or classification not in OUTER_REVIEW_TRIAGE_CLASSIFICATIONS
+            ):
+                raise ValueError(
+                    "generator outer_review_triage classification must be one of: "
+                    + ", ".join(f"`{value}`" for value in sorted(OUTER_REVIEW_TRIAGE_CLASSIFICATIONS))
+                )
+            if not isinstance(evidence_summary, str) or not evidence_summary.strip():
+                raise ValueError("generator outer_review_triage evidence_summary must be a non-empty string")
+            normalized_points.append(
+                {
+                    "point_id": point_id.strip(),
+                    "classification": classification,
+                    "evidence_summary": evidence_summary.strip(),
+                }
+            )
+        normalized_outer_review_triage = {
+            "cycle_id": cycle_id.strip(),
+            "points": normalized_points,
+        }
     return {
         "result": result,
         "summary": summary.strip(),
@@ -3083,9 +3560,42 @@ def validate_generator_status(data: dict) -> dict:
         "commit_sha": commit_sha,
         "compare_base_sha": compare_base_sha,
         "branch": branch,
+        "outer_review_triage": normalized_outer_review_triage,
         "human_message": human_message,
         "human_source": human_source,
     }
+
+
+def validate_generator_status_for_turn(turn_dir: Path, data: dict) -> dict:
+    validated = validate_generator_status(data)
+    if not outer_review_triage_required(turn_dir):
+        return validated
+    outer_review_input = load_json(outer_review_input_json_path(turn_dir))
+    expected_cycle_id = outer_review_input.get("cycle_id")
+    if not isinstance(expected_cycle_id, str) or not expected_cycle_id.strip():
+        raise ValueError("outer review input is missing a valid cycle_id")
+    triage = validated.get("outer_review_triage")
+    if not isinstance(triage, dict):
+        raise ValueError(
+            "generator outer_review_triage is required when outer_review_input.json is present"
+        )
+    if triage.get("cycle_id") != expected_cycle_id:
+        raise ValueError(
+            "generator outer_review_triage.cycle_id must match outer_review_input.json cycle_id"
+        )
+    expected_points = outer_review_input.get("points")
+    if not isinstance(expected_points, list):
+        raise ValueError("outer review input is missing a valid points list")
+    expected_point_ids = [item.get("point_id") for item in expected_points if isinstance(item, dict)]
+    triage_points = triage.get("points")
+    if not isinstance(triage_points, list):
+        raise ValueError("generator outer_review_triage.points must be a list")
+    triage_point_ids = [item.get("point_id") for item in triage_points if isinstance(item, dict)]
+    if triage_point_ids != expected_point_ids:
+        raise ValueError(
+            "generator outer_review_triage.points must contain every active outer-review point exactly once in canonical order"
+        )
+    return validated
 
 
 def validate_reviewer_status(data: dict) -> dict:
@@ -3200,6 +3710,12 @@ def format_generator_status_schema_block() -> str:
             "- `summary`: short non-empty string",
             "- `changed_files`: list of repo-tracked file paths; use `[]` when no repo-tracked files changed",
             "- `commit_sha`, `compare_base_sha`, `branch`: optional non-empty strings when available",
+            "- `outer_review_triage`: required when `outer_review_input.json` is present; otherwise omit it",
+            "  - `cycle_id`: non-empty string matching `outer_review_input.json`",
+            "  - `points`: one entry per active outer-review point in canonical order",
+            "    - `point_id`: non-empty string",
+            "    - `classification`: `agree` | `disagree` | `uncertain`",
+            "    - `evidence_summary`: short non-empty string",
             _format_human_intervention_status_block("generator"),
         ]
     ).rstrip()
@@ -3330,6 +3846,16 @@ def format_generator_execution_input_files_block(
     external_review_group = format_path_group("External review input", repo_root, [review_markdown_path, review_json_path])
     if external_review_group:
         groups.append(external_review_group)
+    outer_review_group = format_path_group(
+        "Outer review cycle input",
+        repo_root,
+        [
+            outer_review_input_markdown_path(turn_dir),
+            outer_review_input_json_path(turn_dir),
+        ],
+    )
+    if outer_review_group:
+        groups.append(outer_review_group)
     if include_previous_reviewer:
         previous_turn_dir = turn_dir.parent / turn_name(int(turn_dir.name) - 1)
         previous = [
@@ -3431,6 +3957,7 @@ def generator_requires_findings_triage(
     return (
         inspection["doc_paths"]["review"] is not None
         or turn_has_github_review_input(turn_dir)
+        or outer_review_triage_required(turn_dir)
         or (
             previous_reviewer_status is not None
             and previous_reviewer_status.get("verdict") == "changes_requested"
@@ -3450,13 +3977,24 @@ def format_generator_objective_block(
     has_spec = inspection["doc_paths"]["spec"] is not None
     has_contract = inspection["doc_paths"]["contract"] is not None
     has_github_review_input = turn_has_github_review_input(turn_dir)
+    has_outer_review_input = outer_review_triage_required(turn_dir)
     requires_findings_triage = generator_requires_findings_triage(
         inspection,
         turn_dir=turn_dir,
         previous_reviewer_status=previous_reviewer_status,
     )
     lines: list[str] = []
-    if requires_findings_triage:
+    if has_outer_review_input:
+        lines.extend(
+            [
+                "Treat `outer_review_input.md` / `outer_review_input.json` as the active deterministic outer-review finding set for this turn.",
+                "This first generator turn after the outer-review reopen is triage-only.",
+                "Do not start a normal implementation or reviewer cycle yet, and do not claim that triage alone cleared the branch.",
+                "Classify every active outer-review point as `agree`, `disagree`, or `uncertain` and include machine-readable `outer_review_triage` in `generator/status.json`.",
+                "Use `task.md`, `spec.md`, `contract.md`, and canonical `review.md` as context for the triage evidence, not as authorization to widen scope beyond that triage checkpoint.",
+            ]
+        )
+    elif requires_findings_triage:
         if has_github_review_input:
             lines.append("Treat the GitHub inline review snapshot as the active review findings for this turn.")
             if has_review:
@@ -3475,7 +4013,10 @@ def format_generator_objective_block(
         )
     if review_bridge_mode(state) == "github_pr_codex" and not (has_task or has_review or has_spec):
         lines.append("You are working to get the current PR merge-ready on this branch/worktree.")
-    if has_task and has_spec:
+    if has_outer_review_input:
+        if has_contract:
+            lines.append("Use `contract.md` as an approval bar reference only; this turn still stops at structured triage rather than implementation completion.")
+    elif has_task and has_spec:
         lines.append("Implement the requested work using `task.md` as the brief and `spec.md` as the detailed design reference.")
     elif has_task:
         lines.append("Implement the requested work described in `task.md`.")
@@ -3560,6 +4101,8 @@ def format_reopen_context_block(state: dict) -> str:
         lines.append("- Treat the earlier approval as historical only; it was incorrect under the intended requirements.")
     elif reopen.get("reason_kind") == "requirements_changed_after_approval":
         lines.append("- Treat the earlier approval as historical only; canonical docs changed after it.")
+    if reopen.get("outer_review_path"):
+        lines.append("- This reopen entered the explicit outer-review path; the first generator turn must perform structured triage only before any new execution cycle begins.")
     docs_changed = doc_comparison.get("docs_changed_since_approval")
     if docs_changed is True:
         changed_existing = doc_comparison.get("changed_existing_docs") or []
@@ -3778,6 +4321,7 @@ def format_generator_message_requirements_block(
     turn_dir: Path,
     previous_reviewer_status: dict | None,
 ) -> str:
+    has_outer_review_input = outer_review_triage_required(turn_dir)
     has_review = generator_requires_findings_triage(
         inspection,
         turn_dir=turn_dir,
@@ -3809,7 +4353,11 @@ def format_generator_message_requirements_block(
     if has_review:
         lines.extend(
             [
-                "- Which review findings or reviewer blockers were addressed",
+                (
+                    "- Which review findings were triaged on this turn"
+                    if has_outer_review_input
+                    else "- Which review findings or reviewer blockers were addressed"
+                ),
                 "- Evidence for rejected points",
             ]
         )
@@ -4726,6 +5274,7 @@ def create_run_state(
     reviewer_fork_parent_session_id: str | None = None,
     bootstrap_phase: str | None = None,
     reopen_context: dict | None = None,
+    outer_review: dict | None = None,
 ) -> dict:
     run_dir = task_root / "runs" / run_id
     state = {
@@ -4771,6 +5320,8 @@ def create_run_state(
     }
     if reopen_context is not None:
         state["reopen"] = reopen_context
+    if outer_review is not None:
+        state["outer_review"] = outer_review
     return state
 
 
@@ -4856,6 +5407,7 @@ def validate_execution_run_state(run_dir: Path, state: dict) -> None:
     if status in {
         "booting",
         "approved",
+        "closed_no_remaining_outer_findings",
         "blocked",
         "paused_needs_human",
         "max_turns_reached",
@@ -5632,6 +6184,47 @@ def build_review_bridge_state(
     }
 
 
+def build_outer_review_state_for_start(
+    review_mode: str,
+    args: argparse.Namespace,
+) -> dict | None:
+    session_id = normalize_optional_text(
+        getattr(args, "outer_review_session_id", None),
+        field_name="outer review session id",
+    )
+    if review_mode == "github_pr_codex":
+        if session_id is not None:
+            raise SystemExit(
+                "--outer-review-session-id is only supported when --review-mode internal; it must be a resumable Codex session id for the additive internal outer-review layer."
+            )
+        return None
+    return new_outer_review_state(codex_session_id=session_id)
+
+
+def build_outer_review_state_for_reopen(
+    previous_state: dict,
+    *,
+    outer_review_session_id: str | None,
+    clear_outer_review_session_id: bool,
+) -> dict | None:
+    previous_review_mode = review_bridge_mode(previous_state)
+    if previous_review_mode == "github_pr_codex":
+        if outer_review_session_id is not None or clear_outer_review_session_id:
+            raise SystemExit(
+                "outer-review session configuration is only supported for internal review mode; github_pr_codex runs cannot use --outer-review-session-id or --clear-outer-review-session-id."
+            )
+        return None
+    if outer_review_session_id is not None and clear_outer_review_session_id:
+        raise SystemExit(
+            "cannot use --outer-review-session-id and --clear-outer-review-session-id together on reopen"
+        )
+    return clone_outer_review_state_for_new_run(
+        previous_state,
+        override_session_id=outer_review_session_id,
+        clear_session_id=clear_outer_review_session_id,
+    )
+
+
 def record_current_git_state(run_dir: Path, state: dict) -> tuple[str | None, str | None]:
     if not state.get("git"):
         return None, None
@@ -6206,6 +6799,667 @@ def write_github_review_input_artifacts(
     save_json(github_review_input_json_path(turn_dir), snapshot)
     refresh_turn_context_manifest(run_dir, task_root, turn_dir)
 
+
+def outer_review_point_extraction_rule_text() -> str:
+    return (
+        "Use canonical `review.md` as the source of truth. If `## Findings` exists, only bullet lines in that section count as active points. "
+        "Otherwise, fall back to bullet lines from the whole review document."
+    )
+
+
+def render_outer_review_request_template(template_name: str, values: dict[str, str]) -> str:
+    return render_template_text(
+        read_template("outer_review", template_name),
+        values,
+        template_name=f"outer_review/{template_name}",
+    ).rstrip()
+
+
+def build_outer_review_handoff_request_text(
+    *,
+    task_name: str,
+    run_id: str,
+    approved_turn: str,
+) -> str:
+    return render_outer_review_request_template(
+        "handoff_request.md",
+        {
+            "task_name": task_name,
+            "run_id": run_id,
+            "approved_turn": approved_turn,
+        },
+    )
+
+
+def build_outer_review_finalization_request_text(
+    *,
+    task_name: str,
+    cycle_id: str,
+) -> str:
+    return render_outer_review_request_template(
+        "finalization_request.md",
+        {
+            "task_name": task_name,
+            "cycle_id": cycle_id,
+            "point_extraction_rule": outer_review_point_extraction_rule_text(),
+        },
+    )
+
+
+def build_outer_review_points_markdown(points: list[dict]) -> str:
+    if not points:
+        return "- None."
+    return "\n".join(
+        f"{point['ordinal']}. `{point['point_id']}` {point['text']}"
+        for point in points
+    )
+
+
+def build_outer_review_handoff_markdown(payload: dict) -> str:
+    lines = [
+        "# Outer Review Handoff",
+        "",
+        f"- Task: `{payload['task_name']}`",
+        f"- Run: `{payload['run_id']}`",
+        f"- Approved turn: `{payload['approved_turn']}`",
+        f"- Repo root: `{payload['repo_root']}`",
+    ]
+    if payload.get("current_branch"):
+        lines.append(f"- Current branch: `{payload['current_branch']}`")
+    if payload.get("head_sha"):
+        lines.append(f"- Head SHA: `{payload['head_sha']}`")
+    reopen_lineage = payload.get("reopen_lineage")
+    if isinstance(reopen_lineage, dict) and reopen_lineage:
+        reopened_from = reopen_lineage.get("reopened_from", {})
+        lines.append(
+            f"- Reopen lineage: run `{reopened_from.get('run_id', 'unknown')}` turn `{reopened_from.get('turn', 'unknown')}` via `{reopen_lineage.get('reason_kind', 'unknown')}`"
+        )
+    lines.extend(
+        [
+            "",
+            "## Request",
+            "",
+            payload["request_text"],
+        ]
+    )
+    ledger_summary = payload.get("ledger_summary")
+    if isinstance(ledger_summary, list) and ledger_summary:
+        lines.extend(["", "## Prior Outer Review Summary", ""])
+        for cycle in ledger_summary:
+            if not isinstance(cycle, dict):
+                continue
+            lines.append(f"- `{cycle['cycle_id']}`")
+            lines.append(
+                "  - new: "
+                + ", ".join(f"`{item}`" for item in cycle.get("new_in_cycle", []))
+                if cycle.get("new_in_cycle")
+                else "  - new: none"
+            )
+            lines.append(
+                "  - carried forward: "
+                + ", ".join(f"`{item}`" for item in cycle.get("carried_forward_unchanged", []))
+                if cycle.get("carried_forward_unchanged")
+                else "  - carried forward: none"
+            )
+            lines.append(
+                "  - withdrawn during finalization: "
+                + ", ".join(f"`{item}`" for item in cycle.get("withdrawn_during_finalization", []))
+                if cycle.get("withdrawn_during_finalization")
+                else "  - withdrawn during finalization: none"
+            )
+            lines.append(
+                "  - cleared by later approval: "
+                + ", ".join(f"`{item}`" for item in cycle.get("cleared", []))
+                if cycle.get("cleared")
+                else "  - cleared by later approval: none"
+            )
+            lines.append(
+                "  - upheld later: "
+                + ", ".join(f"`{item}`" for item in cycle.get("upheld", []))
+                if cycle.get("upheld")
+                else "  - upheld later: none"
+            )
+    return "\n".join(lines).rstrip()
+
+
+def build_outer_review_input_markdown(payload: dict) -> str:
+    source = payload["source"]
+    return "\n".join(
+        [
+            "# Outer Review Input",
+            "",
+            f"- Cycle ID: `{payload['cycle_id']}`",
+            f"- Source review: `{source['review_path']}`",
+            f"- Reopened from run: `{source['reopened_from_run_id']}`",
+            f"- Reopened from turn: `{source['reopened_from_turn']}`",
+            f"- Reopen reason: `{source['reopen_reason_kind']}`",
+            f"- Point extraction mode: `{payload['point_extraction_mode']}`",
+            "",
+            "## Active Points",
+            "",
+            build_outer_review_points_markdown(payload["points"]),
+        ]
+    ).rstrip()
+
+
+def build_outer_review_finalization_markdown(payload: dict) -> str:
+    triage_lines = []
+    for point in payload["triage"]["points"]:
+        triage_lines.extend(
+            [
+                f"- `{point['point_id']}` `{point['classification']}`",
+                f"  - Evidence: {point['evidence_summary']}",
+            ]
+        )
+    return "\n".join(
+        [
+            "# Outer Review Finalization",
+            "",
+            f"- Cycle ID: `{payload['cycle_id']}`",
+            f"- Point extraction mode: `{payload['point_extraction_mode']}`",
+            f"- Review snapshot SHA before finalization: `{payload['review_snapshot_sha256_before_finalization']}`",
+            "",
+            "## Point Extraction Rule",
+            "",
+            payload["point_extraction_rule"],
+            "",
+            "## Pre-Finalization Points",
+            "",
+            build_outer_review_points_markdown(payload["pre_finalization_points"]),
+            "",
+            "## Generator Triage",
+            "",
+            "\n".join(triage_lines).rstrip(),
+            "",
+            "## Request",
+            "",
+            payload["request_text"],
+        ]
+    ).rstrip()
+
+
+def build_outer_review_finalization_ack_markdown(payload: dict) -> str:
+    withdrawn = payload["lineage"]["withdrawn_during_finalization"]
+    withdrawn_lines = (
+        "\n".join(f"- `{point['point_id']}` {point['text']}" for point in withdrawn)
+        if withdrawn
+        else "- None."
+    )
+    return "\n".join(
+        [
+            "# Outer Review Finalization Acknowledgment",
+            "",
+            f"- Cycle ID: `{payload['cycle_id']}`",
+            f"- Source finalization turn: `{payload['source_finalization_turn']}`",
+            f"- Confirmation mode: `{payload['confirmation_mode']}`",
+            f"- Review SHA before finalization: `{payload['review_snapshot_sha256_before_finalization']}`",
+            f"- Current review SHA: `{payload['current_review_sha256']}`",
+            f"- Point extraction mode: `{payload['point_extraction_mode']}`",
+            "",
+            "## Current Active Points",
+            "",
+            build_outer_review_points_markdown(payload["points"]),
+            "",
+            "## Withdrawn During Finalization",
+            "",
+            withdrawn_lines,
+        ]
+    ).rstrip()
+
+
+def dispatch_outer_review_prompt(
+    repo_root: Path,
+    council_config: dict,
+    *,
+    codex_session_id: str | None,
+    prompt: str,
+) -> tuple[str, str | None]:
+    thread_name = load_outer_review_thread_name(codex_session_id)
+    if not codex_session_id:
+        return "skipped_unconfigured", thread_name
+    if find_codex_session_entry(codex_session_id) is None:
+        return "failed_unresolved_session", thread_name
+    tmux_name = f"codex-outer-review-dispatch-{uuid.uuid4().hex[:10]}"
+    try:
+        tmux_new_session(
+            tmux_name,
+            repo_root,
+            build_codex_resume_command(repo_root, council_config["codex"], codex_session_id),
+            role="generator",
+        )
+        wait_for_tmux_prompt(
+            tmux_name,
+            float(council_config["council"]["launch_timeout_seconds"]),
+            phase="outer_review_dispatch_prompt_ready",
+            role="generator",
+        )
+        tmux_send_prompt(
+            tmux_name,
+            prompt,
+            phase="outer_review_dispatch_prompt",
+            role="generator",
+        )
+        return "confirmed_prompt_dispatch", thread_name
+    except SupervisorRuntimeError:
+        return "attempted_unconfirmed", thread_name
+    finally:
+        if tmux_session_exists(tmux_name):
+            tmux_kill_session(tmux_name)
+
+
+def update_previous_outer_review_dispositions_for_reopen(
+    run_dir: Path,
+    previous_run_dir: Path,
+    previous_state: dict,
+    *,
+    current_points: list[dict],
+) -> None:
+    previous_outer_review = outer_review_state(previous_state)
+    if not isinstance(previous_outer_review, dict):
+        return
+    previous_cycle_id = previous_outer_review.get("active_cycle_id")
+    if not isinstance(previous_cycle_id, str) or not previous_cycle_id:
+        return
+    ledger = load_outer_review_ledger(run_dir)
+    history = ledger.get("point_history", {})
+    if not isinstance(history, dict):
+        return
+    previous_points = previous_outer_review_active_points(previous_run_dir, previous_state)
+    matched_previous_ids = {
+        derived_id
+        for point in current_points
+        for derived_id in point.get("derived_from_point_ids", [])
+    }
+    for previous_point in previous_points:
+        point_id = previous_point.get("point_id")
+        if not isinstance(point_id, str):
+            continue
+        point_history = history.get(point_id)
+        if not isinstance(point_history, dict):
+            continue
+        point_history["later_reviewer_disposition"] = (
+            "upheld" if point_id in matched_previous_ids else "cleared"
+        )
+    save_outer_review_ledger(run_dir, ledger)
+
+
+def write_outer_review_input_artifacts(
+    run_dir: Path,
+    task_root: Path,
+    turn_dir: Path,
+    *,
+    state: dict,
+) -> dict:
+    review_path = inspect_task_workspace(task_root)["doc_paths"]["review"]
+    if review_path is None:
+        raise SupervisorRuntimeError(
+            "outer_review_input",
+            f"{REVIEW_FILENAME} is required for an outer-review false_approved reopen",
+            role="generator",
+        )
+    review_text = review_path.read_text(encoding="utf-8")
+    cycle_id = outer_review_cycle_id_for_run(state["run_id"])
+    point_extraction_mode, points = build_outer_review_point_snapshot(
+        cycle_id=cycle_id,
+        review_text=review_text,
+    )
+    if not points:
+        raise SupervisorRuntimeError(
+            "outer_review_input",
+            "outer-review false_approved reopen requires explicit findings bullets in canonical review.md",
+            role="generator",
+            details={"review_path": str(review_path), "point_extraction_mode": point_extraction_mode},
+        )
+    reopen = state.get("reopen", {})
+    payload = {
+        "cycle_id": cycle_id,
+        "source": {
+            "review_path": str(review_path),
+            "reopened_from_run_id": reopen.get("reopened_from", {}).get("run_id"),
+            "reopened_from_turn": reopen.get("reopened_from", {}).get("turn"),
+            "reopen_reason_kind": reopen.get("reason_kind"),
+        },
+        "point_extraction_mode": point_extraction_mode,
+        "points": points,
+    }
+    write_text(outer_review_input_markdown_path(turn_dir), build_outer_review_input_markdown(payload))
+    save_json(outer_review_input_json_path(turn_dir), payload)
+    ledger = load_outer_review_ledger(run_dir)
+    cycle = ensure_outer_review_cycle_entry(
+        ledger,
+        cycle_id=cycle_id,
+        source=payload["source"],
+        point_extraction_mode=point_extraction_mode,
+        input_points=points,
+    )
+    reopen = state.get("reopen", {})
+    previous_run_dir_value = reopen.get("reopened_from", {}).get("run_dir")
+    previous_run_dir = Path(previous_run_dir_value) if isinstance(previous_run_dir_value, str) else None
+    previous_state = (
+        load_json(previous_run_dir / "state.json")
+        if previous_run_dir is not None and (previous_run_dir / "state.json").exists()
+        else {}
+    )
+    prior_active_points = (
+        previous_outer_review_active_points(previous_run_dir, previous_state)
+        if previous_run_dir is not None
+        else []
+    )
+    unmatched_prior = [point for point in prior_active_points if isinstance(point, dict)]
+    current_points_with_lineage: list[dict] = []
+    for point in points:
+        match_index = next(
+            (
+                index
+                for index, prior in enumerate(unmatched_prior)
+                if prior.get("normalized_text") == point["normalized_text"]
+            ),
+            None,
+        )
+        if match_index is not None:
+            matched_prior = unmatched_prior.pop(match_index)
+            lineage_kind = "carried_forward_unchanged"
+            derived_from_point_ids = [matched_prior["point_id"]]
+        else:
+            lineage_kind = "new_in_cycle"
+            derived_from_point_ids = []
+        current_points_with_lineage.append(
+            {
+                **point,
+                "lineage_kind": lineage_kind,
+                "derived_from_point_ids": derived_from_point_ids,
+            }
+        )
+        upsert_outer_review_point_history(
+            ledger,
+            point=point,
+            source_run_id=state["run_id"],
+            source_turn=turn_dir.name,
+            lineage_kind=lineage_kind,
+            derived_from_point_ids=derived_from_point_ids,
+        )
+    save_outer_review_ledger(run_dir, ledger)
+    if previous_run_dir is not None:
+        update_previous_outer_review_dispositions_for_reopen(
+            run_dir,
+            previous_run_dir,
+            previous_state,
+            current_points=current_points_with_lineage,
+        )
+    outer_review = outer_review_state(state)
+    if isinstance(outer_review, dict):
+        outer_review["active_cycle_id"] = cycle_id
+    refresh_turn_context_manifest(run_dir, task_root, turn_dir)
+    return payload
+
+
+def write_outer_review_handoff_artifacts(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_dir: Path,
+    turn_number: int,
+) -> None:
+    outer_review = outer_review_state(state)
+    if review_bridge_mode(state) != "internal" or not isinstance(outer_review, dict):
+        return
+    current_branch, head_sha = record_current_git_state(run_dir, state)
+    turn_label = turn_name(turn_number)
+    request_text = build_outer_review_handoff_request_text(
+        task_name=state["task_name"],
+        run_id=state["run_id"],
+        approved_turn=turn_label,
+    )
+    ledger = load_outer_review_ledger(run_dir)
+    active_cycle_id = outer_review.get("active_cycle_id")
+    if isinstance(active_cycle_id, str) and active_cycle_id:
+        cycle = outer_review_cycle_entry(ledger, active_cycle_id)
+        if isinstance(cycle, dict):
+            active_points = cycle.get("active_points")
+            history = ledger.get("point_history", {})
+            if isinstance(active_points, list) and isinstance(history, dict):
+                for point in active_points:
+                    point_id = point.get("point_id")
+                    if not isinstance(point_id, str):
+                        continue
+                    point_history = history.get(point_id)
+                    if isinstance(point_history, dict):
+                        point_history["later_reviewer_disposition"] = "cleared"
+                        point_history["last_handoff_turn"] = turn_label
+                handoff_turns = cycle.setdefault("handoff_turns", [])
+                if turn_label not in handoff_turns:
+                    handoff_turns.append(turn_label)
+                save_outer_review_ledger(run_dir, ledger)
+    payload = {
+        "task_name": state["task_name"],
+        "run_id": state["run_id"],
+        "approved_turn": turn_label,
+        "repo_root": state["repo_root"],
+        "current_branch": current_branch,
+        "head_sha": head_sha,
+        "reopen_lineage": state.get("reopen"),
+        "outer_review": {
+            "configured": outer_review.get("configured"),
+            "identifier_kind": outer_review.get("identifier_kind"),
+            "codex_session_id": outer_review.get("codex_session_id"),
+            "codex_thread_name": outer_review.get("codex_thread_name"),
+        },
+        "request_text": request_text,
+        "ledger_summary": outer_review_ledger_cycle_summary(ledger),
+    }
+    dispatch_status, thread_name = dispatch_outer_review_prompt(
+        Path(state["repo_root"]),
+        state["council_config"],
+        codex_session_id=normalize_optional_text(
+            outer_review.get("codex_session_id"),
+            field_name="outer review codex_session_id",
+        ),
+        prompt=request_text,
+    )
+    if thread_name:
+        outer_review["codex_thread_name"] = thread_name
+        payload["outer_review"]["codex_thread_name"] = thread_name
+    payload["dispatch_status"] = dispatch_status
+    write_text(outer_review_handoff_markdown_path(turn_dir), build_outer_review_handoff_markdown(payload))
+    save_json(outer_review_handoff_json_path(turn_dir), payload)
+    outer_review["latest_handoff_turn"] = turn_label
+    outer_review["latest_handoff_artifact_json"] = str(outer_review_handoff_json_path(turn_dir))
+    outer_review["latest_handoff_artifact_md"] = str(outer_review_handoff_markdown_path(turn_dir))
+    outer_review["latest_handoff_dispatch_status"] = dispatch_status
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "outer_review_handoff_created",
+        turn_number=turn_number,
+        role="reviewer",
+        details={"dispatch_status": dispatch_status},
+    )
+
+
+def write_outer_review_finalization_artifacts(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_dir: Path,
+    turn_number: int,
+    generator_status: dict,
+) -> dict:
+    outer_review = outer_review_state(state)
+    if not isinstance(outer_review, dict):
+        raise SupervisorRuntimeError(
+            "outer_review_finalization",
+            "missing outer_review state for finalization",
+            role="generator",
+        )
+    input_payload = load_json(outer_review_input_json_path(turn_dir))
+    review_path = inspect_task_workspace(task_root)["doc_paths"]["review"]
+    if review_path is None:
+        raise SupervisorRuntimeError(
+            "outer_review_finalization",
+            f"{REVIEW_FILENAME} is required for outer-review finalization",
+            role="generator",
+        )
+    review_text = review_path.read_text(encoding="utf-8")
+    request_text = build_outer_review_finalization_request_text(
+        task_name=state["task_name"],
+        cycle_id=input_payload["cycle_id"],
+    )
+    payload = {
+        "cycle_id": input_payload["cycle_id"],
+        "source_input_turn": turn_dir.name,
+        "point_extraction_mode": input_payload["point_extraction_mode"],
+        "point_extraction_rule": outer_review_point_extraction_rule_text(),
+        "review_snapshot_sha256_before_finalization": hash_text(review_text),
+        "pre_finalization_points": input_payload["points"],
+        "triage": generator_status["outer_review_triage"],
+        "request_text": request_text,
+    }
+    dispatch_status, thread_name = dispatch_outer_review_prompt(
+        Path(state["repo_root"]),
+        state["council_config"],
+        codex_session_id=normalize_optional_text(
+            outer_review.get("codex_session_id"),
+            field_name="outer review codex_session_id",
+        ),
+        prompt=request_text,
+    )
+    if thread_name:
+        outer_review["codex_thread_name"] = thread_name
+    payload["dispatch_status"] = dispatch_status
+    write_text(
+        outer_review_finalization_markdown_path(turn_dir),
+        build_outer_review_finalization_markdown(payload),
+    )
+    save_json(outer_review_finalization_json_path(turn_dir), payload)
+    outer_review["latest_triage_turn"] = turn_dir.name
+    outer_review["latest_triage_artifact_json"] = str(role_status_path(turn_dir, "generator"))
+    outer_review["latest_triage_artifact_md"] = str(role_message_path(turn_dir, "generator"))
+    outer_review["latest_finalization_turn"] = turn_dir.name
+    outer_review["latest_finalization_artifact_json"] = str(outer_review_finalization_json_path(turn_dir))
+    outer_review["latest_finalization_artifact_md"] = str(outer_review_finalization_markdown_path(turn_dir))
+    outer_review["latest_finalization_dispatch_status"] = dispatch_status
+    outer_review["pending_outer_finalization"] = True
+    save_run_state(run_dir, state)
+    refresh_turn_context_manifest(run_dir, task_root, turn_dir)
+    append_run_event(
+        run_dir,
+        "outer_review_finalization_requested",
+        turn_number=turn_number,
+        role="generator",
+        details={"dispatch_status": dispatch_status},
+    )
+    return payload
+
+
+def write_outer_review_finalization_ack_artifacts(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_dir: Path,
+) -> dict:
+    outer_review = outer_review_state(state)
+    if not isinstance(outer_review, dict):
+        raise SupervisorRuntimeError(
+            "outer_review_finalization_ack",
+            "missing outer_review state for finalization acknowledgment",
+            role="generator",
+        )
+    input_payload = load_json(outer_review_input_json_path(turn_dir))
+    finalization_payload = load_json(outer_review_finalization_json_path(turn_dir))
+    review_path = inspect_task_workspace(task_root)["doc_paths"]["review"]
+    if review_path is None:
+        raise SupervisorRuntimeError(
+            "outer_review_finalization_ack",
+            f"{REVIEW_FILENAME} is required for outer-review finalization acknowledgment",
+            role="generator",
+        )
+    current_review_text = review_path.read_text(encoding="utf-8")
+    point_extraction_mode, extracted_points = build_outer_review_point_snapshot(
+        cycle_id=input_payload["cycle_id"],
+        review_text=current_review_text,
+    )
+    prior_points = [item for item in input_payload["points"] if isinstance(item, dict)]
+    finalized_points, withdrawn_points = match_outer_review_points(
+        cycle_id=input_payload["cycle_id"],
+        prior_active_points=prior_points,
+        current_points=extracted_points,
+    )
+    review_snapshot_sha = finalization_payload["review_snapshot_sha256_before_finalization"]
+    current_review_sha = hash_text(current_review_text)
+    if not finalized_points:
+        confirmation_mode = "cleared_all_points"
+    elif current_review_sha == review_snapshot_sha:
+        confirmation_mode = "review_unchanged_confirmed"
+    else:
+        confirmation_mode = "review_updated"
+    payload = {
+        "cycle_id": input_payload["cycle_id"],
+        "source_finalization_turn": turn_dir.name,
+        "review_snapshot_sha256_before_finalization": review_snapshot_sha,
+        "current_review_sha256": current_review_sha,
+        "confirmation_mode": confirmation_mode,
+        "point_extraction_mode": point_extraction_mode,
+        "points": finalized_points,
+        "lineage": {
+            "current_points": finalized_points,
+            "withdrawn_during_finalization": withdrawn_points,
+        },
+    }
+    write_text(
+        outer_review_finalization_ack_markdown_path(turn_dir),
+        build_outer_review_finalization_ack_markdown(payload),
+    )
+    save_json(outer_review_finalization_ack_json_path(turn_dir), payload)
+    ledger = load_outer_review_ledger(run_dir)
+    cycle = outer_review_cycle_entry(ledger, input_payload["cycle_id"])
+    if not isinstance(cycle, dict):
+        cycle = ensure_outer_review_cycle_entry(
+            ledger,
+            cycle_id=input_payload["cycle_id"],
+            source=input_payload["source"],
+            point_extraction_mode=input_payload["point_extraction_mode"],
+            input_points=prior_points,
+        )
+    cycle["active_points"] = finalized_points
+    cycle["finalization"] = payload
+    cycle["triage_points"] = finalization_payload["triage"]["points"]
+    for point in finalized_points:
+        entry = upsert_outer_review_point_history(
+            ledger,
+            point=point,
+            source_run_id=state["run_id"],
+            source_turn=turn_dir.name,
+            lineage_kind=point["lineage_kind"],
+            derived_from_point_ids=point["derived_from_point_ids"],
+        )
+        entry["finalization_outcome"] = point["lineage_kind"]
+        if point["lineage_kind"] == "new_in_cycle":
+            entry["later_reviewer_disposition"] = "not_reached"
+    for withdrawn_point in withdrawn_points:
+        point_id = withdrawn_point.get("point_id")
+        history = ledger.get("point_history", {})
+        if not isinstance(point_id, str) or not isinstance(history, dict):
+            continue
+        entry = history.get(point_id)
+        if isinstance(entry, dict):
+            entry["finalization_outcome"] = "withdrawn_during_finalization"
+    save_outer_review_ledger(run_dir, ledger)
+    outer_review["latest_finalization_ack_turn"] = turn_dir.name
+    outer_review["latest_finalization_ack_artifact_json"] = str(outer_review_finalization_ack_json_path(turn_dir))
+    outer_review["latest_finalization_ack_artifact_md"] = str(outer_review_finalization_ack_markdown_path(turn_dir))
+    outer_review["latest_finalized_review_sha256"] = current_review_sha
+    outer_review["latest_finalized_confirmation_mode"] = confirmation_mode
+    outer_review["pending_outer_finalization"] = False
+    save_run_state(run_dir, state)
+    refresh_turn_context_manifest(run_dir, task_root, turn_dir)
+    append_run_event(
+        run_dir,
+        "outer_review_finalization_acknowledged",
+        turn_number=int(turn_dir.name),
+        role="generator",
+        details={"confirmation_mode": confirmation_mode},
+    )
+    return payload
 
 def is_exact_github_codex_request_comment(body: str) -> bool:
     return body == "@codex"
@@ -7401,6 +8655,40 @@ def seed_generator_github_review_input(
         clear_github_review_input_artifacts(run_dir, task_root, current_turn_dir)
 
 
+def seed_generator_outer_review_input(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_number: int,
+    current_turn_dir: Path,
+) -> None:
+    if turn_number != 1 or not outer_review_reopen_path_enabled(state):
+        return
+    if outer_review_input_json_path(current_turn_dir).exists():
+        return
+    payload = write_outer_review_input_artifacts(
+        run_dir,
+        task_root,
+        current_turn_dir,
+        state=state,
+    )
+    outer_review = outer_review_state(state)
+    if isinstance(outer_review, dict):
+        outer_review["active_cycle_id"] = payload["cycle_id"]
+        save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "outer_review_input_materialized",
+        turn_number=turn_number,
+        role="generator",
+        details={
+            "cycle_id": payload["cycle_id"],
+            "point_extraction_mode": payload["point_extraction_mode"],
+            "point_count": len(payload["points"]),
+        },
+    )
+
+
 def run_generator_chunk_contract_phase(
     run_dir: Path,
     state: dict,
@@ -7619,6 +8907,7 @@ def run_generator_phase(
 ) -> dict:
     repo_root = Path(state["repo_root"])
     seed_generator_github_review_input(run_dir, state, task_root, turn_number, current_turn_dir)
+    seed_generator_outer_review_input(run_dir, state, task_root, turn_number, current_turn_dir)
     inspection = inspect_task_workspace(task_root)
     state["workspace_profile"] = inspection["profile"]
     was_transitioning = state.get("status") == TRANSITIONING_TURN_STATUS
@@ -7689,7 +8978,7 @@ def run_generator_phase(
     generator_artifact_path, _, generator_status = wait_for_role_artifacts(
         current_turn_dir,
         "generator",
-        validator=validate_generator_status,
+        validator=lambda data: validate_generator_status_for_turn(current_turn_dir, data),
         timeout_seconds=turn_timeout_seconds,
         phase="generator_artifacts",
         tmux_name=state["roles"]["generator"]["tmux_session"],
@@ -8469,6 +9758,37 @@ def supervisor_loop_from(
                     details={"summary": generator_status["summary"]},
                 )
                 return
+            if outer_review_triage_required(current_turn_dir):
+                finalization_payload = write_outer_review_finalization_artifacts(
+                    run_dir,
+                    state,
+                    task_root,
+                    current_turn_dir,
+                    turn_number,
+                    generator_status,
+                )
+                pause_for_human(
+                    run_dir,
+                    state,
+                    role="generator",
+                    turn_dir=current_turn_dir,
+                    summary="Outer-review triage recorded; waiting for canonical review finalization before any next execution cycle.",
+                    human_message=(
+                        "Finalize the remaining outer-review findings in canonical review.md, even if the file stays unchanged, then use `continue` so the harness can write the finalization acknowledgment before resuming or closing."
+                    ),
+                    human_source=REVIEW_FILENAME,
+                )
+                append_run_event(
+                    run_dir,
+                    "outer_review_finalization_paused",
+                    turn_number=turn_number,
+                    role="generator",
+                    details={
+                        "cycle_id": finalization_payload["cycle_id"],
+                        "dispatch_status": finalization_payload["dispatch_status"],
+                    },
+                )
+                return
             if state.get("bootstrap_phase") == "fork_to_generator_github_pr":
                 state["bootstrap_phase"] = None
                 save_run_state(run_dir, state)
@@ -8499,6 +9819,20 @@ def supervisor_loop_from(
             state["status"] = "approved"
             state["stop_reason"] = reviewer_status["summary"]
             save_run_state(run_dir, state)
+            if outer_review_is_configured(state):
+                write_outer_review_handoff_artifacts(
+                    run_dir,
+                    state,
+                    task_root,
+                    current_turn_dir,
+                    turn_number,
+                )
+                state = load_json(run_dir / "state.json")
+                state["status"] = "approved"
+                state["stop_reason"] = (
+                    f"{reviewer_status['summary']} Outer review handoff recorded; configured outer verification is still pending."
+                )
+                save_run_state(run_dir, state)
             save_turn_metadata(
                 current_turn_dir,
                 turn_number,
@@ -8652,6 +9986,13 @@ def print_run_launch_summary(run_dir: Path, state: dict, task_root: Path) -> Non
         print(f"reopened from run: {reopened_from.get('run_id')}")
         print(f"reopened from turn: {reopened_from.get('turn')}")
         print(f"reopen reason kind: {reopen.get('reason_kind')}")
+        if reopen.get("outer_review_path"):
+            print("reopen path: outer review false_approved")
+    outer_review = outer_review_state(state)
+    if isinstance(outer_review, dict):
+        print(f"outer review configured: {'yes' if outer_review.get('configured') else 'no'}")
+        if outer_review.get("codex_session_id"):
+            print(f"outer review session id: {outer_review['codex_session_id']}")
 
 
 def run_supervisor_for_initialized_run(
@@ -9086,6 +10427,7 @@ def start_run(args: argparse.Namespace) -> int:
     target_input = Path(args.dir or Path.cwd()).resolve()
     repo_root, is_git = resolve_target_root(target_input, allow_non_git=args.allow_non_git)
     review_mode = normalize_review_mode(args)
+    requested_outer_review = build_outer_review_state_for_start(review_mode, args)
 
     task_root = task_root_for(repo_root, task_name)
     if not task_root.exists():
@@ -9164,6 +10506,7 @@ def start_run(args: argparse.Namespace) -> int:
         generator_fork_parent_session_id=generator_fork_session_id,
         reviewer_fork_parent_session_id=reviewer_fork_session_id,
         bootstrap_phase=bootstrap_phase,
+        outer_review=requested_outer_review,
     )
     state["session_index_snapshot_ids"] = session_index_snapshot_ids
     save_run_state(run_dir, state)
@@ -9245,6 +10588,11 @@ def reopen_run(args: argparse.Namespace) -> int:
         validate_reviewer_status,
     )
     previous_review_mode = review_bridge_mode(previous_state)
+    outer_review_path = reopen_enters_outer_review_path(
+        previous_state,
+        approved_turn_dir,
+        reason_kind=reason_kind,
+    )
     validate_task_workspace_for_start(task_root, inspection, review_mode=previous_review_mode)
     doc_comparison = build_reopen_doc_comparison(approved_turn_dir, task_root)
     reopen_metadata = build_reopen_metadata(
@@ -9256,6 +10604,7 @@ def reopen_run(args: argparse.Namespace) -> int:
         reason_message=reason_message,
         doc_comparison=doc_comparison,
     )
+    reopen_metadata["outer_review_path"] = outer_review_path
     council_config = load_council_config(repo_root)
     start_role, bootstrap_phase = determine_start_role(
         inspection=inspection,
@@ -9276,6 +10625,16 @@ def reopen_run(args: argparse.Namespace) -> int:
         raise SystemExit(f"run directory already exists: {run_dir}")
     ensure_dir(run_dir / "turns")
     review_bridge = clone_review_bridge_state_for_new_run(previous_state)
+    outer_review = build_outer_review_state_for_reopen(
+        previous_state,
+        outer_review_session_id=normalize_optional_text(
+            getattr(args, "outer_review_session_id", None),
+            field_name="outer review session id",
+        ),
+        clear_outer_review_session_id=bool(
+            getattr(args, "clear_outer_review_session_id", False)
+        ),
+    )
     generator_session = build_tmux_session_name(task_name, "generator", run_id)
     reviewer_session = (
         build_tmux_session_name(task_name, "reviewer", run_id)
@@ -9296,9 +10655,12 @@ def reopen_run(args: argparse.Namespace) -> int:
         review_bridge=review_bridge,
         bootstrap_phase=None,
         reopen_context=reopen_metadata,
+        outer_review=outer_review,
     )
     state["session_index_snapshot_ids"] = session_index_snapshot_ids
     save_run_state(run_dir, state)
+    if outer_review_path:
+        clone_outer_review_ledger(previous_run_dir, run_dir)
     write_reopen_metadata_artifact(run_dir, reopen_metadata)
     append_reopen_index(
         repo_root,
@@ -9306,6 +10668,7 @@ def reopen_run(args: argparse.Namespace) -> int:
             **reopen_metadata,
             "new_run_id": run_id,
             "new_run_dir": str(run_dir),
+            "outer_review_path": outer_review_path,
         },
     )
     append_run_event(
@@ -9321,6 +10684,7 @@ def reopen_run(args: argparse.Namespace) -> int:
             "reopened_from_run_id": previous_run_dir.name,
             "reopened_from_turn": approved_turn_dir.name,
             "docs_changed_since_approval": doc_comparison["docs_changed_since_approval"],
+            "outer_review_path": outer_review_path,
         },
     )
     return run_supervisor_for_initialized_run(
@@ -9438,6 +10802,7 @@ ArtifactContinuationState = Literal[
     "generator_invalid",
     "generator_needs_human",
     "generator_blocked",
+    "outer_review_pending_finalization",
     "chunk_contract_waiting_reviewer",
     "chunk_contract_reviewer_pending",
     "chunk_contract_approved_waiting_generator",
@@ -9448,6 +10813,7 @@ ArtifactContinuationState = Literal[
     "reviewer_needs_human",
     "reviewer_blocked",
     "reviewer_approved",
+    "closed_no_remaining_outer_findings",
 ]
 
 
@@ -9689,7 +11055,9 @@ def terminal_continuation_plan(
     }
 
 
-def approved_run_continue_message() -> str:
+def approved_run_continue_message(continuation_state: str = "reviewer_approved") -> str:
+    if continuation_state == "closed_no_remaining_outer_findings":
+        return "cannot continue a run closed as `closed_no_remaining_outer_findings`; the earlier internal approval remains historical and no outer findings remain"
     return "cannot continue an approved run; use `reopen` to supersede the approval explicitly"
 
 
@@ -10008,6 +11376,30 @@ def resolve_turn_continuation(
 
 
 def resolve_continuation_plan(run_dir: Path, state: dict) -> dict:
+    if state.get("status") == "closed_no_remaining_outer_findings":
+        turn_number = int(state.get("current_turn", 1))
+        return terminal_continuation_plan(
+            turn_dir=turn_dir_for(run_dir, turn_number),
+            turn_number=turn_number,
+            continuation_state="closed_no_remaining_outer_findings",
+            reason="run already closed because outer finalization left no remaining findings.",
+            ignored_turns=[],
+        )
+    if outer_review_pending_finalization(state):
+        turn_number = int(state.get("current_turn", 1))
+        return continuation_plan(
+            turn_dir=turn_dir_for(run_dir, turn_number),
+            turn_number=turn_number,
+            role="generator",
+            create_new_turn=False,
+            reuse_existing_turn_for_first=False,
+            prior_status="outer_review_pending_finalization",
+            continuation_state="outer_review_pending_finalization",
+            reason="run is paused for outer-review finalization; `continue` will record finalization acknowledgment before resuming or closing.",
+            reference_turn_dir=turn_dir_for(run_dir, turn_number),
+            source_turn_number=turn_number,
+            ignored_turns=[],
+        )
     turns_root = run_dir / "turns"
     if not turns_root.exists() or not any(path.is_dir() for path in turns_root.iterdir()):
         turn_number = int(state.get("current_turn", 1))
@@ -10049,7 +11441,7 @@ def determine_continue_target(run_dir: Path, state: dict) -> tuple[Path, int, st
     except ContinuationResolutionError as exc:
         raise SystemExit(str(exc)) from exc
     if plan["mode"] == "terminal":
-        raise SystemExit(approved_run_continue_message())
+        raise SystemExit(approved_run_continue_message(plan["continuation_state"]))
     return (
         plan["turn_dir"],
         plan["turn_number"],
@@ -10395,6 +11787,29 @@ def build_reopen_nonterminal_message(task_name: str, run_id: str, plan: dict) ->
     return f"cannot reopen run `{run_id}` because it is not in an approved terminal state."
 
 
+def reopen_enters_outer_review_path(
+    previous_state: dict,
+    approved_turn_dir: Path,
+    *,
+    reason_kind: str,
+) -> bool:
+    if reason_kind != "false_approved":
+        return False
+    if review_bridge_mode(previous_state) != "internal":
+        return False
+    outer_review = outer_review_state(previous_state)
+    if not isinstance(outer_review, dict) or not outer_review.get("configured"):
+        return False
+    handoff_path = outer_review.get("latest_handoff_artifact_json")
+    if not isinstance(handoff_path, str) or not handoff_path:
+        return False
+    handoff_json = Path(handoff_path)
+    if not handoff_json.exists():
+        return False
+    approved_turn = outer_review.get("latest_handoff_turn")
+    return approved_turn == approved_turn_dir.name and handoff_json.resolve() == outer_review_handoff_json_path(approved_turn_dir).resolve()
+
+
 def clone_review_bridge_state_for_new_run(previous_state: dict) -> dict:
     mode = review_bridge_mode(previous_state)
     if mode != "github_pr_codex":
@@ -10431,6 +11846,144 @@ def clone_review_bridge_state_for_new_run(previous_state: dict) -> dict:
     }
 
 
+def continue_after_outer_review_finalization(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    inspection: dict,
+) -> int:
+    turn_number = int(state.get("current_turn", 1))
+    current_turn_dir = turn_dir_for(run_dir, turn_number)
+    if not current_turn_dir.exists():
+        raise SystemExit(
+            f"missing turn directory for pending outer finalization: {current_turn_dir}"
+        )
+    ack_payload = write_outer_review_finalization_ack_artifacts(
+        run_dir,
+        state,
+        task_root,
+        current_turn_dir,
+    )
+    state = load_json(run_dir / "state.json")
+    if ack_payload["confirmation_mode"] == "cleared_all_points":
+        state["status"] = "closed_no_remaining_outer_findings"
+        state["stop_reason"] = (
+            "outer finalization removed every remaining review point; the run is terminal without a fresh internal approval"
+        )
+        save_run_state(run_dir, state)
+        save_turn_metadata(
+            current_turn_dir,
+            turn_number,
+            "closed_no_remaining_outer_findings",
+            role="generator",
+            details={"confirmation_mode": ack_payload["confirmation_mode"]},
+        )
+        append_run_event(
+            run_dir,
+            "closed_no_remaining_outer_findings",
+            turn_number=turn_number,
+            role="generator",
+            details={"confirmation_mode": ack_payload["confirmation_mode"]},
+        )
+        print(f"run_dir: {run_dir}")
+        print("continued role: generator")
+        print("continuation reason: outer review finalization cleared all remaining findings; no new execution cycle started.")
+        print(f"current_turn: {turn_number}")
+        print(f"final status: {state['status']}")
+        if state.get("stop_reason"):
+            print(f"stop reason: {state['stop_reason']}")
+        return 0
+
+    next_turn_number = turn_number + 1
+    begin_turn_transition(
+        run_dir,
+        state,
+        task_root,
+        from_turn=turn_number,
+        to_turn=next_turn_number,
+        from_role="generator",
+        to_role="generator",
+        source_verdict="outer_review_pending_finalization",
+        reason=(
+            "outer review finalization was acknowledged; resume the normal generator/reviewer cycle from the finalized remaining review set."
+        ),
+    )
+    state = load_json(run_dir / "state.json")
+    continue_context = build_continue_context(
+        state=state,
+        previous_turn_dir=current_turn_dir,
+        role="generator",
+        inspection=inspection,
+    )
+    append_run_event(
+        run_dir,
+        "outer_review_finalization_resumed",
+        turn_number=next_turn_number,
+        role="generator",
+        details={
+            "confirmation_mode": ack_payload["confirmation_mode"],
+            "cycle_id": ack_payload["cycle_id"],
+        },
+    )
+    try:
+        ensure_active_role_sessions_ready(run_dir, state)
+        supervisor_loop_from(
+            run_dir,
+            state,
+            task_root,
+            start_turn=next_turn_number,
+            start_role="generator",
+            reuse_existing_turn_for_first=False,
+            first_continue_context_block=continue_context,
+        )
+    except SupervisorRuntimeError as error:
+        state = load_json(run_dir / "state.json")
+        state["status"] = (
+            "blocked_invalid_artifacts"
+            if error.phase == "blocked_invalid_artifacts"
+            else "blocked"
+        )
+        state["stop_reason"] = f"{error.phase}: {error}"
+        failure_dir = write_failure_diagnostics(run_dir, state, error)
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            state["status"],
+            role=error.role,
+            turn_number=state.get("current_turn"),
+            details={"phase": error.phase, "message": str(error)},
+        )
+        print(f"supervisor error during {error.phase}: {error}", flush=True)
+        print(f"diagnostics: {failure_dir}", flush=True)
+        return 1
+    except Exception as exc:
+        error = SupervisorRuntimeError("unexpected", str(exc))
+        state = load_json(run_dir / "state.json")
+        state["status"] = "blocked"
+        state["stop_reason"] = f"{error.phase}: {error}"
+        failure_dir = write_failure_diagnostics(run_dir, state, error)
+        save_run_state(run_dir, state)
+        append_run_event(
+            run_dir,
+            "blocked",
+            turn_number=state.get("current_turn"),
+            details={"phase": error.phase, "message": str(error)},
+        )
+        print(f"supervisor error during {error.phase}: {error}", flush=True)
+        print(f"diagnostics: {failure_dir}", flush=True)
+        return 1
+
+    final_state = load_json(run_dir / "state.json")
+    print(f"run_dir: {run_dir}")
+    print("continued role: generator")
+    print("continuation reason: outer review finalization was acknowledged; resumed generator with the finalized remaining review set.")
+    print(f"current_turn: {final_state['current_turn']}")
+    print(f"final status: {final_state['status']}")
+    if final_state.get("stop_reason"):
+        print(f"stop reason: {final_state['stop_reason']}")
+    return 0
+
+
 def continue_run(args: argparse.Namespace) -> int:
     task_name = validate_task_name(args.task_name)
     target_input = Path(args.dir or Path.cwd()).resolve()
@@ -10449,6 +12002,8 @@ def continue_run(args: argparse.Namespace) -> int:
     state = load_json(state_path)
     inspection = inspect_task_workspace(task_root)
     state["workspace_profile"] = inspection["profile"]
+    if outer_review_pending_finalization(state):
+        return continue_after_outer_review_finalization(run_dir, state, task_root, inspection)
     try:
         continuation_plan_data = resolve_continuation_plan(run_dir, state)
     except ContinuationResolutionError as exc:
@@ -10640,6 +12195,10 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--github-pr")
     start.add_argument("--github-branch")
     start.add_argument("--github-base")
+    start.add_argument(
+        "--outer-review-session-id",
+        help="resumable Codex session id for the optional internal outer-review handoff layer",
+    )
     start.add_argument("--start-role", choices=["auto", "generator", "reviewer"], default="auto")
     start.set_defaults(func=start_run)
 
@@ -10657,6 +12216,15 @@ def build_parser() -> argparse.ArgumentParser:
     reopen.add_argument("--run-id", default="latest")
     reopen.add_argument("--reason-kind", choices=sorted(REOPEN_REASON_KINDS), required=True)
     reopen.add_argument("--reason", required=True)
+    reopen.add_argument(
+        "--outer-review-session-id",
+        help="override the inherited internal outer-review resumable Codex session id for the new run",
+    )
+    reopen.add_argument(
+        "--clear-outer-review-session-id",
+        action="store_true",
+        help="disable inherited internal outer review for the new run",
+    )
     reopen.set_defaults(func=reopen_run)
 
     status = sub.add_parser("status", help="show the latest or chosen run state for a task")

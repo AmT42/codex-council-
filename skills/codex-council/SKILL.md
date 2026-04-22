@@ -82,6 +82,7 @@ Then load only the references needed for the chosen route:
 - If the user points at an existing GitHub PR and asks you to use Codex Council on that PR, default to the PR bridge route with `--review-mode github_pr_codex`; do not start the internal reviewer loop unless the user explicitly asks for the internal generator/reviewer mode.
 - Exception: when the user asks you to write the council spec/instructions or otherwise prepare the council brief itself, always write `task.md`, `review.md`, `spec.md`, and `contract.md` before launch.
 - Prefer `status` + `continue` over restarting a healthy paused run, but use `reopen` when an approved run must be superseded explicitly.
+- Internal-mode outer review is additive, not a separate review mode: it uses `--outer-review-session-id` on `start`, writes an approved-run handoff, and re-enters only through `reopen --reason-kind false_approved` before the triage-only/finalization loop.
 - Do not pass vague user wording directly into the council docs.
 - Do not do the target-repo implementation work yourself when the harness is the requested tool.
 - For broad/spec-driven/vague/agentic work, run a planning stage before locking execution docs.

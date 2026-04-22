@@ -85,6 +85,20 @@ Use `start` after the chosen docs are ready:
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo
 ```
 
+Optional internal outer-review layer:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
+  --dir /path/to/target-repo \
+  --outer-review-session-id <codex_session_id>
+```
+
+Rules:
+
+- the identifier is a resumable Codex session id
+- this layer is internal-review-mode-only for the first implementation
+- do not pass `--outer-review-session-id` when using `--review-mode github_pr_codex`
+
 Before `start`, ensure the docs are strong enough to survive runtime validation.
 
 If planning runs already exist for the task, treat them as advisory context. `start` should validate the current canonical docs directly instead of requiring the latest planning run to be approved or unchanged.
@@ -144,6 +158,7 @@ Prefer `continue` over a new run when:
 - the reviewer returned `changes_requested`
 - the human edited task docs and wants the same run to proceed
 - the run is blocked in the `github_pr_codex` reviewer bridge and should resume the same reviewer turn
+- the run is paused for outer-review finalization and the outer agent already finalized canonical `review.md`
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task --dir /path/to/target-repo
@@ -156,6 +171,13 @@ Process rule:
 - if you will not wait in the foreground, prefer running the `continue` command inside a dedicated `tmux` session
 
 Approved runs are terminal for `continue`.
+
+Internal outer-review special case:
+
+- after the first triage-only generator turn on an outer-review `false_approved` reopen, the run pauses for outer finalization through canonical `review.md`
+- run `continue` after that finalization step even if `review.md` stayed unchanged; the harness must still write `outer_review_finalization_ack.*`
+- if no points remain, `continue` closes the run as `closed_no_remaining_outer_findings`
+- if points remain, `continue` writes the acknowledgment artifact first and only then resumes a fresh normal generator/reviewer cycle
 
 `github_pr_codex` special case:
 
@@ -176,6 +198,17 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py reopen my-task --
 ```
 
 `reopen` starts a fresh linked run from the current canonical docs, preserves the old approved run unchanged, and appends an audit entry under `.codex-council/reopen-events.jsonl`.
+
+Exact internal outer-review loop:
+
+- approved internal run with configured outer review writes `outer_review_handoff.*`
+- outer agent re-verifies the whole task against intended behavior and current branch state
+- if blockers remain under unchanged requirements, update canonical `review.md` and use `reopen --reason-kind false_approved`
+- only that precise false-approved reopen of an internally approved run with a prior handoff enters the explicit outer-review path
+- the first generator turn of that reopen is triage-only
+- after triage, the outer agent finalizes the surviving review through canonical `review.md` and then uses `continue`
+- `reopen --outer-review-session-id <codex_session_id>` overrides the inherited internal outer-review session id for the new run
+- `reopen --clear-outer-review-session-id` disables inherited internal outer review for the new run
 
 ## Safety notes
 
