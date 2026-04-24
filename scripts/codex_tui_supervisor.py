@@ -3907,7 +3907,7 @@ def format_evaluator_execution_input_files_block(
                 "Review scope note:",
                 "- Primary review scope: the full current branch state against `task.md`, `spec.md`, and `contract.md`.",
                 "- Each reviewer turn is a fresh full-task audit, including already-checked contract items that may need to be unchecked again on regression.",
-                "- Latest generator artifacts below are background context only; do not narrow the review to them.",
+                "- Generator artifacts below identify what changed last; keep review scoped to the full branch.",
             ]
         ),
         format_path_group(
@@ -3928,7 +3928,7 @@ def format_evaluator_execution_input_files_block(
     groups.extend(
         [
             format_path_group(
-                "Latest generator context only (not review scope)",
+                "Generator turn artifacts",
                 repo_root,
                 [
                     role_message_path(turn_dir, "generator"),
@@ -4524,8 +4524,6 @@ def format_reviewer_protocol_block(turn_dir: Path, state: dict) -> str:
         generator_status = validate_generator_status(load_json(generator_status_path))
         changed_files = generator_status["changed_files"]
     non_production_only = changed_files_are_non_production_only(changed_files)
-    council_config = state.get("council_config", {"review": default_review_config()})
-    required_commands = review_required_commands_for_changed_files(council_config, changed_files)
     lines = [
         "Follow this protocol in order:",
         "1. Reconstruct the full approval surface from `task.md`, `spec.md`, and `contract.md` before reading the latest generator turn as context.",
@@ -4533,21 +4531,12 @@ def format_reviewer_protocol_block(turn_dir: Path, state: dict) -> str:
         "3. Look for regressions that should force previously checked items to become unchecked again.",
         "4. Read the latest generator turn only as background context after the whole review surface is understood.",
         "5. Audit code and the real execution path deeply enough to decide whether any approval-critical area regressed outside the latest fix.",
-        "6. Execute the required verification commands and at least one targeted disconfirming real-path check.",
+        "6. Execute verification that proves the approval surface and at least one targeted disconfirming real-path check.",
         "7. Do not newly approve production behavior from tests/docs/fixtures/helper-seam changes unless independent evidence on the unchanged real path proves the current branch state.",
         "8. Approval is invalid if you have only rechecked the latest fix, the latest open blocker, or the currently unchecked contract items.",
         "9. Decide branch health and approval readiness only after the full re-audit is complete.",
     ]
     lines.append("10. Never edit production code during review. You may add or tighten tests/fixtures only when needed to expose a risky invariant.")
-    if changed_files:
-        lines.extend(
-            [
-                "",
-                "Latest generator context only (not review scope):",
-                *[f"- {item}" for item in changed_files],
-                "- These changed files are context information only. Do not let them narrow the review; revisit the full approval surface, including already-checked contract items.",
-            ]
-        )
     if non_production_only:
         lines.extend(
             [
@@ -4557,14 +4546,6 @@ def format_reviewer_protocol_block(turn_dir: Path, state: dict) -> str:
                 "- Treat that as indirect evidence unless you independently verify the unchanged production/runtime path on current branch state.",
             ]
         )
-    lines.extend(
-        [
-            "",
-            "Minimum context checks only (not approval proof):",
-            "- These checks are background verification on the latest context only. They do not prove approval readiness; the branch still requires a complete full-task audit.",
-            *[f"- {item}" for item in required_commands],
-        ]
-    )
     return "\n".join(lines).rstrip()
 
 
@@ -4623,19 +4604,19 @@ def build_evaluator_brief(
         f"- Why this posture: {posture_reason}",
         "- Primary review scope: the full current branch state against `task.md`, `spec.md`, and `contract.md`.",
         "- This turn must revisit all approval-critical areas, including already-checked contract items, to find regressions and uncheck them again if needed.",
-        "- Latest generator artifacts are background context only; they are never the review scope or approval boundary.",
+        "- Generator artifacts identify what changed last; they are never the review scope or approval boundary.",
         f"- Primary-path smoke required: {'yes' if review_cfg['require_primary_path_smoke'] else 'no'}",
         f"- Fallback inspection required: {'yes' if fallback_inspection_required_for_turn(task_root, inspection, initial_review_surface=initial_review_surface) else 'no'}",
     ]
     if initial_review_surface:
-        lines.extend(["", "## Latest Generator Context Only", ""])
+        lines.extend(["", "## Generator-Reported Surface", ""])
         lines.append("")
-        lines.append("Use this only as background after reconstructing the full approval surface and re-auditing every approval-critical area.")
+        lines.append("Use this after reconstructing the full approval surface and re-auditing every approval-critical area.")
         lines.extend(f"- {path_text}" for path_text in initial_review_surface)
     if required_commands:
-        lines.extend(["", "## Latest-Context Background Checks Only", ""])
+        lines.extend(["", "## Suggested Verification", ""])
         lines.append("")
-        lines.append("These checks are background context only. They do not prove approval readiness, and they never replace a full-task, full-branch re-audit.")
+        lines.append("These checks can support the review, but they never replace a full-task, full-branch re-audit.")
         lines.extend(f"- {command}" for command in required_commands)
     reopen_context = format_reopen_context_block(state)
     if reopen_context:

@@ -964,12 +964,10 @@ reviewer_reset_mode = "wrong"
             self.assertIn("Reconstruct the full approval surface", prompt)
             self.assertIn("Review scope note:", prompt)
             self.assertIn("Primary review scope: the full current branch state against `task.md`, `spec.md`, and `contract.md`.", prompt)
-            self.assertIn("Latest generator context only (not review scope)", prompt)
-            self.assertIn("Latest generator context only (not review scope):", prompt)
+            self.assertIn("Generator turn artifacts", prompt)
             self.assertIn("context information only", prompt)
-            self.assertIn("revisit the full approval surface, including already-checked contract items", prompt)
-            self.assertIn("Minimum context checks only (not approval proof):", prompt)
-            self.assertIn("complete full-task audit", prompt)
+            self.assertNotIn("Latest generator context only (not review scope)", prompt)
+            self.assertNotIn("Minimum context checks only (not approval proof):", prompt)
             self.assertIn("Generator Framing Risks Checked", prompt)
             self.assertIn("Disconfirming Checks Run", prompt)
             self.assertIn("Evidence Basis for Approval-Critical Claims", prompt)
@@ -1057,7 +1055,7 @@ reviewer_reset_mode = "wrong"
             self.assertIn("only rechecked the latest fix, the latest open blocker, or the currently unchecked contract items", prompt)
             self.assertIn("Evidence Basis for Approval-Critical Claims", prompt)
 
-    def test_build_reviewer_prompt_includes_required_commands_and_evidence_path(self) -> None:
+    def test_build_reviewer_prompt_omits_latest_context_minimum_checks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             turn_dir = Path(tmp_dir) / "turns" / "0001"
@@ -1080,7 +1078,9 @@ reviewer_reset_mode = "wrong"
             self.assertIn("Follow this protocol in order:", prompt)
             self.assertIn("targeted disconfirming real-path check", prompt)
             self.assertIn("latest generator turn only as background context", prompt)
-            self.assertIn("pytest -q tests/test_example.py", prompt)
+            self.assertIn("verification that proves the approval surface", prompt)
+            self.assertNotIn("Minimum context checks only", prompt)
+            self.assertNotIn("pytest -q tests/test_example.py", prompt)
 
     def test_build_evaluator_brief_labels_latest_surface_as_starting_point_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1101,10 +1101,10 @@ reviewer_reset_mode = "wrong"
             )
             self.assertIn("Primary review scope: the full current branch state against `task.md`, `spec.md`, and `contract.md`.", brief)
             self.assertIn("revisit all approval-critical areas, including already-checked contract items", brief)
-            self.assertIn("Latest generator artifacts are background context only", brief)
-            self.assertIn("## Latest Generator Context Only", brief)
-            self.assertIn("Use this only as background after reconstructing the full approval surface", brief)
-            self.assertIn("## Latest-Context Background Checks Only", brief)
+            self.assertIn("Generator artifacts identify what changed last", brief)
+            self.assertIn("## Generator-Reported Surface", brief)
+            self.assertIn("Use this after reconstructing the full approval surface", brief)
+            self.assertIn("## Suggested Verification", brief)
             self.assertIn("never replace a full-task, full-branch re-audit", brief)
 
     def test_build_reviewer_prompt_warns_when_change_surface_is_tests_only(self) -> None:
