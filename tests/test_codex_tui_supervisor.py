@@ -968,6 +968,7 @@ reviewer_reset_mode = "wrong"
             self.assertIn("context information only", prompt)
             self.assertNotIn("Latest generator context only (not review scope)", prompt)
             self.assertNotIn("Minimum context checks only (not approval proof):", prompt)
+            self.assertNotIn("reviewed_" + "commit_sha", prompt)
             self.assertIn("Generator Framing Risks Checked", prompt)
             self.assertIn("Disconfirming Checks Run", prompt)
             self.assertIn("Evidence Basis for Approval-Critical Claims", prompt)
@@ -3135,7 +3136,6 @@ reviewer_reset_mode = "wrong"
                     },
                     "human_message": None,
                     "human_source": None,
-                    "reviewed_commit_sha": None,
                 })
             ):
                 MODULE.write_text(turn_one / "reviewer" / "message.md", "review")

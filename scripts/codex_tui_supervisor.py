@@ -3624,10 +3624,6 @@ def validate_reviewer_status(data: dict) -> dict:
         human_source = normalize_human_source(human_source, role="reviewer")
     elif human_message is not None or human_source is not None:
         raise ValueError("reviewer human_message and human_source may only be set when verdict is needs_human")
-    reviewed_commit_sha = normalize_optional_text(
-        data.get("reviewed_commit_sha"),
-        field_name="reviewer reviewed_commit_sha",
-    )
     critical_dimensions = data.get("critical_dimensions")
     if not isinstance(critical_dimensions, dict):
         raise ValueError("reviewer critical_dimensions must be a dict")
@@ -3649,7 +3645,6 @@ def validate_reviewer_status(data: dict) -> dict:
         "verdict": verdict,
         "summary": summary.strip(),
         "blocking_issues": [item.strip() for item in blocking_issues],
-        "reviewed_commit_sha": reviewed_commit_sha,
         "human_message": human_message,
         "human_source": human_source,
         "critical_dimensions": normalized_dimensions,
@@ -3730,8 +3725,6 @@ def format_reviewer_status_schema_block(*, bootstrap_review: bool = False) -> st
         "- `blocking_issues`: list of strings",
         _format_dimension_schema_block(planning=False),
     ]
-    if not bootstrap_review:
-        lines.append("- `reviewed_commit_sha`: optional non-empty string")
     lines.append(_format_human_intervention_status_block("reviewer"))
     return "\n".join(lines).rstrip()
 
@@ -8190,7 +8183,7 @@ def wait_for_new_github_inline_review_snapshot(
             return snapshot
 
 
-def github_reviewer_status_from_comment(comment_body: str, reviewed_commit_sha: str) -> dict:
+def github_reviewer_status_from_comment(comment_body: str) -> dict:
     if comment_body.startswith(GITHUB_CODEX_APPROVED_PREFIX):
         dimensions = {
             key: "pass" for key in critical_review_dimension_keys()
@@ -8200,7 +8193,6 @@ def github_reviewer_status_from_comment(comment_body: str, reviewed_commit_sha: 
             "summary": "GitHub Codex reported no major blocking issues.",
             "blocking_issues": [],
             "critical_dimensions": dimensions,
-            "reviewed_commit_sha": reviewed_commit_sha,
         }
     dimensions = {
         key: (
@@ -8215,11 +8207,10 @@ def github_reviewer_status_from_comment(comment_body: str, reviewed_commit_sha: 
         "summary": "GitHub Codex requested follow-up changes.",
         "blocking_issues": extract_github_review_blocking_issues(comment_body),
         "critical_dimensions": dimensions,
-        "reviewed_commit_sha": reviewed_commit_sha,
     }
 
 
-def github_reviewer_status_from_snapshot(snapshot: dict, reviewed_commit_sha: str) -> dict:
+def github_reviewer_status_from_snapshot(snapshot: dict) -> dict:
     review = snapshot["review"]
     active_threads = snapshot["active_threads"]
     if not active_threads:
@@ -8229,7 +8220,6 @@ def github_reviewer_status_from_snapshot(snapshot: dict, reviewed_commit_sha: st
             "summary": "GitHub Codex reported no unresolved inline review findings on the current PR head.",
             "blocking_issues": [],
             "critical_dimensions": dimensions,
-            "reviewed_commit_sha": reviewed_commit_sha,
         }
     dimensions = {
         key: ("fail" if key == "correctness_vs_intent" else "uncertain")
@@ -8243,7 +8233,6 @@ def github_reviewer_status_from_snapshot(snapshot: dict, reviewed_commit_sha: st
         "summary": summary,
         "blocking_issues": snapshot["blocking_issues"],
         "critical_dimensions": dimensions,
-        "reviewed_commit_sha": reviewed_commit_sha,
     }
 
 
@@ -9438,7 +9427,7 @@ def planning_loop(run_dir: Path, state: dict, task_root: Path) -> None:
     )
 
 
-def blocked_github_reviewer_status(summary: str, reviewed_commit_sha: str | None) -> dict:
+def blocked_github_reviewer_status(summary: str) -> dict:
     dimensions = {
         key: ("fail" if key == "failure_mode_and_fallback" else "uncertain")
         for key in critical_review_dimension_keys()
@@ -9449,7 +9438,6 @@ def blocked_github_reviewer_status(summary: str, reviewed_commit_sha: str | None
             "summary": summary,
             "blocking_issues": [summary],
             "critical_dimensions": dimensions,
-            "reviewed_commit_sha": reviewed_commit_sha,
         }
     )
 
@@ -9467,16 +9455,15 @@ def run_github_codex_review_phase(
     request_comment = None
     comment = None
     review_snapshot = None
-    reviewed_commit_sha = github_state.get("last_observed_head_sha")
     waited_for_reply = False
     try:
         pr_info = ensure_github_pr_ready(run_dir, state, task_root, turn_number)
-        reviewed_commit_sha = pr_info["head_ref_oid"]
+        current_head_sha = pr_info["head_ref_oid"]
         current_review_state = inspect_github_pr_review_state_for_current_head(
             run_dir,
             state,
             turn_number,
-            current_head_sha=reviewed_commit_sha,
+            current_head_sha=current_head_sha,
         )
         review_state = current_review_state["state"]
         reuse_existing_request = review_state != "needs_request_comment"
@@ -9514,7 +9501,7 @@ def run_github_codex_review_phase(
                 run_dir,
                 state,
                 turn_number,
-                reviewed_commit_sha,
+                current_head_sha,
             )
             waited_for_reply = True
         elif review_state == "waiting_for_codex_reply":
@@ -9534,7 +9521,7 @@ def run_github_codex_review_phase(
                 run_dir,
                 state,
                 turn_number,
-                current_head_sha=reviewed_commit_sha,
+                current_head_sha=current_head_sha,
                 current_head_started_at=current_review_state["current_head_started_at"],
                 timeout_seconds=float(state["council_config"]["council"]["turn_timeout_seconds"]),
                 reuse_existing_request=True,
@@ -9562,20 +9549,20 @@ def run_github_codex_review_phase(
                 run_dir,
                 state,
                 turn_number,
-                current_head_sha=reviewed_commit_sha,
+                current_head_sha=current_head_sha,
                 current_head_started_at=current_review_state["current_head_started_at"],
                 timeout_seconds=float(state["council_config"]["council"]["turn_timeout_seconds"]),
                 reuse_existing_request=False,
             )
         if review_snapshot is not None:
             reviewer_status = validate_reviewer_status(
-                github_reviewer_status_from_snapshot(review_snapshot, reviewed_commit_sha)
+                github_reviewer_status_from_snapshot(review_snapshot)
             )
             if reviewer_status["verdict"] == "changes_requested":
                 write_github_review_input_artifacts(run_dir, task_root, current_turn_dir, review_snapshot)
         else:
             reviewer_status = validate_reviewer_status(
-                github_reviewer_status_from_comment(comment["body"], reviewed_commit_sha)
+                github_reviewer_status_from_comment(comment["body"])
             )
         reviewer_message = build_github_reviewer_message(
             state,
@@ -9612,7 +9599,7 @@ def run_github_codex_review_phase(
         )
         return reviewer_status
     except SupervisorRuntimeError as error:
-        reviewer_status = blocked_github_reviewer_status(str(error), reviewed_commit_sha)
+        reviewer_status = blocked_github_reviewer_status(str(error))
         reviewer_message = build_github_reviewer_message(
             state,
             turn_number,
