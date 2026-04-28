@@ -20,12 +20,18 @@ The harness is intentionally layered.
 User
   -> Outer agent
     -> codex-council skill
-      -> prepare (planner / intent critic planning loop when needed)
-        -> Canonical docs in target repo
-          -> codex_tui_supervisor.py
-            -> generator / reviewer role sessions
-              -> turn artifacts
-                -> status / continue / reopen / approval
+      -> optional Planning Preparation
+        -> prepare (planner / intent critic planning loop when needed)
+      -> Canonical docs in target repo
+        -> codex_tui_supervisor.py
+          -> execution review source:
+            -> Normal Internal Council
+              -> generator / reviewer role sessions
+              -> optional Internal Council With Outer Audit after approval
+            -> GitHub PR Codex Bridge
+              -> generator role session / GitHub PR Codex review findings
+          -> turn artifacts
+            -> status / continue / reopen / approval
 ```
 
 ### User
@@ -69,6 +75,19 @@ It does not replace the runtime. It encodes:
 - lifecycle rules
 - recovery rules
 - operator-vs-implementer boundary
+
+### Routing Axes
+
+The skill should route by four independent axes rather than one overloaded mode list:
+
+| Axis | Values |
+| --- | --- |
+| Request class | direct answer, inspect/resume, concrete execution, findings fix, broad/spec work |
+| Preparation lane | none, Planning Preparation via `prepare` |
+| Execution review source | Normal Internal Council, GitHub PR Codex Bridge |
+| Post-approval audit add-on | none, Internal Council With Outer Audit |
+
+Live PR wording is a preflight: if the user names an existing PR URL, PR number, or "this PR", the default execution review source is the GitHub PR Codex Bridge unless the user explicitly asks for the internal generator/reviewer execution loop.
 
 ### Planning preparation
 
@@ -189,7 +208,7 @@ Core files:
 - `<role>/status.json`
 - `<role>/raw_final_output.md`
 
-Some modes may add non-canonical, turn-scoped context artifacts such as GitHub review input snapshots when the reviewer source is external.
+Some review sources may add non-canonical, turn-scoped context artifacts such as GitHub review input snapshots when the reviewer source is external.
 
 These artifacts are the real control plane.
 
@@ -263,7 +282,7 @@ This is the layer that prevents weak documents from reaching the council.
 
 ### 3. Role separation
 
-Generator and reviewer have different jobs and different approval semantics.
+In the Normal Internal Council, generator and reviewer have different jobs and different approval semantics.
 
 The generator does not decide approval.
 The reviewer does not silently invent requirements.
@@ -310,12 +329,13 @@ If the approval was wrong or the canonical requirements changed afterward, the r
 - creates a fresh linked run from the current canonical docs
 - records reopen metadata and doc-change context durably
 
-Internal-mode outer review is an additive lifecycle on top of that rule, not an exception to it.
+Internal Council With Outer Audit is an additive lifecycle on top of that rule, not an exception to it.
 
-- an internal run may optionally carry an outer-review resumable Codex session id
+- an internal run may optionally carry an outer-review fork parent session id and persistent `outer_review` tmux role
 - when such a run reaches reviewer `approved`, the run stays terminal for `continue`
-- the supervisor writes durable outer-review handoff `outer_review_handoff.*` artifacts and may attempt a best-effort dispatch to that configured outer session id
-- if the outer agent later finds blockers under unchanged requirements, the re-entry path is still explicit `reopen --reason-kind false_approved`
+- the supervisor writes durable outer-review handoff `outer_review_handoff.*` artifacts and sends the audit request to the persistent outer-review audit agent
+- the supervisor does not notify that persistent outer-review audit agent for generator/reviewer `blocked` or `needs_human`; those are handled by the normal inner-loop operator path
+- if the persistent outer-review audit agent later finds blockers under unchanged requirements, the re-entry path is still explicit `reopen --reason-kind false_approved`
 - only that precise false-approved reopen of an internally approved run with a prior outer-review handoff enters the outer-review path
 - the first generator turn of that reopen is triage-only
 - after triage, the run pauses for outer finalization through canonical `review.md`

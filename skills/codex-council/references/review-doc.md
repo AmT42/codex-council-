@@ -12,9 +12,10 @@ Typical triggers:
 - bug-analysis notes
 - a debugging handoff
 
-`github_pr_codex` exception:
+GitHub PR Codex Bridge exception:
 
-- when the findings already live on the PR and the operator is running the GitHub review loop directly, those findings may be materialized into turn-scoped GitHub review input artifacts instead of a canonical `review.md`
+- when the findings already live on the PR and the operator is running the GitHub PR Codex Bridge directly, those findings may be materialized into turn-scoped GitHub review input artifacts instead of a canonical `review.md`
+- `review.md` is canonical findings input for the Normal Internal Council; it is not `turns/.../reviewer/message.md`, it is not the GitHub PR review source in `github_pr_codex`, and it is not the place for broad product requirements
 
 ## Writing rules
 

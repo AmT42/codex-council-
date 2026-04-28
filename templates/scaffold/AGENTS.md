@@ -4,6 +4,8 @@ This task is handled by a two-agent council:
 - the generator implements or fixes the requested work
 - the reviewer checks fidelity to intent, correctness, risk, and test adequacy
 
+This task-local brief governs Normal Internal Council execution. GitHub PR Codex Bridge routing and Internal Council With Outer Audit are supervisor routes, not feature requirements to copy into this brief.
+
 ## Mission
 - This file is the council brief.
 - It defines how generator and reviewer should behave.

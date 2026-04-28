@@ -1,4 +1,4 @@
-Role: Evaluator
+Role: Reviewer
 Phase: bootstrap review
 Repo root: {{repo_root}}
 

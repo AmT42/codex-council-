@@ -152,7 +152,7 @@ This planning stage is a preparation layer, not a replacement for the runtime co
 
 ## What The Harness Does
 
-Codex Council runs a two-role loop inside a target repo:
+In the Normal Internal Council route, Codex Council runs a two-role loop inside a target repo:
 
 - `generator`
   - implements or fixes the requested work
@@ -231,25 +231,57 @@ Optional supporting context:
 - `branch_northstar_summary.md`
   - non-canonical branch/worktree context for `github_pr_codex` or other branch-driven work when the operator wants to preserve the repo northstar without turning it into a task brief
 
-Recommended defaults for outer-agent routing:
+## Routing Axes
 
-- concrete bugfix or targeted implementation
-  - `task.md` + `contract.md`
-- findings-driven fix
-  - `review.md` + `contract.md`
-- GitHub PR Codex loop on an existing PR
-  - if the user points at a live PR and asks to use Codex Council on that PR, this is the default route
-  - `github_pr_codex` may start without local `task.md`, `review.md`, or `spec.md`
-  - use the PR plus current-head GitHub review findings as the effective brief
-  - add `branch_northstar_summary.md` when the branch/worktree intent needs durable context
-- broad feature or complex design
-  - planning stage first via `prepare`, then `task.md` + `spec.md` + `contract.md`
-- meta question about the harness
-  - answer directly, do not scaffold docs
+The outer agent should choose a route by four independent axes instead of treating request classes, runtime review sources, planning, and audit add-ons as the same kind of choice:
 
-## Five Operating Modes
+| Axis | Values |
+| --- | --- |
+| Request class | direct answer, inspect/resume, concrete execution, findings fix, broad/spec work |
+| Preparation lane | none, planning preparation via `prepare` |
+| Execution review source | Normal Internal Council, GitHub PR Codex Bridge |
+| Post-approval audit add-on | none, Internal Council With Outer Audit |
 
-The outer agent should classify each request into one primary mode before taking action.
+Canonical runtime names:
+
+- **Normal Internal Council**
+  - local `generator` plus local `reviewer`
+  - default `--review-mode internal`
+- **GitHub PR Codex Bridge**
+  - local `generator` plus GitHub PR Codex review findings
+  - selected on `start` with `--review-mode github_pr_codex`
+- **Internal Council With Outer Audit**
+  - Normal Internal Council plus `--outer-review-fork-session-id`
+  - additive post-approval audit only; not a review mode and not compatible with `github_pr_codex`
+- **Planning Preparation**
+  - planner plus intent critic via `prepare`
+  - preparation lane before execution, not an execution review source
+
+### PR Preflight
+
+Before applying the normal request classes, check whether the user named an existing GitHub PR by URL, PR number, or wording like "this PR", "the pull request", or "work on PR #123".
+
+If yes, route to the GitHub PR Codex Bridge by default:
+
+- start the run with `--review-mode github_pr_codex`
+- pass `--github-pr <url-or-number>` when known
+- treat the PR plus current-head GitHub Codex findings as the effective brief
+- do not seed `review.md` or `contract.md` just to copy PR findings
+- do not use the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
+
+Quick route table:
+
+| User request | Route | Command shape |
+| --- | --- | --- |
+| Existing PR / PR URL / "this PR" | GitHub PR Codex Bridge | `start --review-mode github_pr_codex --github-pr ...` |
+| Pasted review notes, no live PR | Normal Internal Council findings fix | `review.md` + `contract.md` + `start` |
+| Concrete bug/feature, no PR | Normal Internal Council | `task.md` + `contract.md` + `start` |
+| Broad/vague/agentic work | Planning Preparation first | `prepare`, then `start` |
+| Internal run plus final audit | Internal Council With Outer Audit | `start --outer-review-fork-session-id ...` |
+
+## Request Classes
+
+After PR preflight, classify the request into one primary request class before taking action.
 
 ### 1. Direct answer only
 
@@ -282,8 +314,8 @@ Use when the user provides review comments, logs, repro notes, or debugging find
 
 - default to `review.md` + `contract.md`
 - add `task.md` only if it materially clarifies the implementation target
-- special case: when using `github_pr_codex` against an existing PR, local `task.md` / `review.md` / `spec.md` may be omitted if the PR and current-head review findings already provide a usable brief
-- if the user references a live PR and asks to use Codex Council on that PR, prefer `github_pr_codex` over the internal reviewer loop unless they explicitly request generator/reviewer mode
+- pasted or off-PR findings use the Normal Internal Council by default
+- live PR findings use the GitHub PR Codex Bridge by default unless the user explicitly requests the internal generator/reviewer execution loop
 
 ### 5. Broad feature or spec work
 
@@ -395,7 +427,19 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py prepare my-task -
 
 If the latest planning run is already approved and the canonical docs are unchanged, `prepare` may simply report that the docs are already prepared for execution. Use `--new-run` or pass new `--intent` when you intentionally want a fresh planning pass.
 
-Start the execution council:
+Choose the start command for the selected execution review source.
+
+For an existing GitHub PR, use the GitHub PR Codex Bridge:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init pr-123 --dir /path/to/target-repo
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start pr-123 \
+  --dir /path/to/target-repo \
+  --review-mode github_pr_codex \
+  --github-pr https://github.com/acme/repo/pull/123
+```
+
+For Normal Internal Council execution only:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo
@@ -403,41 +447,36 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --d
 
 `start` validates the current canonical docs directly. An existing planning run is recommended guidance, not a hard prerequisite.
 
-GitHub PR Codex example:
+For Internal Council With Outer Audit:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
   --dir /path/to/target-repo \
-  --review-mode github_pr_codex \
-  --github-pr https://github.com/acme/repo/pull/123
+  --outer-review-fork-session-id <parent_session_id>
 ```
 
-Optional internal outer-review example:
-
-```bash
-python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
-  --dir /path/to/target-repo \
-  --outer-review-session-id <codex_session_id>
-```
-
-The outer-review session id is a resumable Codex session id, not a generic thread label. This additive layer applies only to the normal internal generator/reviewer mode, not to `github_pr_codex`.
+The outer-review fork session id is a Codex parent session id used with `codex fork` to start a persistent, attachable `outer_review` tmux agent. `--outer-review-session-id` remains a deprecated alias for one transition period. This additive layer applies only to the Normal Internal Council, not to `github_pr_codex`.
+Use `--outer-review-tmux-session <name>` only when you need a custom tmux session name; `--outer-review-session` is a deprecated alias for that tmux name.
 
 Inspect or resume later:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --dir /path/to/target-repo
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status my-task --dir /path/to/target-repo --sessions
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py continue my-task --dir /path/to/target-repo
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py reopen my-task --dir /path/to/target-repo --run-id latest --reason-kind false_approved --reason "The approval missed a blocking fallback bug."
 ```
 
-Internal outer-review loop:
+Internal outer-review audit layer:
 
-- when an internal run with `--outer-review-session-id` reaches reviewer `approved`, the harness records that approval and writes an `outer_review_handoff.*` artifact pair
-- the outer agent re-verifies the whole task against current branch state and intended behavior
+- when an internal run with `--outer-review-fork-session-id` starts, the harness creates a persistent `outer_review` role with its own tmux session
+- when the internal loop reaches reviewer `approved`, the harness sends one short final-audit request to that persistent outer-review audit agent and writes turn-scoped outer-review handoff/notification artifacts
+- generator/reviewer `blocked` and `needs_human` states do not notify the persistent outer-review audit agent; they remain normal inner-loop terminal or pause states for the operator
+- the persistent outer-review audit agent re-verifies the whole task against current branch state and intended behavior
 - only `reopen --reason-kind false_approved` on that approved internal run with a prior outer-review handoff enters the explicit outer-review path
 - the first generator turn of that reopen is triage-only and must classify every active finding as `agree`, `disagree`, or `uncertain`
 - after triage, the harness pauses for outer finalization through canonical `review.md`
-- the outer agent must run `continue` even if `review.md` is unchanged so the harness can write `outer_review_finalization_ack.*`
+- the persistent outer-review audit agent must run `continue` even if `review.md` is unchanged so the harness can write `outer_review_finalization_ack.*`
 - if finalization clears every remaining finding, the run closes as `closed_no_remaining_outer_findings` instead of pretending it earned a fresh internal approval
 - if findings remain, `continue` resumes the next normal generator/reviewer cycle from that finalized remaining set
 
@@ -482,10 +521,10 @@ The TUI supervisor:
 - keeps `continue` terminal for approved runs and requires explicit `reopen` to supersede them
 - can bootstrap from forked session context when local task docs are missing
 - validates task documents before `start`
-- can start `github_pr_codex` generator-first without local `task.md`, `review.md`, or `spec.md`
+- can start the GitHub PR Codex Bridge generator-first without local `task.md`, `review.md`, or `spec.md`
 - materializes current-head GitHub review findings into turn-scoped review input artifacts for the generator
 - resumes blocked `github_pr_codex` reviewer turns on the same turn instead of forcing a new turn
-- can add an internal-mode-only outer-review layer driven by a resumable Codex session id
+- can add an Internal Council With Outer Audit layer driven by a persistent `codex fork` outer-review audit agent in tmux
 - keeps approved internal runs terminal for `continue`, but can write durable outer-review handoff/finalization artifacts around that approval lifecycle
 
 `continue` is the intended path after:
@@ -509,7 +548,8 @@ For the internal outer-review layer, the exact reopen trigger matters:
 
 - only `false_approved` on an internally approved run with configured outer review and a recorded `outer_review_handoff.json` enters the special outer-review triage/finalization path
 - `requirements_changed_after_approval` remains the normal approved-run supersession path even if the earlier run had outer review configured
-- `reopen --outer-review-session-id <codex_session_id>` overrides the inherited internal outer-review session id for the new run
+- `reopen --outer-review-fork-session-id <parent_session_id>` overrides the inherited internal outer-review fork parent id for the new run
+- `--outer-review-session-id` is a deprecated alias for the fork parent id
 - `reopen --clear-outer-review-session-id` disables inherited internal outer review for the new run
 
 ## Supervisor Lifetime

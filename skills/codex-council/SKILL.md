@@ -1,6 +1,6 @@
 ---
 name: codex-council
-description: Operate the Codex Council harness from an outer Codex agent. Use when a user wants help turning vague or precise software requests into strong task.md, review.md, spec.md, and contract.md documents, or when they want the GitHub PR Codex bridge operated against an existing PR, then start, inspect, continue, or reopen the right council run in a target repository.
+description: Operate Codex Council from an outer Codex agent. Route user wording to the right request class, preparation lane, execution review source, and lifecycle command. For existing GitHub PRs or PR numbers, default to the GitHub PR Codex Bridge with --review-mode github_pr_codex; use the internal generator/reviewer execution loop only when explicitly requested.
 ---
 
 # Codex Council
@@ -16,7 +16,7 @@ If the user asked you to **use this harness** for a task, you are the harness op
 Your job is to:
 
 - inspect the target repo
-- write or update the canonical council docs
+- write or update canonical council docs only when the chosen route needs them; live PR bridge runs may omit them
 - choose between direct answer, `prepare`, `start`, `continue`, and `reopen`
 - launch or resume the council
 
@@ -79,10 +79,10 @@ Then load only the references needed for the chosen route:
 - Ask only high-impact blocking questions.
 - Prefer the smallest sufficient document set.
 - Default to `contract.md` for non-trivial work.
-- If the user points at an existing GitHub PR and asks you to use Codex Council on that PR, default to the PR bridge route with `--review-mode github_pr_codex`; do not start the internal reviewer loop unless the user explicitly asks for the internal generator/reviewer mode.
+- If the user points at an existing GitHub PR and asks you to use Codex Council on that PR, default to the GitHub PR Codex Bridge with `--review-mode github_pr_codex`; do not start the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop.
 - Exception: when the user asks you to write the council spec/instructions or otherwise prepare the council brief itself, always write `task.md`, `review.md`, `spec.md`, and `contract.md` before launch.
 - Prefer `status` + `continue` over restarting a healthy paused run, but use `reopen` when an approved run must be superseded explicitly.
-- Internal-mode outer review is additive, not a separate review mode: it uses `--outer-review-session-id` on `start`, writes an approved-run handoff, and re-enters only through `reopen --reason-kind false_approved` before the triage-only/finalization loop.
+- Internal Council With Outer Audit is additive, not a separate review mode: it uses `--outer-review-fork-session-id` on `start` to create a persistent forked `outer_review` tmux agent, sends that agent only one final approved-run audit request, and re-enters only through `reopen --reason-kind false_approved` before the triage-only/finalization loop.
 - Do not pass vague user wording directly into the council docs.
 - Do not do the target-repo implementation work yourself when the harness is the requested tool.
 - For broad/spec-driven/vague/agentic work, run a planning stage before locking execution docs.
@@ -104,15 +104,16 @@ Then load only the references needed for the chosen route:
 - If you need the supervisor to outlive the current outer-agent shell, prefer launching the supervisor command inside a dedicated `tmux` session.
 - Summarize the chosen route to the user before launching the harness.
 
-## Required routing
+## Required Routing
 
-Choose one mode:
+Choose the route by four axes:
 
-1. Direct answer only
-2. Inspect or resume an existing run
-3. Concrete execution request
-4. Findings-driven fix
-5. Broad feature or spec work
+1. Request class: direct answer, inspect/resume, concrete execution, findings fix, or broad/spec work.
+2. Preparation lane: none, or Planning Preparation via `prepare`.
+3. Execution review source: Normal Internal Council or GitHub PR Codex Bridge.
+4. Post-approval audit add-on: none, or Internal Council With Outer Audit.
+
+PR preflight wins before normal request classification: existing PR URLs, PR numbers, "this PR", and "the pull request" default to the GitHub PR Codex Bridge unless the user explicitly asks for the internal generator/reviewer execution loop.
 
 Use [`references/routing.md`](./references/routing.md) for the exact mapping from request shape to docs and commands.
 
@@ -160,8 +161,8 @@ When using `prepare`, `start`, `continue`, or `reopen`, also read [`references/s
 - Exception: when the user explicitly asks you to write the council brief/spec/instructions, always produce `task.md`, `review.md`, `spec.md`, and `contract.md` together.
 - For spec-driven work, require a contract that mirrors the major `M*` sections in `spec.md` with top-level `M#` items and explicit nested `M#.A#` checkable sub-points for every acceptance criterion.
 - Task-local `AGENTS.md` stays behavioral and stable; do not put task-specific requirements there.
-- `github_pr_codex` special case: when the user already has a PR and wants GitHub Codex to review the live branch, local `task.md` / `review.md` / `spec.md` may be omitted if the PR and current-head review findings already form a usable brief.
-- Strong default: user wording like “use Codex Council on this PR”, “work on PR #123”, or a pasted GitHub PR URL should be interpreted as a request for `github_pr_codex` unless they explicitly ask for the internal reviewer loop instead.
+- GitHub PR Codex Bridge special case: when the user already has a PR and wants GitHub Codex to review the live branch, local `task.md` / `review.md` / `spec.md` may be omitted if the PR and current-head review findings already form a usable brief.
+- Strong default: user wording like “use Codex Council on this PR”, “work on PR #123”, or a pasted GitHub PR URL should be interpreted as a request for `github_pr_codex` unless they explicitly ask for the internal generator/reviewer execution loop instead.
 - `branch_northstar_summary.md` is optional supporting context for branch/worktree intent in that PR-driven mode.
 
 Use the corresponding document references before writing:

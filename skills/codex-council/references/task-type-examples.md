@@ -8,7 +8,7 @@ User:
 
 Route:
 
-- mode: direct answer only
+- request class: direct answer only
 - docs: none
 - commands: none
 
@@ -20,26 +20,28 @@ User:
 
 Route:
 
-- mode: concrete execution request
+- request class: concrete execution request
+- execution review source: Normal Internal Council
 - docs: `task.md` + `contract.md`
 - questions: none unless repo inspection reveals multiple plausible sync paths
 - commands: `init` if needed, fill the docs directly, then `start`
 - do not implement the bugfix directly outside the council
 
-## Findings-driven fix
+## Pasted findings-driven fix
 
 User:
 
-> Address these PR review comments.
+> Address these pasted review comments.
 
 Route:
 
-- mode: findings-driven fix
+- request class: findings-driven fix
+- execution review source: Normal Internal Council
 - docs: `review.md` + `contract.md`
 - optional: add `task.md` only if a short brief would clarify the requested outcome
 - commands: `init` if needed, fill the docs directly, then `start`
 
-## Existing PR review loop
+## Existing PR bridge
 
 User:
 
@@ -47,11 +49,24 @@ User:
 
 Route:
 
-- mode: findings-driven fix
-- execution mode: `github_pr_codex`
+- PR preflight: yes
+- execution review source: GitHub PR Codex Bridge
 - docs: PR and current-head GitHub Codex review findings are the effective brief; add `branch_northstar_summary.md` only if branch intent needs durable local context
 - commands: `init` if needed, then `start --review-mode github_pr_codex --github-pr <pr-url>`
-- do not default to the internal reviewer loop unless the user explicitly asks for generator/reviewer mode
+- do not default to the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
+
+## Existing PR but Normal Internal Council requested
+
+User:
+
+> Use the internal generator/reviewer loop for PR #123 instead of GitHub Codex review.
+
+Route:
+
+- PR preflight: overridden explicitly
+- execution review source: Normal Internal Council
+- docs: materialize the relevant PR findings into `review.md` + `contract.md`
+- commands: `init` if needed, fill the docs directly, then `start` without `--review-mode github_pr_codex`
 
 ## Broad feature work
 
@@ -61,8 +76,9 @@ User:
 
 Route:
 
-- mode: broad feature or spec work
-- preparation: planner + intent critic before execution docs are locked
+- request class: broad feature or spec work
+- preparation lane: Planning Preparation with planner + intent critic before execution docs are locked
+- execution review source: Normal Internal Council after planning approval
 - docs: `task.md` + `spec.md` + `contract.md`
 - questions: only the minimum blocking questions needed to make the spec executable
 - commands: `init` if needed, run the planning stage, then `start`
@@ -78,8 +94,9 @@ User:
 
 Route:
 
-- mode: broad feature or spec work
-- preparation: planner + intent critic before execution docs are locked
+- request class: broad feature or spec work
+- preparation lane: Planning Preparation with planner + intent critic before execution docs are locked
+- execution review source: Normal Internal Council after planning approval
 - docs: `task.md` + `spec.md` + `contract.md`
 - questions: only if repo inspection cannot determine the main user-facing workflow
 - commands: `init` if needed, run the planning stage, then `start`
@@ -101,7 +118,7 @@ User:
 
 Route:
 
-- mode: inspect or resume an existing run
+- request class: inspect or resume an existing run
 - commands: `status`, then `continue` if the run is still the right one
 
 ## Reopen an approved run
@@ -112,10 +129,37 @@ User:
 
 Route:
 
-- mode: inspect or resume an existing run
+- request class: inspect or resume an existing run
 - commands: `status`, then `reopen`
 - reason kind: `false_approved`
 - process rule: preserve the historical approval and create a fresh linked run instead of forcing `continue`
+
+## Internal Council With Outer Audit
+
+User:
+
+> Run the internal council, then have the outer audit agent check the approval before we trust it.
+
+Route:
+
+- request class: same as the underlying task
+- execution review source: Normal Internal Council
+- post-approval audit add-on: Internal Council With Outer Audit
+- commands: `start --outer-review-fork-session-id <parent_session_id>`
+- compatibility: never combine this add-on with `--review-mode github_pr_codex`
+
+## Outer-audit false-approved re-entry
+
+User:
+
+> The outer audit found a blocker after the internal reviewer approved.
+
+Route:
+
+- request class: inspect or resume an existing run
+- post-approval audit add-on: Internal Council With Outer Audit
+- docs: update canonical `review.md` with the surviving blocker
+- commands: `reopen --reason-kind false_approved`, then after triage/finalization use `continue`
 
 ## Example: stale run after supervisor death
 
@@ -125,6 +169,6 @@ User:
 
 Route:
 
-- mode: inspect or resume an existing run
+- request class: inspect or resume an existing run
 - commands: `status`, inspect `derived_continuation`, then `continue`
 - process rule: keep the `continue` supervisor alive this time

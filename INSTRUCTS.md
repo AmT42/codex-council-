@@ -42,10 +42,10 @@ If the user says “use this repo to add feature X”, interpret that as:
 
 If the user points at an existing GitHub PR and says “use Codex Council on this PR” or equivalent, interpret that as:
 
-- they want the PR-driven review bridge by default
+- they want the GitHub PR Codex Bridge by default
 - the correct default route is `--review-mode github_pr_codex`
 - the PR and current-head GitHub Codex findings are the effective brief unless the user explicitly asks for a stronger local brief
-- do not default to the internal reviewer loop unless the user explicitly asks for generator/reviewer mode
+- do not default to the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
 
 ## Non-Negotiable Process Boundary
 
@@ -201,9 +201,49 @@ Rules:
 - “It blocked during X” is better than “X is broken” when the evidence only proves the first statement.
 - This applies across all blocker types: infrastructure, locks, queues, workers, file state, subprocesses, and application code.
 
-## Request Classification
+## Routing Axes
 
-Classify every request into one of five modes before taking action.
+Choose a route by four independent axes before taking action:
+
+| Axis | Values |
+| --- | --- |
+| Request class | direct answer, inspect/resume, concrete execution, findings fix, broad/spec work |
+| Preparation lane | none, planning preparation via `prepare` |
+| Execution review source | Normal Internal Council, GitHub PR Codex Bridge |
+| Post-approval audit add-on | none, Internal Council With Outer Audit |
+
+Canonical runtime names:
+
+- **Normal Internal Council**: local `generator` plus local `reviewer`, default `--review-mode internal`.
+- **GitHub PR Codex Bridge**: local generator plus GitHub PR Codex review findings, selected on `start` with `--review-mode github_pr_codex`.
+- **Internal Council With Outer Audit**: Normal Internal Council plus `--outer-review-fork-session-id`; additive post-approval audit only, not a review mode, and not compatible with `github_pr_codex`.
+- **Planning Preparation**: planner plus intent critic via `prepare`; a preparation lane before execution, not an execution review source.
+
+### PR Preflight
+
+Before applying the normal request classes, check whether the user named an existing GitHub PR by URL, PR number, or wording like “this PR”, “the pull request”, or “work on PR #123”.
+
+If yes, route to the GitHub PR Codex Bridge by default:
+
+- start the run with `--review-mode github_pr_codex`
+- pass `--github-pr <url-or-number>` when known
+- treat the PR plus current-head GitHub Codex findings as the effective brief
+- do not seed `review.md` or `contract.md` just to copy PR findings
+- do not use the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
+
+Quick route table:
+
+| User request | Route | Command shape |
+| --- | --- | --- |
+| Existing PR / PR URL / “this PR” | GitHub PR Codex Bridge | `start --review-mode github_pr_codex --github-pr ...` |
+| Pasted review notes, no live PR | Normal Internal Council findings fix | `review.md` + `contract.md` + `start` |
+| Concrete bug/feature, no PR | Normal Internal Council | `task.md` + `contract.md` + `start` |
+| Broad/vague/agentic work | Planning Preparation first | `prepare`, then `start` |
+| Internal run plus final audit | Internal Council With Outer Audit | `start --outer-review-fork-session-id ...` |
+
+## Request Classes
+
+After PR preflight, classify the request into one primary request class.
 
 ### 1. Direct answer only
 
@@ -252,26 +292,24 @@ Behavior:
 - `spec.md` is usually unnecessary here
 - after writing the needed docs, run `start`
 - do not directly implement the target feature yourself when the harness is the requested tool
-- special case: for `github_pr_codex` on an existing PR, the PR and current-head review findings can be enough to start without local `task.md`, `review.md`, or `spec.md`
-- strong default: if the user references a live PR and asks to use the harness on that PR, use `github_pr_codex` unless they explicitly ask for the internal reviewer loop
+- live PR requests are handled by PR preflight before this class; use the GitHub PR Codex Bridge unless the user explicitly asks for the internal generator/reviewer execution loop
 
 ### 4. Findings-driven fix
 
 Use this for:
 
-- “Address these PR review comments”
+- “Address these pasted review comments”
 - “Here are the logs from the failing deployment”
 - “Fix these reviewer findings”
-- “Work on this PR until Codex has no more major comments”
 
 Behavior:
 
 - default document set: `review.md` + `contract.md`
-- for a live GitHub PR, default to `github_pr_codex` and let the PR plus current-head review findings drive the loop
+- live PR findings are handled by PR preflight; default to the GitHub PR Codex Bridge and let the PR plus current-head review findings drive the loop
 - add `task.md` only if a short brief materially improves generator intent
 - run `start` once the docs are ready
 - do not bypass the council by fixing the findings yourself unless the user explicitly switched tasks and asked you to modify the target repo directly
-- if the findings are already living on an existing PR and the operator is using `github_pr_codex`, local `review.md` is optional; prefer `branch_northstar_summary.md` only when the branch/worktree intent would otherwise be underspecified
+- if the findings are already living on an existing PR and the operator is using the GitHub PR Codex Bridge, local `review.md` is optional; prefer `branch_northstar_summary.md` only when the branch/worktree intent would otherwise be underspecified
 
 ### 5. Broad feature or spec work
 
@@ -524,23 +562,39 @@ Only fill the minimal required document set for the chosen route.
 
 ### Start a run
 
+Choose the start command for the selected execution review source.
+
+For the GitHub PR Codex Bridge:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start pr-123 \
+  --dir /path/to/target-repo \
+  --review-mode github_pr_codex \
+  --github-pr https://github.com/acme/repo/pull/123
+```
+
+For Normal Internal Council execution only:
+
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo
 ```
 
-Optional internal outer-review layer:
+For Internal Council With Outer Audit:
 
 ```bash
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task \
   --dir /path/to/target-repo \
-  --outer-review-session-id <codex_session_id>
+  --outer-review-fork-session-id <parent_session_id>
 ```
 
 Rules:
 
-- the identifier is a resumable Codex session id, not a generic thread label
-- this layer is internal-review-mode-only for the first implementation
-- do not pass `--outer-review-session-id` with `--review-mode github_pr_codex`
+- the identifier is a Codex parent session id used with `codex fork` to create a persistent `outer_review` tmux agent
+- `--outer-review-session-id` is a deprecated alias for the fork parent id during the transition
+- use `--outer-review-tmux-session <name>` only to override the persistent outer-review tmux session name; `--outer-review-session` is a deprecated alias for that tmux name
+- use `status --sessions` to print follow commands for generator, reviewer, and outer review
+- this layer is available only when `--review-mode internal` is used
+- do not pass outer-review agent configuration with `--review-mode github_pr_codex`
 
 Prefer the default auto role selection unless a special case requires otherwise.
 
@@ -586,9 +640,9 @@ Approved runs are terminal for `continue`. If `status` shows an approved run and
 Internal outer-review special case:
 
 - after the triage-only generator turn, the harness pauses and requires outer finalization through canonical `review.md`
-- the outer agent must still run `continue`, even if `review.md` stayed unchanged, because the harness needs to write `outer_review_finalization_ack.*`
+- the persistent outer-review audit agent must still run `continue`, even if `review.md` stayed unchanged, because the harness needs to write `outer_review_finalization_ack.*`
 - if no points remain after that finalization step, the run closes as `closed_no_remaining_outer_findings`
-- if points remain, `continue` writes the acknowledgment artifact first and only then resumes a fresh normal generator/reviewer cycle
+- if points remain, `continue` writes the acknowledgment artifact first and only then resumes a fresh Normal Internal Council cycle
 
 ### Reopen an approved run
 
@@ -608,12 +662,15 @@ Use `reopen` only when the selected run is already approved and that approval mu
 Internal outer-review exact path:
 
 - an internally approved run with configured outer review writes `outer_review_handoff.*` when approval is recorded
+- configured outer review sends the persistent outer-review audit agent only the final approved-run audit request
+- generator/reviewer `blocked` and `needs_human` states do not notify the persistent outer-review audit agent
 - only `reopen --reason-kind false_approved` on that internally approved run with a recorded handoff enters the explicit outer-review path
 - the first generator turn of that reopen is triage-only
-- after triage, the outer agent finalizes the surviving findings through canonical `review.md` and runs `continue`
+- after triage, the persistent outer-review audit agent finalizes the surviving findings through canonical `review.md` and runs `continue`
 - unchanged `review.md` still requires `continue`; unchanged text alone is not the proof artifact
 - if finalization removes every remaining point, the run closes terminally as `closed_no_remaining_outer_findings` instead of minting a fresh internal approval
-- use `reopen --outer-review-session-id <codex_session_id>` to override the inherited internal outer-review session id for the new run
+- use `reopen --outer-review-fork-session-id <parent_session_id>` to override the inherited internal outer-review fork parent id for the new run
+- `--outer-review-session-id` remains a deprecated alias for the fork parent id
 - use `reopen --clear-outer-review-session-id` to disable inherited internal outer review for the new run
 
 ## Continue Policy

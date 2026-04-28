@@ -60,7 +60,7 @@ If `status` shows that the selected run is already approved, but that approval i
 Internal outer-review special case:
 
 - if the approved internal run had configured outer review, expect `outer_review_handoff.*` after approval
-- if the outer agent finds blockers under unchanged requirements, update canonical `review.md` and use `reopen --reason-kind false_approved`
+- if the persistent outer-review audit agent finds blockers under unchanged requirements, update canonical `review.md` and use `reopen --reason-kind false_approved`
 - after the first triage-only generator turn of that reopen, use `continue` only after canonical `review.md` has been finalized
 - unchanged `review.md` still requires `continue`; the harness must write `outer_review_finalization_ack.*`
 

@@ -8,7 +8,7 @@ User:
 
 Route:
 
-- mode: direct answer only
+- request class: direct answer only
 - docs: none
 - commands: none
 
@@ -20,23 +20,39 @@ User:
 
 Route:
 
-- mode: concrete execution request
+- request class: concrete execution request
+- execution review source: Normal Internal Council
 - docs: `task.md` + `contract.md`
 - questions: none unless repo inspection reveals multiple plausible sync paths
 - commands: `init` if needed, fill the docs directly, then `start`
 
-## Example: findings-driven fix
+## Example: pasted findings-driven fix
 
 User:
 
-> Address these PR review comments.
+> Address these pasted review comments.
 
 Route:
 
-- mode: findings-driven fix
+- request class: findings-driven fix
+- execution review source: Normal Internal Council
 - docs: `review.md` + `contract.md`
 - optional: add `task.md` only if a short brief would clarify the requested outcome
 - commands: `init` if needed, fill the docs directly, then `start`
+
+## Example: live PR bridge
+
+User:
+
+> Use Codex Council on PR #123 and keep working until Codex stops reporting major issues.
+
+Route:
+
+- PR preflight: yes
+- execution review source: GitHub PR Codex Bridge
+- docs: none by default; optional `branch_northstar_summary.md` only if branch intent is unclear
+- commands: `init` if needed, then `start --review-mode github_pr_codex --github-pr <pr-url>`
+- note: do not copy PR findings into `review.md` unless the user explicitly asks for the internal generator/reviewer execution loop
 
 ## Example: broad feature work
 
@@ -46,8 +62,9 @@ User:
 
 Route:
 
-- mode: broad feature or spec work
-- preparation: planner + intent critic before execution docs are locked
+- request class: broad feature or spec work
+- preparation lane: Planning Preparation with planner + intent critic before execution docs are locked
+- execution review source: Normal Internal Council after planning approval
 - docs: `task.md` + `spec.md` + `contract.md`
 - questions: only the minimum blocking questions needed to make the spec executable
 - commands: `init` if needed, run the planning stage, lock the docs, then `start`
@@ -61,7 +78,7 @@ User:
 
 Route:
 
-- mode: inspect or resume an existing run
+- request class: inspect or resume an existing run
 - commands: `status`, then `continue` if the run is still the right one
 
 ## Example: stale run after supervisor death
@@ -72,7 +89,7 @@ User:
 
 Route:
 
-- mode: inspect or resume an existing run
+- request class: inspect or resume an existing run
 - commands: `status`, inspect `derived_continuation`, then `continue`
 - process rule: keep the `continue` supervisor alive this time
 
@@ -84,6 +101,6 @@ User:
 
 Route:
 
-- mode: direct answer only
+- request class: direct answer only
 - docs: none
 - commands: none

@@ -3066,6 +3066,48 @@ reviewer_reset_mode = "wrong"
             self.assertEqual(payload["latest_role_milestones"]["generator"]["event"], "generator_prompt_sent")
             self.assertEqual(payload["latest_role_milestones"]["reviewer"]["event"], "reviewer_session_ready")
 
+    def test_show_status_sessions_prints_attach_commands_for_outer_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            MODULE.save_run_state(run_dir, state)
+
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                planning=False,
+                sessions=True,
+            )
+            with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                result = MODULE.show_status(args)
+
+            self.assertEqual(result, 0)
+            output = stdout.getvalue()
+            self.assertIn("attach generator: tmux attach -t gen", output)
+            self.assertIn("attach reviewer: tmux attach -t rev", output)
+            self.assertIn("attach outer review: tmux attach -t outer", output)
+            self.assertIn("outer_review fork parent session id: parent-123", output)
+
     def test_determine_continue_target_explains_reviewer_reset_handoff_gap(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir) / "repo"
@@ -3253,6 +3295,8 @@ reviewer_reset_mode = "wrong"
                 MODULE, "tmux_send_prompt", return_value=None
             ), mock.patch.object(
                 MODULE, "wait_for_role_artifacts", side_effect=fake_wait_for_role_artifacts
+            ), mock.patch.object(
+                MODULE, "ensure_role_session_ready", return_value=None
             ), mock.patch.object(MODULE, "write_raw_final_output_artifact", return_value=None):
                 MODULE.run_generator_phase(run_dir, state, task_root, 2, turn_two, inline_context=False)
 
@@ -3376,7 +3420,9 @@ reviewer_reset_mode = "wrong"
             def fake_supervisor_loop_from(run_dir_arg, state_arg, task_root_arg, **kwargs):
                 captured["kwargs"] = kwargs
 
-            with mock.patch.object(MODULE, "supervisor_loop_from", side_effect=fake_supervisor_loop_from), contextlib.redirect_stdout(io.StringIO()):
+            with mock.patch.object(MODULE, "ensure_active_role_sessions_ready", return_value=None), mock.patch.object(
+                MODULE, "supervisor_loop_from", side_effect=fake_supervisor_loop_from
+            ), contextlib.redirect_stdout(io.StringIO()):
                 result = MODULE.continue_run(args)
             self.assertEqual(result, 0)
             self.assertEqual(captured["kwargs"]["start_turn"], 2)
@@ -3578,10 +3624,14 @@ reviewer_reset_mode = "wrong"
             self.assertIn("\"event\": \"blocked_invalid_artifacts\"", events_text)
 
     def test_build_outer_review_state_for_start_rejects_github_mode(self) -> None:
-        args = argparse.Namespace(outer_review_session_id="sess-123")
+        args = argparse.Namespace(
+            outer_review_fork_session_id="sess-123",
+            outer_review_session_id=None,
+            outer_review_session=None,
+        )
         with self.assertRaises(SystemExit) as ctx:
             MODULE.build_outer_review_state_for_start("github_pr_codex", args)
-        self.assertIn("--outer-review-session-id", str(ctx.exception))
+        self.assertIn("--outer-review-fork-session-id", str(ctx.exception))
 
     def test_start_run_rejects_outer_review_session_id_for_github_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3589,7 +3639,7 @@ reviewer_reset_mode = "wrong"
             self.init_git_repo(repo_root)
             task_root = self.scaffold_base_workspace(repo_root)
             (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nFix a bug.\n\n## Context\n\n- narrow scope\n\n## Success Signal\n\nA concrete regression is fixed.\n",
+                "# Task\n\n## Request\n\nFix the retry path so duplicate rows are not created during sync.\n\n## Context\n\nThe sync worker retries after transient timeouts and can currently write the same row twice.\n\n## Success Signal\n\nA retry no longer creates duplicate rows and the changed path is covered by verification.\n",
                 encoding="utf-8",
             )
             args = argparse.Namespace(
@@ -3606,12 +3656,14 @@ reviewer_reset_mode = "wrong"
                 github_pr="42",
                 github_branch=None,
                 github_base=None,
-                outer_review_session_id="sess-123",
+                outer_review_fork_session_id="sess-123",
+                outer_review_session_id=None,
+                outer_review_session=None,
                 start_role="auto",
             )
             with self.assertRaises(SystemExit) as ctx:
                 MODULE.start_run(args)
-            self.assertIn("--outer-review-session-id", str(ctx.exception))
+            self.assertIn("--outer-review-fork-session-id", str(ctx.exception))
 
     def test_write_outer_review_input_artifacts_uses_findings_section_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3790,24 +3842,533 @@ reviewer_reset_mode = "wrong"
                 generator_session="gen",
                 reviewer_session="rev",
                 review_bridge={"mode": "internal"},
-                outer_review=MODULE.new_outer_review_state(codex_session_id="sess-123"),
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            state["status"] = "approved"
+            state["stop_reason"] = "reviewer approved"
+            MODULE.write_text(turn_one / "reviewer" / "message.md", "reviewer message")
+            MODULE.save_json(
+                turn_one / "reviewer" / "status.json",
+                {
+                    "verdict": "approved",
+                    "summary": "approved",
+                    "blocking_issues": [],
+                    "critical_dimensions": {key: "pass" for key in MODULE.critical_review_dimension_keys()},
+                },
             )
             MODULE.save_run_state(run_dir, state)
             with mock.patch.object(
                 MODULE,
                 "dispatch_outer_review_prompt",
                 return_value=("confirmed_prompt_dispatch", "outer-thread"),
-            ):
+            ) as dispatch:
                 MODULE.write_outer_review_handoff_artifacts(run_dir, state, task_root, turn_one, 1)
 
             payload = MODULE.load_json(turn_one / MODULE.OUTER_REVIEW_HANDOFF_JSON_FILENAME)
             updated_state = MODULE.load_json(run_dir / "state.json")
             self.assertEqual(payload["dispatch_status"], "confirmed_prompt_dispatch")
             self.assertIn("false_approved", payload["request_text"])
-            self.assertIn("requirements_changed_after_approval", payload["request_text"])
+            self.assertNotIn("requirements_changed_after_approval", payload["request_text"])
             self.assertEqual(updated_state["outer_review"]["latest_handoff_turn"], "0001")
             self.assertEqual(updated_state["outer_review"]["latest_handoff_dispatch_status"], "confirmed_prompt_dispatch")
             self.assertEqual(updated_state["outer_review"]["codex_thread_name"], "outer-thread")
+            self.assertEqual(payload["outer_review"]["fork_parent_session_id"], "parent-123")
+            prompt = dispatch.call_args.kwargs["prompt"]
+            self.assertIn("persistent outer-review audit agent", prompt)
+            self.assertIn("Do not act as the generator", prompt)
+            self.assertIn("blocking correctness, regression, contract, or validation issue", prompt)
+            self.assertIn("stop there; nothing else is needed", prompt)
+            self.assertNotIn("Codex Council Outer Agent Notification", prompt)
+            self.assertNotIn("Task `demo-task` reached", prompt)
+            notification = MODULE.load_json(MODULE.outer_review_notification_json_path(turn_one))
+            self.assertEqual(notification["verdict"], "approved")
+            self.assertEqual(notification["dispatch_status"], "confirmed_prompt_dispatch")
+
+    def test_create_tmux_sessions_starts_persistent_outer_review_fork_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            MODULE.save_run_state(run_dir, state)
+            calls = []
+
+            def fake_tmux_new_session(name, workspace_root, command, *, role):
+                calls.append((name, workspace_root, command, role))
+
+            with mock.patch.object(MODULE, "tmux_new_session", side_effect=fake_tmux_new_session):
+                MODULE.create_tmux_sessions(run_dir, state)
+
+            outer_call = next(item for item in calls if item[3] == "outer_review")
+            self.assertEqual(outer_call[0], "outer")
+            self.assertEqual(outer_call[2][:3], ["codex", "fork", "-C"])
+            self.assertEqual(outer_call[2][-1], "parent-123")
+
+    def test_validate_run_state_rejects_outer_review_role_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            state["roles"]["outer_review"]["tmux_session"] = "different"
+
+            with self.assertRaises(MODULE.SupervisorRuntimeError) as ctx:
+                MODULE.validate_run_state(run_dir, state)
+            self.assertIn("roles.outer_review disagree", str(ctx.exception))
+
+    def test_validate_run_state_migrates_legacy_outer_review_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+            )
+            state["outer_review"] = {
+                "configured": True,
+                "identifier_kind": "codex_session_id",
+                "codex_session_id": "legacy-parent",
+                "codex_thread_name": "legacy-thread",
+                "latest_handoff_turn": None,
+            }
+
+            MODULE.validate_run_state(run_dir, state)
+
+            self.assertEqual(state["outer_review"]["identifier_kind"], "fork_parent_session_id")
+            self.assertEqual(state["outer_review"]["fork_parent_session_id"], "legacy-parent")
+            self.assertIsNone(state["outer_review"]["codex_session_id"])
+            self.assertIn("outer_review", state["roles"])
+            self.assertEqual(state["roles"]["outer_review"]["fork_parent_session_id"], "legacy-parent")
+            self.assertEqual(state["roles"]["outer_review"]["bootstrap_mode"], "fork")
+
+    def test_assign_recent_codex_session_ids_syncs_outer_review_lifecycle_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            state["created_at"] = "2026-04-10T12:00:00Z"
+            state["session_index_snapshot_ids"] = ["old"]
+            MODULE.save_run_state(run_dir, state)
+
+            with mock.patch.object(
+                MODULE,
+                "read_codex_session_index",
+                return_value=[
+                    {"id": "old", "updated_at": "2026-04-10T11:00:00Z", "thread_name": "old"},
+                    {"id": "gen-child", "updated_at": "2026-04-10T12:01:00Z", "thread_name": "gen"},
+                    {"id": "rev-child", "updated_at": "2026-04-10T12:02:00Z", "thread_name": "rev"},
+                    {"id": "outer-child", "updated_at": "2026-04-10T12:03:00Z", "thread_name": "outer-thread"},
+                ],
+            ):
+                MODULE.assign_recent_codex_session_ids(run_dir, state)
+
+            persisted = MODULE.load_json(run_dir / "state.json")
+            self.assertEqual(persisted["roles"]["outer_review"]["codex_session_id"], "outer-child")
+            self.assertEqual(persisted["outer_review"]["codex_session_id"], "outer-child")
+            self.assertEqual(persisted["outer_review"]["codex_thread_name"], "outer-thread")
+
+    def test_ensure_outer_review_session_ready_syncs_stale_child_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            state["roles"]["outer_review"]["codex_session_id"] = "old-child"
+            state["roles"]["outer_review"]["codex_thread_name"] = "old-thread"
+            MODULE.sync_outer_review_from_role_state(state)
+            state["created_at"] = "2026-04-10T12:00:00Z"
+            MODULE.save_run_state(run_dir, state)
+
+            with mock.patch.object(MODULE, "tmux_session_exists", return_value=False), mock.patch.object(
+                MODULE,
+                "find_codex_session_entry",
+                return_value={"id": "old-child", "updated_at": "2026-04-10T11:59:00Z", "thread_name": "old-thread"},
+            ), mock.patch.object(MODULE, "restart_role_session", return_value=None), mock.patch.object(
+                MODULE, "wait_for_tmux_prompt", return_value=None
+            ), mock.patch.object(MODULE, "assign_recent_codex_session_ids", return_value=None):
+                MODULE.ensure_role_session_ready(run_dir, state, "outer_review")
+
+            persisted = MODULE.load_json(run_dir / "state.json")
+            self.assertIsNone(persisted["roles"]["outer_review"]["codex_session_id"])
+            self.assertIsNone(persisted["outer_review"]["codex_session_id"])
+            self.assertIsNone(persisted["outer_review"]["codex_thread_name"])
+
+    def test_outer_review_dispatch_uses_persistent_tmux_without_killing_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            MODULE.save_run_state(run_dir, state)
+            with mock.patch.object(MODULE, "ensure_role_session_ready") as ensure_ready, mock.patch.object(
+                MODULE, "wait_for_tmux_prompt"
+            ), mock.patch.object(MODULE, "tmux_send_prompt") as send_prompt, mock.patch.object(
+                MODULE, "tmux_kill_session"
+            ) as kill_session:
+                status, _ = MODULE.dispatch_outer_review_prompt(
+                    run_dir,
+                    state,
+                    turn_one,
+                    prompt="outer prompt",
+                    dispatch_reason="test",
+                )
+            self.assertEqual(status, "confirmed_prompt_dispatch")
+            ensure_ready.assert_called_once_with(run_dir, state, "outer_review")
+            self.assertEqual(send_prompt.call_args.args[0], "outer")
+            kill_session.assert_not_called()
+            self.assertEqual(MODULE.role_prompt_path(turn_one, "outer_review").read_text(encoding="utf-8").strip(), "outer prompt")
+
+    def test_outer_review_final_audit_notification_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            self.write_generator_status(turn_one)
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            MODULE.save_run_state(run_dir, state)
+            with mock.patch.object(
+                MODULE,
+                "dispatch_outer_review_prompt",
+                return_value=("confirmed_prompt_dispatch", "outer-thread"),
+            ) as dispatch:
+                first_status, _ = MODULE.notify_outer_review_for_status(
+                    run_dir,
+                    state,
+                    task_root,
+                    turn_one,
+                    1,
+                    role="reviewer",
+                    verdict="approved",
+                    summary="approved",
+                )
+                second_status, _ = MODULE.notify_outer_review_for_status(
+                    run_dir,
+                    state,
+                    task_root,
+                    turn_one,
+                    1,
+                    role="reviewer",
+                    verdict="approved",
+                    summary="approved",
+                )
+            self.assertEqual(first_status, "confirmed_prompt_dispatch")
+            self.assertEqual(second_status, "skipped_duplicate")
+            dispatch.assert_called_once()
+            prompt = dispatch.call_args.kwargs["prompt"]
+            self.assertIn("python3 ", prompt)
+            self.assertIn("codex_tui_supervisor.py reopen demo-task", prompt)
+            self.assertIn(f"--dir {repo_root}", prompt)
+            self.assertIn("--run-id run-1", prompt)
+            ledger_lines = MODULE.outer_review_notification_ledger_path(run_dir).read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(ledger_lines), 1)
+
+    def test_outer_review_status_notification_skips_non_final_verdicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            MODULE.save_run_state(run_dir, state)
+            with mock.patch.object(MODULE, "dispatch_outer_review_prompt") as dispatch:
+                status, _ = MODULE.notify_outer_review_for_status(
+                    run_dir,
+                    state,
+                    task_root,
+                    turn_one,
+                    1,
+                    role="generator",
+                    verdict="blocked",
+                    summary="blocked",
+                )
+            self.assertEqual(status, "skipped_non_final")
+            dispatch.assert_not_called()
+            self.assertFalse(MODULE.outer_review_notification_json_path(turn_one).exists())
+
+    def test_outer_review_final_audit_failure_preserves_primary_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            self.write_generator_status(turn_one)
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            state["status"] = "approved"
+            state["stop_reason"] = "reviewer approved"
+            MODULE.save_run_state(run_dir, state)
+            with mock.patch.object(
+                MODULE,
+                "dispatch_outer_review_prompt",
+                return_value=("attempted_unconfirmed", None),
+            ):
+                status, _ = MODULE.notify_outer_review_for_status(
+                    run_dir,
+                    state,
+                    task_root,
+                    turn_one,
+                    1,
+                    role="reviewer",
+                    verdict="approved",
+                    summary="approved",
+                )
+            persisted = MODULE.load_json(run_dir / "state.json")
+            self.assertEqual(status, "attempted_unconfirmed")
+            self.assertEqual(persisted["status"], "approved")
+            self.assertEqual(persisted["outer_review"]["latest_notification_dispatch_status"], "attempted_unconfirmed")
+
+    def test_reviewer_changes_requested_does_not_notify_outer_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            config = self.build_council_config()
+            config["council"]["max_turns"] = 1
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=config,
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            MODULE.save_run_state(run_dir, state)
+            reviewer_status = {
+                "verdict": "changes_requested",
+                "summary": "needs changes",
+                "blocking_issues": ["fix one thing"],
+                "critical_dimensions": {key: "fail" for key in MODULE.critical_review_dimension_keys()},
+                "human_message": None,
+                "human_source": None,
+            }
+            with mock.patch.object(
+                MODULE,
+                "run_generator_phase",
+                return_value={"result": "implemented", "summary": "done", "changed_files": ["file.txt"], "human_message": None, "human_source": None},
+            ), mock.patch.object(MODULE, "run_review_phase", return_value=reviewer_status), mock.patch.object(
+                MODULE, "notify_outer_review_for_status"
+            ) as notify:
+                MODULE.supervisor_loop_from(run_dir, state, task_root, start_turn=1, start_role="generator")
+            notify.assert_not_called()
+
+    def test_supervisor_loop_does_not_notify_outer_review_on_generator_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            MODULE.save_run_state(run_dir, state)
+            with mock.patch.object(
+                MODULE,
+                "run_generator_phase",
+                return_value={"result": "blocked", "summary": "blocked", "changed_files": [], "human_message": None, "human_source": None},
+            ), mock.patch.object(MODULE, "notify_outer_review_for_status") as notify:
+                MODULE.supervisor_loop_from(run_dir, state, task_root, start_turn=1, start_role="generator")
+            notify.assert_not_called()
+
+    def test_pause_for_human_does_not_notify_outer_review_for_execution_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            run_dir = task_root / "runs" / "run-1"
+            turn_one = MODULE.prepare_turn(run_dir, 1, task_root)
+            state = MODULE.create_run_state(
+                repo_root=repo_root,
+                task_root=task_root,
+                task_name="demo-task",
+                run_id="run-1",
+                workspace_profile="task",
+                council_config=self.build_council_config(),
+                git_state=None,
+                generator_session="gen",
+                reviewer_session="rev",
+                review_bridge={"mode": "internal"},
+                outer_review=MODULE.new_outer_review_state(
+                    fork_parent_session_id="parent-123",
+                    tmux_session="outer",
+                ),
+            )
+            MODULE.save_run_state(run_dir, state)
+            with mock.patch.object(MODULE, "notify_outer_review_for_status") as notify, contextlib.redirect_stdout(io.StringIO()):
+                MODULE.pause_for_human(
+                    run_dir,
+                    state,
+                    role="reviewer",
+                    turn_dir=turn_one,
+                    summary="needs human",
+                    human_message="clarify",
+                    human_source=MODULE.REVIEW_FILENAME,
+                )
+            notify.assert_not_called()
 
     def test_continue_run_closes_when_outer_review_finalization_clears_all_points(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4066,6 +4627,10 @@ reviewer_reset_mode = "wrong"
                 clear_outer_review_session_id=False,
             )
             with mock.patch.object(MODULE, "run_id_value", return_value="run-2"), mock.patch.object(
+                MODULE,
+                "find_codex_session_entry",
+                return_value={"id": "sess-123", "updated_at": "2026-04-10T12:00:00Z", "thread_name": "parent"},
+            ), mock.patch.object(
                 MODULE, "read_codex_session_index", return_value=[]
             ), mock.patch.object(
                 MODULE, "create_tmux_sessions", return_value=None
@@ -4080,6 +4645,41 @@ reviewer_reset_mode = "wrong"
             new_state = MODULE.load_json(task_root / "runs" / "run-2" / "state.json")
             self.assertTrue(new_state["reopen"]["outer_review_path"])
             self.assertTrue((task_root / "runs" / "run-2" / MODULE.OUTER_REVIEW_LEDGER_FILENAME).exists())
+
+    def test_build_outer_review_state_for_reopen_inherits_overrides_and_clears_fork_config(self) -> None:
+        previous_state = {
+            "review_bridge": {"mode": "internal"},
+            "outer_review": MODULE.new_outer_review_state(
+                fork_parent_session_id="parent-old",
+                tmux_session="outer-old",
+            ),
+        }
+
+        inherited = MODULE.build_outer_review_state_for_reopen(
+            previous_state,
+            outer_review_fork_session_id=None,
+            outer_review_session=None,
+            clear_outer_review_session_id=False,
+        )
+        overridden = MODULE.build_outer_review_state_for_reopen(
+            previous_state,
+            outer_review_fork_session_id="parent-new",
+            outer_review_session="outer-new",
+            clear_outer_review_session_id=False,
+        )
+        cleared = MODULE.build_outer_review_state_for_reopen(
+            previous_state,
+            outer_review_fork_session_id=None,
+            outer_review_session=None,
+            clear_outer_review_session_id=True,
+        )
+
+        self.assertTrue(inherited["configured"])
+        self.assertEqual(inherited["fork_parent_session_id"], "parent-old")
+        self.assertTrue(overridden["configured"])
+        self.assertEqual(overridden["fork_parent_session_id"], "parent-new")
+        self.assertEqual(overridden["tmux_session"], "outer-new")
+        self.assertFalse(cleared["configured"])
 
     def test_reopen_run_creates_new_run_metadata_index_and_prompt_context_for_review_only_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4431,8 +5031,18 @@ reviewer_reset_mode = "wrong"
             [
                 "start",
                 "demo-task",
+                "--outer-review-fork-session-id",
+                "parent-123",
+                "--outer-review-tmux-session",
+                "outer-tmux",
+            ]
+        )
+        legacy_start_args = parser.parse_args(
+            [
+                "start",
+                "demo-task",
                 "--outer-review-session-id",
-                "sess-123",
+                "legacy-parent",
             ]
         )
         reopen_args = parser.parse_args(
@@ -4446,8 +5056,102 @@ reviewer_reset_mode = "wrong"
                 "--clear-outer-review-session-id",
             ]
         )
-        self.assertEqual(start_args.outer_review_session_id, "sess-123")
+        self.assertEqual(start_args.outer_review_fork_session_id, "parent-123")
+        self.assertEqual(start_args.outer_review_tmux_session, "outer-tmux")
+        self.assertEqual(legacy_start_args.outer_review_session_id, "legacy-parent")
         self.assertTrue(reopen_args.clear_outer_review_session_id)
+
+    def test_start_run_configures_persistent_outer_review_fork_agent_for_internal_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix the retry path so duplicate rows are not created during sync.\n\n## Context\n\nThe sync worker retries after transient timeouts and can currently write the same row twice.\n\n## Success Signal\n\nA retry no longer creates duplicate rows and the changed path is covered by verification.\n",
+                encoding="utf-8",
+            )
+            self.commit_repo_changes(repo_root, "prepare task")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-outer",
+                generator_session=None,
+                reviewer_session=None,
+                fork_session_id=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+                review_mode="internal",
+                github_pr=None,
+                github_branch=None,
+                github_base=None,
+                outer_review_fork_session_id="parent-123",
+                outer_review_session_id=None,
+                outer_review_session="outer-tmux",
+                start_role="auto",
+            )
+            captured = {}
+
+            def fake_run_supervisor(run_dir, state, task_root, **kwargs):
+                captured["run_dir"] = run_dir
+                captured["state"] = state
+                captured["task_root"] = task_root
+                captured["kwargs"] = kwargs
+                return 0
+
+            with mock.patch.object(
+                MODULE,
+                "find_codex_session_entry",
+                return_value={"id": "parent-123", "updated_at": "2026-04-10T12:00:00Z", "thread_name": "parent"},
+            ), mock.patch.object(MODULE, "run_supervisor_for_initialized_run", side_effect=fake_run_supervisor):
+                result = MODULE.start_run(args)
+
+            self.assertEqual(result, 0)
+            state = captured["state"]
+            self.assertTrue(state["outer_review"]["configured"])
+            self.assertEqual(state["outer_review"]["fork_parent_session_id"], "parent-123")
+            self.assertEqual(state["outer_review"]["tmux_session"], "outer-tmux")
+            self.assertIn("outer_review", state["roles"])
+            self.assertEqual(state["roles"]["outer_review"]["bootstrap_mode"], "fork")
+            self.assertEqual(state["roles"]["outer_review"]["fork_parent_session_id"], "parent-123")
+            persisted = MODULE.load_json(task_root / "runs" / "run-outer" / "state.json")
+            self.assertIn("outer_review", persisted["roles"])
+
+    def test_start_run_rejects_unknown_outer_review_fork_parent_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nFix the retry path so duplicate rows are not created during sync.\n\n## Context\n\nThe sync worker retries after transient timeouts and can currently write the same row twice.\n\n## Success Signal\n\nA retry no longer creates duplicate rows and the changed path is covered by verification.\n",
+                encoding="utf-8",
+            )
+            self.commit_repo_changes(repo_root, "prepare task")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-outer",
+                generator_session=None,
+                reviewer_session=None,
+                fork_session_id=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+                review_mode="internal",
+                github_pr=None,
+                github_branch=None,
+                github_base=None,
+                outer_review_fork_session_id="missing-parent",
+                outer_review_session_id=None,
+                outer_review_session=None,
+                outer_review_tmux_session=None,
+                start_role="auto",
+            )
+
+            with mock.patch.object(MODULE, "find_codex_session_entry", return_value=None):
+                with self.assertRaises(SystemExit) as ctx:
+                    MODULE.start_run(args)
+            self.assertIn("unknown outer-review fork parent session id: missing-parent", str(ctx.exception))
 
     def test_prepare_run_scaffolds_planning_workspace_and_source_intent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -5481,15 +6185,76 @@ reviewer_reset_mode = "wrong"
         routing = (repo_root / "skills" / "codex-council" / "references" / "routing.md").read_text(encoding="utf-8")
 
         for text in (readme, instructs, run_lifecycle):
-            self.assertIn("--outer-review-session-id", text)
-            self.assertIn("resumable Codex session id", text)
+            self.assertIn("--outer-review-fork-session-id", text)
+            self.assertIn("Codex parent session id", text)
+            self.assertIn("persistent", text)
+            self.assertIn("only", text)
+            self.assertIn("final", text)
             self.assertIn("closed_no_remaining_outer_findings", text)
             self.assertIn("triage-only", text)
 
         self.assertIn("outer-review finalization", failure_recovery)
         self.assertIn("false_approved", routing)
-        self.assertIn("outer review", skill.lower())
+        self.assertIn("Internal Council With Outer Audit", skill)
         self.assertIn("outer-review handoff", architecture.lower())
+
+    def test_consumer_docs_use_routing_axes_for_pr_and_outer_audit(self) -> None:
+        repo_root = MODULE_PATH.parents[1]
+        paths = [
+            repo_root / "README.md",
+            repo_root / "INSTRUCTS.md",
+            repo_root / "ARCHITECTURE.md",
+            repo_root / "skills" / "codex-council" / "SKILL.md",
+            repo_root / "skills" / "codex-council" / "references" / "routing.md",
+            repo_root / "skills" / "codex-council" / "references" / "run-lifecycle.md",
+        ]
+        docs = {path.name if path.name != "SKILL.md" else "skill": path.read_text(encoding="utf-8") for path in paths}
+
+        for text in docs.values():
+            self.assertIn("GitHub PR Codex Bridge", text)
+            self.assertIn("Normal Internal Council", text)
+
+        for key in ("README.md", "INSTRUCTS.md", "routing.md"):
+            self.assertIn("Routing Axes", docs[key])
+            self.assertIn("PR Preflight", docs[key])
+            self.assertIn("Existing PR / PR URL", docs[key])
+            self.assertIn("start --review-mode github_pr_codex --github-pr", docs[key])
+
+        combined = "\n".join(docs.values())
+        self.assertIn("Internal Council With Outer Audit", combined)
+        self.assertIn("not compatible with `github_pr_codex`", combined)
+        self.assertNotIn("Five Operating Modes", combined)
+        self.assertNotIn("start or continue with `--review-mode github_pr_codex`", combined)
+        self.assertNotIn("internal-review-mode-only", combined)
+        self.assertNotIn("internal reviewer loop", combined)
+
+    def test_outer_review_templates_are_audit_specific(self) -> None:
+        repo_root = MODULE_PATH.parents[1]
+        template_root = repo_root / "templates" / "outer_review"
+        handoff = (template_root / "handoff_request.md").read_text(encoding="utf-8")
+        status = (template_root / "status_notification.md").read_text(encoding="utf-8")
+        finalization = (template_root / "finalization_request.md").read_text(encoding="utf-8")
+        combined = "\n".join([handoff, status, finalization])
+
+        self.assertIn("persistent outer-review audit agent", combined)
+        self.assertIn("Do not act as the generator", combined)
+        self.assertIn("GitHub PR Codex Bridge", combined)
+        self.assertIn("blocking correctness, regression, contract, or validation issue", combined)
+        self.assertIn("{{continue_command}}", finalization)
+        for banned in (
+            "everything is implemented as intended",
+            "no error",
+            "everything is okay",
+        ):
+            self.assertNotIn(banned, combined)
+
+    def test_reviewer_prompt_templates_use_reviewer_role_name(self) -> None:
+        repo_root = MODULE_PATH.parents[1]
+        prompt_root = repo_root / "templates" / "prompts"
+        for filename in ("reviewer_initial.md", "reviewer_followup.md", "reviewer_fork_bootstrap.md"):
+            text = (prompt_root / filename).read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("Role: Reviewer\n"))
+            self.assertNotIn("Role: Evaluator", text)
 
     def test_codex_council_skill_reference_pack_is_present_and_linked(self) -> None:
         repo_root = MODULE_PATH.parents[1]

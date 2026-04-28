@@ -51,6 +51,8 @@ OUTER_REVIEW_FINALIZATION_JSON_FILENAME = "outer_review_finalization.json"
 OUTER_REVIEW_FINALIZATION_ACK_MARKDOWN_FILENAME = "outer_review_finalization_ack.md"
 OUTER_REVIEW_FINALIZATION_ACK_JSON_FILENAME = "outer_review_finalization_ack.json"
 OUTER_REVIEW_LEDGER_FILENAME = "outer_review_ledger.json"
+OUTER_REVIEW_NOTIFICATION_LEDGER_FILENAME = "outer_review_notifications.jsonl"
+OUTER_REVIEW_NOTIFICATION_JSON_FILENAME = "notification.json"
 INPUT_DOC_ORDER = ("task", "review", "spec", "contract")
 INPUT_DOC_FILENAMES = {
     "task": TASK_FILENAME,
@@ -89,6 +91,8 @@ PLANNER_RESULTS = {"drafted", "blocked", "needs_human"}
 INTENT_CRITIC_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
 OUTER_REVIEW_DISPATCH_STATUSES = {
     "skipped_unconfigured",
+    "skipped_duplicate",
+    "skipped_non_final",
     "confirmed_prompt_dispatch",
     "attempted_unconfirmed",
     "failed_unresolved_session",
@@ -1137,6 +1141,14 @@ def outer_review_finalization_ack_json_path(turn_dir: Path) -> Path:
 
 def outer_review_ledger_path(run_dir: Path) -> Path:
     return run_dir / OUTER_REVIEW_LEDGER_FILENAME
+
+
+def outer_review_notification_ledger_path(run_dir: Path) -> Path:
+    return run_dir / OUTER_REVIEW_NOTIFICATION_LEDGER_FILENAME
+
+
+def outer_review_notification_json_path(turn_dir: Path) -> Path:
+    return role_dir_for(turn_dir, "outer_review") / OUTER_REVIEW_NOTIFICATION_JSON_FILENAME
 
 
 def role_raw_output_path(turn_dir: Path, role: str) -> Path:
@@ -2995,13 +3007,31 @@ def load_outer_review_thread_name(session_id: str | None) -> str | None:
     return thread_name if isinstance(thread_name, str) and thread_name.strip() else None
 
 
-def new_outer_review_state(*, codex_session_id: str | None) -> dict:
-    configured = bool(codex_session_id)
+def new_outer_review_state(
+    *,
+    fork_parent_session_id: str | None = None,
+    tmux_session: str | None = None,
+    codex_session_id: str | None = None,
+) -> dict:
+    if fork_parent_session_id is None and codex_session_id:
+        # Deprecated compatibility: the old flag/name is now treated as a fork parent id.
+        fork_parent_session_id = codex_session_id
+        codex_session_id = None
+    configured = bool(fork_parent_session_id)
     return {
         "configured": configured,
-        "identifier_kind": "codex_session_id" if configured else None,
+        "identifier_kind": "fork_parent_session_id" if configured else None,
+        "fork_parent_session_id": fork_parent_session_id,
+        "tmux_session": tmux_session if configured else None,
         "codex_session_id": codex_session_id,
         "codex_thread_name": load_outer_review_thread_name(codex_session_id),
+        "latest_notification_turn": None,
+        "latest_notification_role": None,
+        "latest_notification_verdict": None,
+        "latest_notification_artifact_json": None,
+        "latest_notification_dispatch_status": (
+            None if configured else "skipped_unconfigured"
+        ),
         "latest_handoff_turn": None,
         "latest_handoff_artifact_json": None,
         "latest_handoff_artifact_md": None,
@@ -3030,23 +3060,28 @@ def new_outer_review_state(*, codex_session_id: str | None) -> dict:
 def clone_outer_review_state_for_new_run(
     previous_state: dict,
     *,
-    override_session_id: str | None,
-    clear_session_id: bool,
+    override_fork_parent_session_id: str | None,
+    override_tmux_session: str | None,
+    clear_fork_parent_session_id: bool,
 ) -> dict | None:
     if review_bridge_mode(previous_state) != "internal":
         return None
     previous_outer_review = previous_state.get("outer_review")
-    inherited_session_id = None
+    inherited_fork_parent_session_id = None
     if isinstance(previous_outer_review, dict) and previous_outer_review.get("configured"):
-        inherited_session_id = normalize_optional_text(
-            previous_outer_review.get("codex_session_id"),
-            field_name="outer review codex_session_id",
+        inherited_fork_parent_session_id = normalize_optional_text(
+            previous_outer_review.get("fork_parent_session_id")
+            or previous_outer_review.get("codex_session_id"),
+            field_name="outer review fork parent session id",
         )
-    if clear_session_id:
-        inherited_session_id = None
-    elif override_session_id is not None:
-        inherited_session_id = override_session_id
-    return new_outer_review_state(codex_session_id=inherited_session_id)
+    if clear_fork_parent_session_id:
+        inherited_fork_parent_session_id = None
+    elif override_fork_parent_session_id is not None:
+        inherited_fork_parent_session_id = override_fork_parent_session_id
+    return new_outer_review_state(
+        fork_parent_session_id=inherited_fork_parent_session_id,
+        tmux_session=override_tmux_session,
+    )
 
 
 def outer_review_state(state: dict) -> dict | None:
@@ -3067,6 +3102,139 @@ def outer_review_pending_finalization(state: dict) -> bool:
 def outer_review_reopen_path_enabled(state: dict) -> bool:
     reopen = state.get("reopen")
     return bool(isinstance(reopen, dict) and reopen.get("outer_review_path"))
+
+
+def sync_outer_review_from_role_state(state: dict) -> dict | None:
+    outer_review = outer_review_state(state)
+    if not isinstance(outer_review, dict):
+        return None
+    role_state = state.get("roles", {}).get("outer_review")
+    if not isinstance(role_state, dict):
+        return outer_review
+    fork_parent_session_id = normalize_optional_text(
+        role_state.get("fork_parent_session_id"),
+        field_name="outer review fork parent session id",
+    )
+    tmux_session = normalize_optional_text(
+        role_state.get("tmux_session"),
+        field_name="outer review tmux session",
+    )
+    codex_session_id = normalize_optional_text(
+        role_state.get("codex_session_id"),
+        field_name="outer review codex session id",
+    )
+    outer_review["fork_parent_session_id"] = fork_parent_session_id
+    outer_review["tmux_session"] = tmux_session
+    outer_review["codex_session_id"] = codex_session_id
+    outer_review["codex_thread_name"] = role_state.get("codex_thread_name")
+    if outer_review.get("configured"):
+        outer_review["identifier_kind"] = "fork_parent_session_id"
+    return outer_review
+
+
+def migrate_legacy_outer_review_state(state: dict) -> dict | None:
+    outer_review = outer_review_state(state)
+    if not isinstance(outer_review, dict) or not outer_review.get("configured"):
+        return outer_review
+    roles = state.get("roles")
+    if not isinstance(roles, dict):
+        return outer_review
+    if isinstance(roles.get("outer_review"), dict):
+        return outer_review
+    fork_parent_session_id = normalize_optional_text(
+        outer_review.get("fork_parent_session_id") or outer_review.get("codex_session_id"),
+        field_name="outer review fork parent session id",
+    )
+    if not fork_parent_session_id:
+        return outer_review
+    task_name = normalize_optional_text(state.get("task_name"), field_name="task name") or "task"
+    run_id = normalize_optional_text(state.get("run_id"), field_name="run id") or "run"
+    tmux_session = normalize_optional_text(
+        outer_review.get("tmux_session"),
+        field_name="outer review tmux session",
+    ) or build_tmux_session_name(task_name, "outer_review", run_id)
+    legacy_child_session_id = normalize_optional_text(
+        outer_review.get("codex_session_id"),
+        field_name="outer review codex session id",
+    )
+    outer_review["identifier_kind"] = "fork_parent_session_id"
+    outer_review["fork_parent_session_id"] = fork_parent_session_id
+    outer_review["tmux_session"] = tmux_session
+    outer_review["codex_session_id"] = None
+    outer_review["codex_thread_name"] = None
+    roles["outer_review"] = {
+        "bootstrap_mode": "fork",
+        "codex_session_id": None,
+        "codex_thread_name": None,
+        "fork_parent_session_id": fork_parent_session_id,
+        "last_wait_phase": None,
+        "tmux_session": tmux_session,
+    }
+    if legacy_child_session_id and legacy_child_session_id != fork_parent_session_id:
+        outer_review["legacy_codex_session_id"] = legacy_child_session_id
+    return outer_review
+
+
+def validate_outer_review_role_state(state: dict) -> None:
+    migrate_legacy_outer_review_state(state)
+    outer_review = outer_review_state(state)
+    if not isinstance(outer_review, dict) or not outer_review.get("configured"):
+        return
+    role_state = state.get("roles", {}).get("outer_review")
+    if not isinstance(role_state, dict):
+        raise SupervisorRuntimeError(
+            "invalid_run_state",
+            "configured outer_review requires roles.outer_review runtime state",
+            details={"outer_review": outer_review},
+        )
+    expected = {
+        "bootstrap_mode": "fork",
+        "fork_parent_session_id": outer_review.get("fork_parent_session_id"),
+        "tmux_session": outer_review.get("tmux_session"),
+        "codex_session_id": outer_review.get("codex_session_id"),
+        "codex_thread_name": outer_review.get("codex_thread_name"),
+    }
+    for key, expected_value in expected.items():
+        if role_state.get(key) != expected_value:
+            raise SupervisorRuntimeError(
+                "invalid_run_state",
+                f"outer_review and roles.outer_review disagree on {key}",
+                details={
+                    "field": key,
+                    "outer_review_value": expected_value,
+                    "role_value": role_state.get(key),
+                },
+            )
+
+
+def outer_review_notification_key(
+    *,
+    run_id: str,
+    turn_number: int,
+    role: str,
+    verdict: str,
+) -> str:
+    return f"{run_id}:{turn_name(turn_number)}:{role}:{verdict}"
+
+
+def outer_review_notification_already_recorded(run_dir: Path, key: str) -> bool:
+    path = outer_review_notification_ledger_path(run_dir)
+    if not path.exists():
+        return False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if item.get("notification_key") == key:
+            return True
+    return False
+
+
+def append_outer_review_notification_ledger(run_dir: Path, payload: dict) -> None:
+    append_jsonl(outer_review_notification_ledger_path(run_dir), payload)
 
 
 def outer_review_review_points(review_text: str) -> tuple[str, list[str]]:
@@ -5296,6 +5464,21 @@ def create_run_state(
         state["reopen"] = reopen_context
     if outer_review is not None:
         state["outer_review"] = outer_review
+        if outer_review.get("configured"):
+            outer_tmux_session = outer_review.get("tmux_session") or build_tmux_session_name(
+                task_name,
+                "outer_review",
+                run_id,
+            )
+            outer_review["tmux_session"] = outer_tmux_session
+            state["roles"]["outer_review"] = {
+                "bootstrap_mode": "fork",
+                "codex_session_id": None,
+                "codex_thread_name": None,
+                "fork_parent_session_id": outer_review.get("fork_parent_session_id"),
+                "last_wait_phase": None,
+                "tmux_session": outer_tmux_session,
+            }
     return state
 
 
@@ -5357,6 +5540,7 @@ def validate_execution_run_state(run_dir: Path, state: dict) -> None:
     required_keys = {"status", "run_id", "task_root", "roles"}
     if not required_keys.issubset(state.keys()):
         return
+    validate_outer_review_role_state(state)
     status = state.get("status")
     if not isinstance(status, str) or not status:
         raise SupervisorRuntimeError(
@@ -5588,6 +5772,43 @@ def resolve_fork_parent_session_ids(args: argparse.Namespace) -> tuple[str | Non
         generator = generator or shared
         reviewer = reviewer or shared
     return generator, reviewer
+
+
+def resolve_outer_review_fork_parent_session_id(args: argparse.Namespace) -> str | None:
+    fork_parent = normalize_optional_text(
+        getattr(args, "outer_review_fork_session_id", None),
+        field_name="outer review fork parent session id",
+    )
+    legacy_session = normalize_optional_text(
+        getattr(args, "outer_review_session_id", None),
+        field_name="outer review session id",
+    )
+    if fork_parent and legacy_session and fork_parent != legacy_session:
+        raise SystemExit(
+            "cannot use --outer-review-fork-session-id and deprecated --outer-review-session-id with different values"
+        )
+    return fork_parent or legacy_session
+
+
+def resolve_outer_review_tmux_session(args: argparse.Namespace) -> str | None:
+    tmux_session = normalize_optional_text(
+        getattr(args, "outer_review_tmux_session", None),
+        field_name="outer review tmux session",
+    )
+    legacy_session = normalize_optional_text(
+        getattr(args, "outer_review_session", None),
+        field_name="outer review session",
+    )
+    if tmux_session and legacy_session and tmux_session != legacy_session:
+        raise SystemExit(
+            "cannot use --outer-review-tmux-session and deprecated --outer-review-session with different values"
+        )
+    return tmux_session or legacy_session
+
+
+def validate_known_outer_review_fork_parent_session_id(session_id: str | None) -> None:
+    if session_id and not find_codex_session_entry(session_id):
+        raise SystemExit(f"unknown outer-review fork parent session id: {session_id}")
 
 
 def has_any_fork_parent(generator_fork_id: str | None, reviewer_fork_id: str | None) -> bool:
@@ -6162,40 +6383,50 @@ def build_outer_review_state_for_start(
     review_mode: str,
     args: argparse.Namespace,
 ) -> dict | None:
-    session_id = normalize_optional_text(
-        getattr(args, "outer_review_session_id", None),
-        field_name="outer review session id",
-    )
+    fork_parent_session_id = resolve_outer_review_fork_parent_session_id(args)
+    tmux_session = resolve_outer_review_tmux_session(args)
     if review_mode == "github_pr_codex":
-        if session_id is not None:
+        if fork_parent_session_id is not None or tmux_session is not None:
             raise SystemExit(
-                "--outer-review-session-id is only supported when --review-mode internal; it must be a resumable Codex session id for the additive internal outer-review layer."
+                "--outer-review-fork-session-id is only supported when --review-mode internal; github_pr_codex runs cannot use outer-review agent configuration."
             )
         return None
-    return new_outer_review_state(codex_session_id=session_id)
+    if tmux_session is not None and fork_parent_session_id is None:
+        raise SystemExit("--outer-review-tmux-session requires --outer-review-fork-session-id")
+    return new_outer_review_state(
+        fork_parent_session_id=fork_parent_session_id,
+        tmux_session=tmux_session,
+    )
 
 
 def build_outer_review_state_for_reopen(
     previous_state: dict,
     *,
-    outer_review_session_id: str | None,
+    outer_review_fork_session_id: str | None,
+    outer_review_session: str | None,
     clear_outer_review_session_id: bool,
 ) -> dict | None:
     previous_review_mode = review_bridge_mode(previous_state)
     if previous_review_mode == "github_pr_codex":
-        if outer_review_session_id is not None or clear_outer_review_session_id:
+        if outer_review_fork_session_id is not None or outer_review_session is not None or clear_outer_review_session_id:
             raise SystemExit(
-                "outer-review session configuration is only supported for internal review mode; github_pr_codex runs cannot use --outer-review-session-id or --clear-outer-review-session-id."
+                "outer-review agent configuration is only supported for internal review mode; github_pr_codex runs cannot use --outer-review-fork-session-id, --outer-review-tmux-session, or --clear-outer-review-session-id."
             )
         return None
-    if outer_review_session_id is not None and clear_outer_review_session_id:
+    if (outer_review_fork_session_id is not None or outer_review_session is not None) and clear_outer_review_session_id:
         raise SystemExit(
-            "cannot use --outer-review-session-id and --clear-outer-review-session-id together on reopen"
+            "cannot use outer-review agent configuration and --clear-outer-review-session-id together on reopen"
         )
+    if outer_review_session is not None:
+        previous_outer_review = previous_state.get("outer_review")
+        inherited = bool(isinstance(previous_outer_review, dict) and previous_outer_review.get("configured"))
+        if not inherited and outer_review_fork_session_id is None:
+            raise SystemExit("--outer-review-tmux-session requires --outer-review-fork-session-id when no outer-review agent is inherited")
     return clone_outer_review_state_for_new_run(
         previous_state,
-        override_session_id=outer_review_session_id,
-        clear_session_id=clear_outer_review_session_id,
+        override_fork_parent_session_id=outer_review_fork_session_id,
+        override_tmux_session=outer_review_session,
+        clear_fork_parent_session_id=clear_outer_review_session_id,
     )
 
 
@@ -6808,14 +7039,77 @@ def build_outer_review_handoff_request_text(
 def build_outer_review_finalization_request_text(
     *,
     task_name: str,
+    repo_root: str,
+    run_id: str,
     cycle_id: str,
 ) -> str:
+    continue_command = (
+        f"python3 {shlex.quote(str(Path(__file__).resolve()))} continue "
+        f"{shlex.quote(task_name)} --dir {shlex.quote(repo_root)} --run-id {shlex.quote(run_id)}"
+    )
     return render_outer_review_request_template(
         "finalization_request.md",
         {
             "task_name": task_name,
+            "repo_root": repo_root,
+            "run_id": run_id,
             "cycle_id": cycle_id,
+            "continue_command": continue_command,
             "point_extraction_rule": outer_review_point_extraction_rule_text(),
+        },
+    )
+
+
+def canonical_doc_hash_snapshot(task_root: Path) -> dict:
+    snapshot: dict[str, dict] = {}
+    for key in CANONICAL_FILE_ORDER:
+        label = canonical_file_label(key)
+        path = task_root / label
+        exists = path.exists()
+        text = path.read_text(encoding="utf-8") if exists else ""
+        snapshot[key] = {
+            "exists": exists,
+            "path": str(path),
+            "sha256": hash_text(text) if exists else None,
+        }
+    return snapshot
+
+
+def build_outer_review_status_notification_text(
+    *,
+    task_name: str,
+    run_id: str,
+    turn_label: str,
+    role: str,
+    verdict: str,
+    summary: str,
+    repo_root: str,
+    current_branch: str | None,
+    head_sha: str | None,
+    message_path: Path,
+    status_path: Path,
+) -> str:
+    reopen_command = (
+        f"python3 {shlex.quote(str(Path(__file__).resolve()))} reopen "
+        f"{shlex.quote(task_name)} --dir {shlex.quote(repo_root)} --run-id {shlex.quote(run_id)} "
+        '--reason-kind false_approved --reason "<why approval was wrong>"'
+    )
+    return render_outer_review_request_template(
+        "status_notification.md",
+        {
+            "task_name": task_name,
+            "run_id": run_id,
+            "turn": turn_label,
+            "role": role,
+            "verdict": verdict,
+            "summary": summary,
+            "repo_root": repo_root,
+            "current_branch": current_branch or "unknown",
+            "head_sha": head_sha or "unknown",
+            "message_path": str(message_path),
+            "status_path": str(status_path),
+            "review_filename": REVIEW_FILENAME,
+            "reopen_command": reopen_command,
         },
     )
 
@@ -6982,43 +7276,162 @@ def build_outer_review_finalization_ack_markdown(payload: dict) -> str:
 
 
 def dispatch_outer_review_prompt(
-    repo_root: Path,
-    council_config: dict,
+    run_dir: Path,
+    state: dict,
+    turn_dir: Path,
     *,
-    codex_session_id: str | None,
     prompt: str,
+    dispatch_reason: str,
 ) -> tuple[str, str | None]:
-    thread_name = load_outer_review_thread_name(codex_session_id)
-    if not codex_session_id:
-        return "skipped_unconfigured", thread_name
-    if find_codex_session_entry(codex_session_id) is None:
-        return "failed_unresolved_session", thread_name
-    tmux_name = f"codex-outer-review-dispatch-{uuid.uuid4().hex[:10]}"
+    outer_review = outer_review_state(state)
+    if not isinstance(outer_review, dict) or not outer_review.get("configured"):
+        return "skipped_unconfigured", None
+    write_prompt_artifact(turn_dir, "outer_review", prompt)
+    role_state = state.get("roles", {}).get("outer_review")
+    if not isinstance(role_state, dict):
+        return "attempted_unconfirmed", None
     try:
-        tmux_new_session(
-            tmux_name,
-            repo_root,
-            build_codex_resume_command(repo_root, council_config["codex"], codex_session_id),
-            role="generator",
-        )
+        ensure_role_session_ready(run_dir, state, "outer_review")
+        sync_outer_review_from_role_state(state)
+        role_state = state["roles"]["outer_review"]
+        tmux_name = role_state["tmux_session"]
         wait_for_tmux_prompt(
             tmux_name,
-            float(council_config["council"]["launch_timeout_seconds"]),
+            float(state["council_config"]["council"]["launch_timeout_seconds"]),
             phase="outer_review_dispatch_prompt_ready",
-            role="generator",
+            role="outer_review",
         )
         tmux_send_prompt(
             tmux_name,
             prompt,
             phase="outer_review_dispatch_prompt",
-            role="generator",
+            role="outer_review",
+            turn_dir=turn_dir,
+            dispatch_reason=dispatch_reason,
+            session_reset_reason=role_state.pop("last_session_reset_reason", None),
         )
-        return "confirmed_prompt_dispatch", thread_name
+        sync_outer_review_from_role_state(state)
+        save_run_state(run_dir, state)
+        return "confirmed_prompt_dispatch", state["outer_review"].get("codex_thread_name")
     except SupervisorRuntimeError:
-        return "attempted_unconfirmed", thread_name
-    finally:
-        if tmux_session_exists(tmux_name):
-            tmux_kill_session(tmux_name)
+        sync_outer_review_from_role_state(state)
+        save_run_state(run_dir, state)
+        return "attempted_unconfirmed", state["outer_review"].get("codex_thread_name")
+
+
+def notify_outer_review_for_status(
+    run_dir: Path,
+    state: dict,
+    task_root: Path,
+    turn_dir: Path,
+    turn_number: int,
+    *,
+    role: str,
+    verdict: str,
+    summary: str,
+    related_artifacts: dict | None = None,
+) -> tuple[str, str | None]:
+    outer_review = outer_review_state(state)
+    if review_bridge_mode(state) != "internal" or not isinstance(outer_review, dict) or not outer_review.get("configured"):
+        return "skipped_unconfigured", None
+    if verdict != "approved":
+        return "skipped_non_final", outer_review.get("codex_thread_name")
+    notification_key = outer_review_notification_key(
+        run_id=state["run_id"],
+        turn_number=turn_number,
+        role=role,
+        verdict=verdict,
+    )
+    if outer_review_notification_already_recorded(run_dir, notification_key):
+        outer_review["latest_notification_dispatch_status"] = "skipped_duplicate"
+        save_run_state(run_dir, state)
+        return "skipped_duplicate", outer_review.get("codex_thread_name")
+
+    current_branch, head_sha = record_current_git_state(run_dir, state)
+    message_path = role_message_path(turn_dir, role)
+    status_path = role_status_path(turn_dir, role)
+    prompt = build_outer_review_status_notification_text(
+        task_name=state["task_name"],
+        run_id=state["run_id"],
+        turn_label=turn_name(turn_number),
+        role=role,
+        verdict=verdict,
+        summary=summary,
+        repo_root=state["repo_root"],
+        current_branch=current_branch,
+        head_sha=head_sha,
+        message_path=message_path,
+        status_path=status_path,
+    )
+    payload = {
+        "notification_key": notification_key,
+        "task_name": state["task_name"],
+        "run_id": state["run_id"],
+        "turn": turn_name(turn_number),
+        "role": role,
+        "verdict": verdict,
+        "summary": summary,
+        "repo_root": state["repo_root"],
+        "current_branch": current_branch,
+        "head_sha": head_sha,
+        "source_artifacts": {
+            "message": str(message_path),
+            "status": str(status_path),
+        },
+        "related_artifacts": related_artifacts or {},
+        "canonical_docs": canonical_doc_hash_snapshot(task_root),
+        "outer_review": {
+            "identifier_kind": outer_review.get("identifier_kind"),
+            "fork_parent_session_id": outer_review.get("fork_parent_session_id"),
+            "tmux_session": outer_review.get("tmux_session"),
+            "codex_session_id": outer_review.get("codex_session_id"),
+            "codex_thread_name": outer_review.get("codex_thread_name"),
+        },
+        "prompt_hash": hash_text(prompt),
+    }
+    dispatch_status, thread_name = dispatch_outer_review_prompt(
+        run_dir,
+        state,
+        turn_dir,
+        prompt=prompt,
+        dispatch_reason=f"outer_review_{role}_{verdict}",
+    )
+    outer_review = outer_review_state(state) or outer_review
+    if thread_name:
+        outer_review["codex_thread_name"] = thread_name
+        role_state = state.get("roles", {}).get("outer_review")
+        if isinstance(role_state, dict):
+            role_state["codex_thread_name"] = thread_name
+    payload["outer_review"] = {
+        "identifier_kind": outer_review.get("identifier_kind"),
+        "fork_parent_session_id": outer_review.get("fork_parent_session_id"),
+        "tmux_session": outer_review.get("tmux_session"),
+        "codex_session_id": outer_review.get("codex_session_id"),
+        "codex_thread_name": outer_review.get("codex_thread_name"),
+    }
+    payload["dispatch_status"] = dispatch_status
+    payload["notified_at"] = now_ts()
+    save_json(outer_review_notification_json_path(turn_dir), payload)
+    append_outer_review_notification_ledger(run_dir, payload)
+    outer_review["latest_notification_turn"] = turn_name(turn_number)
+    outer_review["latest_notification_role"] = role
+    outer_review["latest_notification_verdict"] = verdict
+    outer_review["latest_notification_artifact_json"] = str(outer_review_notification_json_path(turn_dir))
+    outer_review["latest_notification_dispatch_status"] = dispatch_status
+    save_run_state(run_dir, state)
+    append_run_event(
+        run_dir,
+        "outer_review_notification_created",
+        turn_number=turn_number,
+        role="outer_review",
+        details={
+            "source_role": role,
+            "verdict": verdict,
+            "dispatch_status": dispatch_status,
+            "notification_key": notification_key,
+        },
+    )
+    return dispatch_status, thread_name
 
 
 def update_previous_outer_review_dispositions_for_reopen(
@@ -7215,23 +7628,33 @@ def write_outer_review_handoff_artifacts(
         "outer_review": {
             "configured": outer_review.get("configured"),
             "identifier_kind": outer_review.get("identifier_kind"),
+            "fork_parent_session_id": outer_review.get("fork_parent_session_id"),
+            "tmux_session": outer_review.get("tmux_session"),
             "codex_session_id": outer_review.get("codex_session_id"),
             "codex_thread_name": outer_review.get("codex_thread_name"),
         },
         "request_text": request_text,
         "ledger_summary": outer_review_ledger_cycle_summary(ledger),
     }
-    dispatch_status, thread_name = dispatch_outer_review_prompt(
-        Path(state["repo_root"]),
-        state["council_config"],
-        codex_session_id=normalize_optional_text(
-            outer_review.get("codex_session_id"),
-            field_name="outer review codex_session_id",
-        ),
-        prompt=request_text,
+    dispatch_status, thread_name = notify_outer_review_for_status(
+        run_dir,
+        state,
+        task_root,
+        turn_dir,
+        turn_number,
+        role="reviewer",
+        verdict="approved",
+        summary=str(state.get("stop_reason") or "Reviewer approved the internal generator/reviewer loop."),
+        related_artifacts={
+            "outer_review_handoff_markdown": str(outer_review_handoff_markdown_path(turn_dir)),
+            "outer_review_handoff_json": str(outer_review_handoff_json_path(turn_dir)),
+        },
     )
     if thread_name:
         outer_review["codex_thread_name"] = thread_name
+        role_state = state.get("roles", {}).get("outer_review")
+        if isinstance(role_state, dict):
+            role_state["codex_thread_name"] = thread_name
         payload["outer_review"]["codex_thread_name"] = thread_name
     payload["dispatch_status"] = dispatch_status
     write_text(outer_review_handoff_markdown_path(turn_dir), build_outer_review_handoff_markdown(payload))
@@ -7276,6 +7699,8 @@ def write_outer_review_finalization_artifacts(
     review_text = review_path.read_text(encoding="utf-8")
     request_text = build_outer_review_finalization_request_text(
         task_name=state["task_name"],
+        repo_root=state["repo_root"],
+        run_id=state["run_id"],
         cycle_id=input_payload["cycle_id"],
     )
     payload = {
@@ -7289,16 +7714,17 @@ def write_outer_review_finalization_artifacts(
         "request_text": request_text,
     }
     dispatch_status, thread_name = dispatch_outer_review_prompt(
-        Path(state["repo_root"]),
-        state["council_config"],
-        codex_session_id=normalize_optional_text(
-            outer_review.get("codex_session_id"),
-            field_name="outer review codex_session_id",
-        ),
+        run_dir,
+        state,
+        turn_dir,
         prompt=request_text,
+        dispatch_reason="outer_review_finalization_request",
     )
     if thread_name:
         outer_review["codex_thread_name"] = thread_name
+        role_state = state.get("roles", {}).get("outer_review")
+        if isinstance(role_state, dict):
+            role_state["codex_thread_name"] = thread_name
     payload["dispatch_status"] = dispatch_status
     write_text(
         outer_review_finalization_markdown_path(turn_dir),
@@ -8379,6 +8805,7 @@ def assign_recent_codex_session_ids(run_dir: Path, state: dict) -> None:
         )
         changed = True
     if changed:
+        sync_outer_review_from_role_state(state)
         save_run_state(run_dir, state)
 
 
@@ -8438,6 +8865,8 @@ def ensure_role_session_ready(run_dir: Path, state: dict, role: str) -> None:
             codex_session_id = None
             role_state["codex_session_id"] = None
             role_state["codex_thread_name"] = None
+            if role == "outer_review":
+                sync_outer_review_from_role_state(state)
             save_run_state(run_dir, state)
         restart_role_session(
             tmux_name,
@@ -9959,8 +10388,15 @@ def print_run_launch_summary(run_dir: Path, state: dict, task_root: Path) -> Non
     outer_review = outer_review_state(state)
     if isinstance(outer_review, dict):
         print(f"outer review configured: {'yes' if outer_review.get('configured') else 'no'}")
+        if outer_review.get("fork_parent_session_id"):
+            print(f"outer review fork parent session id: {outer_review['fork_parent_session_id']}")
+        if outer_review.get("tmux_session"):
+            print(f"outer review tmux session: {outer_review['tmux_session']}")
+            print(f"attach outer review: tmux attach -t {outer_review['tmux_session']}")
         if outer_review.get("codex_session_id"):
-            print(f"outer review session id: {outer_review['codex_session_id']}")
+            print(f"outer review child session id: {outer_review['codex_session_id']}")
+        if outer_review.get("latest_notification_dispatch_status"):
+            print(f"outer review latest notification dispatch status: {outer_review['latest_notification_dispatch_status']}")
 
 
 def run_supervisor_for_initialized_run(
@@ -9975,10 +10411,7 @@ def run_supervisor_for_initialized_run(
         create_tmux_sessions(run_dir, state)
         print_run_launch_summary(run_dir, state, task_root)
         wait_for_tmux_sessions_ready(run_dir, state)
-        if review_bridge_mode(state) == "github_pr_codex":
-            print("generator Codex TUI session is ready")
-        else:
-            print("both Codex TUI sessions are ready")
+        print(f"Codex TUI sessions are ready: {', '.join(active_tmux_roles(state))}")
         supervisor_loop_from(
             run_dir,
             state,
@@ -10419,11 +10852,21 @@ def start_run(args: argparse.Namespace) -> int:
     for session_id in (generator_fork_session_id, reviewer_fork_session_id):
         if session_id and not find_codex_session_entry(session_id):
             raise SystemExit(f"unknown fork parent session id: {session_id}")
+    requested_outer_review_parent_id = (
+        requested_outer_review.get("fork_parent_session_id")
+        if isinstance(requested_outer_review, dict)
+        else None
+    )
+    validate_known_outer_review_fork_parent_session_id(
+        requested_outer_review_parent_id if isinstance(requested_outer_review_parent_id, str) else None
+    )
     fork_enabled = has_any_fork_parent(generator_fork_session_id, reviewer_fork_session_id)
     if review_mode == "github_pr_codex" and not is_git:
         raise SystemExit("github_pr_codex review mode requires a git worktree")
     if not is_git and fork_enabled:
         raise SystemExit("fork start requires a git worktree and cannot be used with --allow-non-git")
+    if not is_git and outer_review_is_configured({"outer_review": requested_outer_review}):
+        raise SystemExit("outer-review fork start requires a git worktree and cannot be used with --allow-non-git")
     validate_task_workspace_for_start(task_root, inspection, review_mode=review_mode)
     start_role, bootstrap_phase = determine_start_role(
         inspection=inspection,
@@ -10595,13 +11038,19 @@ def reopen_run(args: argparse.Namespace) -> int:
     review_bridge = clone_review_bridge_state_for_new_run(previous_state)
     outer_review = build_outer_review_state_for_reopen(
         previous_state,
-        outer_review_session_id=normalize_optional_text(
-            getattr(args, "outer_review_session_id", None),
-            field_name="outer review session id",
-        ),
+        outer_review_fork_session_id=resolve_outer_review_fork_parent_session_id(args),
+        outer_review_session=resolve_outer_review_tmux_session(args),
         clear_outer_review_session_id=bool(
             getattr(args, "clear_outer_review_session_id", False)
         ),
+    )
+    outer_review_parent_id = (
+        outer_review.get("fork_parent_session_id")
+        if isinstance(outer_review, dict)
+        else None
+    )
+    validate_known_outer_review_fork_parent_session_id(
+        outer_review_parent_id if isinstance(outer_review_parent_id, str) else None
     )
     generator_session = build_tmux_session_name(task_name, "generator", run_id)
     reviewer_session = (
@@ -10695,6 +11144,47 @@ def init_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def role_follow_payload(state: dict, role: str) -> dict:
+    role_state = state.get("roles", {}).get(role, {})
+    tmux_session = role_state.get("tmux_session") if isinstance(role_state, dict) else None
+    payload = {
+        "role": role,
+        "tmux_session": tmux_session,
+        "attach_command": f"tmux attach -t {tmux_session}" if isinstance(tmux_session, str) and tmux_session else None,
+        "codex_session_id": role_state.get("codex_session_id") if isinstance(role_state, dict) else None,
+        "codex_thread_name": role_state.get("codex_thread_name") if isinstance(role_state, dict) else None,
+        "fork_parent_session_id": role_state.get("fork_parent_session_id") if isinstance(role_state, dict) else None,
+    }
+    if role == "outer_review":
+        outer_review = outer_review_state(state)
+        if isinstance(outer_review, dict):
+            payload["latest_notification_dispatch_status"] = outer_review.get("latest_notification_dispatch_status")
+            payload["latest_handoff_dispatch_status"] = outer_review.get("latest_handoff_dispatch_status")
+            payload["pending_outer_finalization"] = outer_review.get("pending_outer_finalization")
+    return payload
+
+
+def print_sessions_status(state: dict, *, planning: bool) -> None:
+    print(f"run_id: {state['run_id']}")
+    print(f"status: {state['status']}")
+    role_names = PLANNING_ROLE_NAMES if planning else active_tmux_roles(state)
+    for role in role_names:
+        payload = role_follow_payload(state, role)
+        tmux_session = payload["tmux_session"]
+        if not tmux_session:
+            continue
+        print(f"{role} tmux: {tmux_session}")
+        print(f"attach {role.replace('_', ' ')}: {payload['attach_command']}")
+        if payload.get("fork_parent_session_id"):
+            print(f"{role} fork parent session id: {payload['fork_parent_session_id']}")
+        if payload.get("codex_session_id"):
+            print(f"{role} child session id: {payload['codex_session_id']}")
+        if payload.get("codex_thread_name"):
+            print(f"{role} thread: {payload['codex_thread_name']}")
+        if role == "outer_review" and payload.get("latest_notification_dispatch_status"):
+            print(f"outer review latest notification dispatch status: {payload['latest_notification_dispatch_status']}")
+
+
 def show_status(args: argparse.Namespace) -> int:
     task_name = validate_task_name(args.task_name)
     target_input = Path(args.dir or Path.cwd()).resolve()
@@ -10708,6 +11198,9 @@ def show_status(args: argparse.Namespace) -> int:
     if not state_path.exists():
         raise SystemExit(f"missing run state: {state_path}")
     state = load_json(state_path)
+    if getattr(args, "sessions", False):
+        print_sessions_status(state, planning=bool(getattr(args, "planning", False)))
+        return 0
     continuation = inspect_planning_continuation_plan(run_dir, state) if getattr(args, "planning", False) else inspect_continuation_plan(run_dir, state)
     payload = dict(state)
     events: list[dict] = []
@@ -10719,7 +11212,7 @@ def show_status(args: argparse.Namespace) -> int:
             events = []
 
     latest_role_events: dict[str, dict] = {}
-    role_names = PLANNING_ROLE_NAMES if getattr(args, "planning", False) else ROLE_NAMES
+    role_names = PLANNING_ROLE_NAMES if getattr(args, "planning", False) else (tuple(state.get("roles", {}).keys()) or ROLE_NAMES)
     for role_name in role_names:
         matching = [event for event in events if event.get("role") == role_name]
         if matching:
@@ -10760,6 +11253,11 @@ def show_status(args: argparse.Namespace) -> int:
                 "details": event.get("details"),
             }
             for role_name, event in latest_role_events.items()
+        }
+    if not getattr(args, "planning", False):
+        payload["sessions"] = {
+            role: role_follow_payload(state, role)
+            for role in active_tmux_roles(state)
         }
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0
@@ -12164,9 +12662,15 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--github-branch")
     start.add_argument("--github-base")
     start.add_argument(
-        "--outer-review-session-id",
-        help="resumable Codex session id for the optional internal outer-review handoff layer",
+        "--outer-review-fork-session-id",
+        help="Codex parent session id to fork into a persistent outer-review tmux agent",
     )
+    start.add_argument(
+        "--outer-review-session-id",
+        help="deprecated alias for --outer-review-fork-session-id",
+    )
+    start.add_argument("--outer-review-tmux-session", help="tmux session name for the persistent outer-review agent")
+    start.add_argument("--outer-review-session", help="deprecated alias for --outer-review-tmux-session")
     start.add_argument("--start-role", choices=["auto", "generator", "reviewer"], default="auto")
     start.set_defaults(func=start_run)
 
@@ -12185,9 +12689,15 @@ def build_parser() -> argparse.ArgumentParser:
     reopen.add_argument("--reason-kind", choices=sorted(REOPEN_REASON_KINDS), required=True)
     reopen.add_argument("--reason", required=True)
     reopen.add_argument(
-        "--outer-review-session-id",
-        help="override the inherited internal outer-review resumable Codex session id for the new run",
+        "--outer-review-fork-session-id",
+        help="override the inherited internal outer-review fork parent session id for the new run",
     )
+    reopen.add_argument(
+        "--outer-review-session-id",
+        help="deprecated alias for --outer-review-fork-session-id",
+    )
+    reopen.add_argument("--outer-review-tmux-session", help="tmux session name for the persistent outer-review agent")
+    reopen.add_argument("--outer-review-session", help="deprecated alias for --outer-review-tmux-session")
     reopen.add_argument(
         "--clear-outer-review-session-id",
         action="store_true",
@@ -12201,6 +12711,7 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--allow-non-git", action="store_true")
     status.add_argument("--run-id", default="latest")
     status.add_argument("--planning", action="store_true", help="inspect the latest or chosen planning run instead of an execution run")
+    status.add_argument("--sessions", action="store_true", help="print tmux attach commands for active Codex role sessions")
     status.set_defaults(func=show_status)
 
     return parser

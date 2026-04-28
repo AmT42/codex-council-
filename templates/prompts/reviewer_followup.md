@@ -1,4 +1,4 @@
-Role: Evaluator
+Role: Reviewer
 Phase: implementation review
 Repo root: {{repo_root}}
 

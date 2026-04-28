@@ -2,6 +2,10 @@
 
 This file is the canonical findings/review input for the council.
 
+GitHub PR bridge note: if the work is an existing live PR and the user asked Codex Council to work on that PR, do not copy PR findings into this file by default. Prefer `start --review-mode github_pr_codex --github-pr <pr-url>` and let the PR plus current-head GitHub Codex findings drive the run.
+
+This file is canonical findings input for the Normal Internal Council. It is not a role output like `turns/.../reviewer/message.md`, not the GitHub PR review source in `github_pr_codex`, and not a place for broad product requirements.
+
 Use it when the work starts from:
 - a bug analysis
 - review findings
