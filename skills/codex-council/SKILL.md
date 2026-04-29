@@ -1,6 +1,6 @@
 ---
 name: codex-council
-description: Operate Codex Council from an outer Codex agent. Route user wording to the right request class, preparation lane, execution review source, and lifecycle command. For existing GitHub PRs or PR numbers, default to the GitHub PR Codex Bridge with --review-mode github_pr_codex; use the internal generator/reviewer execution loop only when explicitly requested.
+description: Operate Codex Council from an outer Codex agent. For live GitHub PR URLs, PR numbers, PR review permalinks, "this PR", or "work on this PR", the exclusive default is GitHub PR Codex Bridge with --review-mode github_pr_codex and --github-pr. Do not run Normal Internal Council, planner/critic, or create task/review/spec/contract docs for live PRs unless explicitly requested.
 ---
 
 # Codex Council
@@ -9,6 +9,28 @@ This skill is the front door for using `council-agent` as a long-running harness
 
 Use it when the user wants you to operate this repo against some target repository. Do not use it when you are modifying `council-agent` itself; for maintainer work, follow repo-root `AGENTS.md`.
 
+## Rule 0: Live PR Is Exclusive
+
+If the request contains a live PR URL, PR number, PR review permalink, "this PR", "the pull request", "work on this PR", `@codex`, Codex PR comments, or GitHub review comments, route selection stops here.
+
+Use the GitHub PR Codex Bridge only:
+
+```bash
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py init pr-<number> --dir /path/to/target-repo
+python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start pr-<number> \
+  --dir /path/to/target-repo \
+  --review-mode github_pr_codex \
+  --github-pr <pr-url-or-number>
+```
+
+Do not run the Normal Internal Council. Do not run planner/critic. Do not create, validate, normalize, or repair `task.md`, `review.md`, `spec.md`, or `contract.md`. Do not translate PR comments into a local Council brief. Do not start a local generator/reviewer loop.
+
+Only override this when the user explicitly asks for the **Normal Internal Council**, the **internal generator/reviewer execution loop**, a local Council brief, planner/critic preparation, or outer-review audit.
+
+If no current-head GitHub Codex review exists, the next action is to request or wait for `@codex`, not generator implementation and not local doc synthesis. If implementation is required, it must be driven by the PR bridge's GitHub Codex findings, not by a newly authored Council brief.
+
+If the URL contains `#pullrequestreview-<id>`, preserve that review id as the target review. Use the base PR URL where the CLI requires it, but keep the fragment in the operator route summary and verify the consumed GitHub Codex review id matches before continuing.
+
 ## Non-Negotiable Boundary
 
 If the user asked you to **use this harness** for a task, you are the harness operator.
@@ -16,7 +38,7 @@ If the user asked you to **use this harness** for a task, you are the harness op
 Your job is to:
 
 - inspect the target repo
-- write or update canonical council docs only when the chosen route needs them; live PR bridge runs may omit them
+- write or update canonical council docs only when the chosen route needs them; live PR bridge runs omit them by default
 - choose between direct answer, `prepare`, `start`, `continue`, and `reopen`
 - launch or resume the council
 
@@ -78,9 +100,9 @@ Then load only the references needed for the chosen route:
 - Prefer action over questions when the request is concrete.
 - Ask only high-impact blocking questions.
 - Prefer the smallest sufficient document set.
-- Default to `contract.md` for non-trivial work.
-- If the user points at an existing GitHub PR and asks you to use Codex Council on that PR, default to the GitHub PR Codex Bridge with `--review-mode github_pr_codex`; do not start the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop.
-- Exception: when the user asks you to write the council spec/instructions or otherwise prepare the council brief itself, always write `task.md`, `review.md`, `spec.md`, and `contract.md` before launch.
+- Default to `contract.md` for non-trivial work except live PR bridge runs, where the PR and current-head GitHub Codex findings are the brief.
+- If the user points at an existing GitHub PR and asks you to use Codex Council on that PR, route exclusively to the GitHub PR Codex Bridge with `--review-mode github_pr_codex`; do not start the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop.
+- Exception: when the user asks you to write the council spec/instructions or otherwise prepare the council brief itself, always write `task.md`, `review.md`, `spec.md`, and `contract.md` before launch. This exception does not apply to live PR requests unless the user explicitly asks for a local Council brief or the internal generator/reviewer loop.
 - Prefer `status` + `continue` over restarting a healthy paused run, but use `reopen` when an approved run must be superseded explicitly.
 - Internal Council With Outer Audit is additive, not a separate review mode: it uses `--outer-review-fork-session-id` on `start` to create a persistent forked `outer_review` tmux agent, sends that agent only one final approved-run audit request, and re-enters only through `reopen --reason-kind false_approved` before the triage-only/finalization loop.
 - Do not pass vague user wording directly into the council docs.
@@ -96,6 +118,7 @@ Then load only the references needed for the chosen route:
   - prompt/system-design consequences that must not be improvised in code
 - When the current run or prior findings include a blocker, timeout, or stall report, normalize that report into the strongest evidence-backed form rather than passing through a guessed root cause. Prefer the narrowest proven claim.
 - Before `prepare`, `start`, or `reopen` on a user-authored council brief, validate the docs with 3 to 5 parallel sub-reviewers whose only job is to critique clarity, completeness, scope control, and compliance with the Codex Council loop requirements.
+- Do not run this sub-reviewer brief-validation loop for live PR bridge requests unless the user explicitly asks for a local Council brief.
 - Those sub-reviewers should propose improvements, point out ambiguity, and challenge any place where the generator or reviewer would still need to invent policy.
 - Do not launch the council until that sub-reviewer loop converges and all of them agree the docs are ready.
 - Do not launch `prepare`, `start`, `continue`, or `reopen` and then abandon the supervisor process.
@@ -113,7 +136,7 @@ Choose the route by four axes:
 3. Execution review source: Normal Internal Council or GitHub PR Codex Bridge.
 4. Post-approval audit add-on: none, or Internal Council With Outer Audit.
 
-PR preflight wins before normal request classification: existing PR URLs, PR numbers, "this PR", and "the pull request" default to the GitHub PR Codex Bridge unless the user explicitly asks for the internal generator/reviewer execution loop.
+PR preflight wins before normal request classification: existing PR URLs, PR numbers, "this PR", and "the pull request" route exclusively to the GitHub PR Codex Bridge unless the user explicitly asks for the internal generator/reviewer execution loop.
 
 Use [`references/routing.md`](./references/routing.md) for the exact mapping from request shape to docs and commands.
 
@@ -161,7 +184,7 @@ When using `prepare`, `start`, `continue`, or `reopen`, also read [`references/s
 - Exception: when the user explicitly asks you to write the council brief/spec/instructions, always produce `task.md`, `review.md`, `spec.md`, and `contract.md` together.
 - For spec-driven work, require a contract that mirrors the major `M*` sections in `spec.md` with top-level `M#` items and explicit nested `M#.A#` checkable sub-points for every acceptance criterion.
 - Task-local `AGENTS.md` stays behavioral and stable; do not put task-specific requirements there.
-- GitHub PR Codex Bridge special case: when the user already has a PR and wants GitHub Codex to review the live branch, local `task.md` / `review.md` / `spec.md` may be omitted if the PR and current-head review findings already form a usable brief.
+- GitHub PR Codex Bridge special case: when the user already has a PR and wants GitHub Codex to review the live branch, omit local `task.md`, `review.md`, `spec.md`, and `contract.md` by default. Create or use them only if the user explicitly asks for a local Council brief or the internal generator/reviewer loop.
 - Strong default: user wording like “use Codex Council on this PR”, “work on PR #123”, or a pasted GitHub PR URL should be interpreted as a request for `github_pr_codex` unless they explicitly ask for the internal generator/reviewer execution loop instead.
 - `branch_northstar_summary.md` is optional supporting context for branch/worktree intent in that PR-driven mode.
 

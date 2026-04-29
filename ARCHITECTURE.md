@@ -7,10 +7,12 @@ This document describes the system model of Codex Council as a harness for outer
 The system must allow an outer coding agent to:
 
 1. interpret weak or strong user intent
-2. synthesize strong canonical task documents
-3. launch a generator/reviewer council safely
-4. preserve source-of-truth artifacts across pauses and resumes
-5. stop only on explicit approval, blocker, or human intervention
+2. select the correct source of truth before any doc authoring
+3. use a live PR plus current-head GitHub Codex findings for PR work
+4. synthesize strong canonical task documents for local Council work
+5. launch the selected execution route safely
+6. preserve source-of-truth artifacts across pauses and resumes
+7. stop only on explicit approval, blocker, or human intervention
 
 ## Layered Model
 
@@ -20,18 +22,21 @@ The harness is intentionally layered.
 User
   -> Outer agent
     -> codex-council skill
-      -> optional Planning Preparation
-        -> prepare (planner / intent critic planning loop when needed)
-      -> Canonical docs in target repo
-        -> codex_tui_supervisor.py
-          -> execution review source:
+      -> Rule 0 live PR preflight
+        -> GitHub PR Codex Bridge
+          -> PR plus current-head GitHub Codex findings as the brief
+          -> no planner/critic or local canonical docs by default
+          -> preserve #pullrequestreview-<id> when present
+      -> otherwise, local Council routing
+        -> optional Planning Preparation
+          -> prepare (planner / intent critic planning loop when needed)
+        -> Canonical docs in target repo
+          -> codex_tui_supervisor.py
             -> Normal Internal Council
               -> generator / reviewer role sessions
               -> optional Internal Council With Outer Audit after approval
-            -> GitHub PR Codex Bridge
-              -> generator role session / GitHub PR Codex review findings
-          -> turn artifacts
-            -> status / continue / reopen / approval
+            -> turn artifacts
+              -> status / continue / reopen / approval
 ```
 
 ### User
@@ -53,7 +58,8 @@ Its responsibilities:
 - classify the request
 - inspect the target repo and current `.codex-council` state
 - decide whether to answer directly, start a run, continue a run, or reopen an approved run
-- synthesize the right canonical documents
+- for live PRs, use the GitHub PR Codex Bridge and omit local canonical docs by default
+- synthesize the right canonical documents for local Council work
 - ask only the minimum blocking questions
 
 Its non-responsibilities:
@@ -87,7 +93,7 @@ The skill should route by four independent axes rather than one overloaded mode 
 | Execution review source | Normal Internal Council, GitHub PR Codex Bridge |
 | Post-approval audit add-on | none, Internal Council With Outer Audit |
 
-Live PR wording is a preflight: if the user names an existing PR URL, PR number, or "this PR", the default execution review source is the GitHub PR Codex Bridge unless the user explicitly asks for the internal generator/reviewer execution loop.
+Live PR wording is an exclusive preflight: if the user names an existing PR URL, PR number, PR review permalink, or "this PR", the execution review source is the GitHub PR Codex Bridge unless the user explicitly asks for the internal generator/reviewer execution loop. Do not run planner/critic or local canonical-doc authoring for live PRs by default. If the URL contains `#pullrequestreview-<id>`, preserve that id as the target review.
 
 ### Planning preparation
 

@@ -1,8 +1,27 @@
 # Routing
 
+## Rule 0: Live PR Preflight
+
+Live PR preflight is exclusive and runs before every other rule.
+
+If the user says "PR", "pull request", "this PR", "current PR", "work on this PR", gives a PR URL/number, gives a URL with `#pullrequestreview-<id>`, mentions `@codex`, or asks about GitHub/Codex PR review comments, route exclusively to the GitHub PR Codex Bridge.
+
+For a live PR:
+
+- use GitHub PR Codex Bridge only
+- do not run Normal Internal Council
+- do not run planner/critic
+- do not create `task.md`, `review.md`, `spec.md`, or `contract.md`
+- do not translate PR comments into a local brief
+- do not start a local generator/reviewer loop
+- if no current-head GitHub Codex review exists, request or wait for `@codex`; do not invent generator work
+- if the URL contains `#pullrequestreview-<id>`, preserve that id as the target review and verify the consumed GitHub Codex review id matches before continuing
+
+Only override this route when the user explicitly requests the Normal Internal Council, the internal generator/reviewer execution loop, planner/critic preparation, a local Council brief, or outer-review audit.
+
 ## Primary Rule
 
-Choose a route by four independent axes before you write files or run commands.
+If live PR preflight did not match, choose a route by four independent axes before you write files or run commands.
 
 The correct route determines:
 
@@ -27,7 +46,10 @@ Canonical runtime names:
   - local `generator` plus local `reviewer`
   - default `--review-mode internal`
 - **GitHub PR Codex Bridge**
-  - local `generator` plus GitHub PR Codex review findings
+  - GitHub PR Codex is the review source
+  - the PR and current-head GitHub Codex findings are the only brief by default
+  - this is not the Normal Internal Council generator/reviewer loop
+  - any local fixing step is a PR-findings worker step, not a new Council execution loop
   - selected on `start` with `--review-mode github_pr_codex`
 - **Internal Council With Outer Audit**
   - Normal Internal Council plus `--outer-review-fork-session-id`
@@ -46,15 +68,22 @@ Before applying the normal request classes, check whether the user named an exis
 - "work on PR #123"
 - "continue this PR until Codex has no more major comments"
 
-If yes, default to the GitHub PR Codex Bridge:
+If yes, route exclusively to the GitHub PR Codex Bridge:
 
 - start new PR runs with `--review-mode github_pr_codex`
 - pass `--github-pr <url-or-number>` when known
 - treat the PR plus current-head GitHub Codex findings as the effective brief
-- if the current PR head has no Codex request or findings yet and there are no concrete local docs or fork context, the reviewer bridge should post `@codex` and wait before generator work begins
-- do not seed `review.md` or `contract.md` just to copy PR findings
+- if the current PR head has no Codex request or findings yet, the PR bridge should post `@codex` and wait before generator work begins
+- do not create `task.md`, `review.md`, `spec.md`, or `contract.md` just to hold the PR URL or copy PR findings
 - do not use the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
 - add `branch_northstar_summary.md` only when branch intent needs durable local context
+
+PR review permalink rule:
+
+- if the user gives a URL with `#pullrequestreview-<id>`, preserve that id as the target review
+- pass the base PR URL to `--github-pr` if the CLI requires it
+- do not drop the fragment silently in the route summary, run artifacts, or operator notes
+- before continuing implementation, verify the consumed GitHub Codex review id matches the target id
 
 For existing PR-bridge runs, use `continue` without `--review-mode`; the review source is stored in the run state.
 
@@ -62,7 +91,7 @@ For existing PR-bridge runs, use `continue` without `--review-mode`; the review 
 
 | User request | Route | Command shape |
 | --- | --- | --- |
-| Existing PR / PR URL / "this PR" | GitHub PR Codex Bridge | `start --review-mode github_pr_codex --github-pr ...` |
+| Existing PR / PR URL / PR review permalink / "this PR" | GitHub PR Codex Bridge | `start --review-mode github_pr_codex --github-pr ...` |
 | Pasted review notes, no live PR | Normal Internal Council findings fix | `review.md` + `contract.md` + `start` |
 | Concrete bug/feature, no PR | Normal Internal Council | `task.md` + `contract.md` + `start` |
 | Broad/vague/agentic work | Planning Preparation first | `prepare`, then `start` |
@@ -150,7 +179,7 @@ Default docs:
 Optional:
 
 - add `task.md` only when a short brief materially clarifies what the generator should do
-- if the findings already live on an existing PR and the operator is using the GitHub PR Codex Bridge, local `review.md` can be omitted and the PR review findings can drive the loop directly
+- if the findings already live on an existing PR, PR preflight wins: use the GitHub PR Codex Bridge and omit local canonical docs by default
 - add `branch_northstar_summary.md` when the branch/worktree intent needs durable context without promoting that context into `task.md`
 - for Internal Council With Outer Audit, findings that invalidate an earlier approval should update canonical `review.md` and route through `reopen --reason-kind false_approved`, not through `continue`
 

@@ -13,7 +13,9 @@ It is the default brief for:
 
 GitHub PR Codex Bridge exception:
 
-- when the operator already has an existing PR and wants the GitHub PR Codex Bridge to drive the work, `task.md` can be omitted if the PR plus current-head review findings already provide a concrete brief
+- for GitHub PR Codex Bridge, omit `task.md` by default
+- create or use `task.md` only when the user explicitly requests a local Council brief or the internal generator/reviewer loop
+- the PR plus current-head GitHub Codex findings are the execution input; optional branch intent belongs in `branch_northstar_summary.md`, not in `task.md`
 
 Planning-stage note:
 

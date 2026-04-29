@@ -6287,6 +6287,9 @@ reviewer_reset_mode = "wrong"
             self.assertIn("start --review-mode github_pr_codex --github-pr", docs[key])
 
         combined = "\n".join(docs.values())
+        self.assertIn("Rule 0: Live PR", combined)
+        self.assertIn("#pullrequestreview-<id>", combined)
+        self.assertIn("do not run planner/critic", combined)
         self.assertIn("Internal Council With Outer Audit", combined)
         self.assertIn("not compatible with `github_pr_codex`", combined)
         self.assertNotIn("Five Operating Modes", combined)

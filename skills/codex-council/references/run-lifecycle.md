@@ -95,10 +95,12 @@ python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start pr-123 \
 Rules:
 
 - `--review-mode github_pr_codex` is a `start` flag, not a `continue` flag
-- PR plus current-head GitHub review findings act as the effective brief
-- when a PR-bridge run starts without local docs or fork context, the reviewer bridge runs first so it can post or wait on `@codex` before generator work begins
-- local `task.md`, `review.md`, or `spec.md` may be omitted when the PR context is enough
+- PR plus current-head GitHub Codex review findings are the only brief by default
+- if no current-head GitHub Codex review exists, the PR bridge posts or waits on `@codex` before generator work begins
+- omit local `task.md`, `review.md`, `spec.md`, and `contract.md` by default
+- do not run planner/critic or the Normal Internal Council unless the user explicitly asks for that route
 - `branch_northstar_summary.md` is optional supporting context when the branch/worktree intent needs to be stated explicitly
+- if the user gave a `#pullrequestreview-<id>` URL, preserve that id as the target review and verify the consumed GitHub Codex review id matches before continuing
 - do not add outer-review flags; the GitHub PR Codex Bridge is not compatible with Internal Council With Outer Audit
 
 ### Start: Normal Internal Council
@@ -178,7 +180,7 @@ Prefer `continue` over a new run when:
 - the run paused for `needs_human`
 - the reviewer returned `changes_requested`
 - the human edited task docs and wants the same run to proceed
-- the run is blocked in the GitHub PR Codex Bridge and should resume the same reviewer-bridge turn
+- the run is blocked in the GitHub PR Codex Bridge and should resume the same PR bridge turn
 - the run is paused for outer-review finalization and the persistent outer-review audit agent already finalized canonical `review.md`
 
 ```bash
@@ -202,7 +204,7 @@ Internal outer-review audit special case:
 
 GitHub PR Codex Bridge special case:
 
-- a blocked reviewer bridge should usually resume on the same turn
+- a blocked PR bridge should usually resume on the same turn
 - do not pass `--review-mode` to `continue`; the review source is stored in the run state
 - if the latest pushed head has no matching `@codex` request, a correct resume path should post a fresh literal `@codex` rather than reusing an older request from a previous head
 

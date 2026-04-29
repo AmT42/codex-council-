@@ -14,8 +14,9 @@ Common triggers:
 
 GitHub PR Codex Bridge note:
 
-- a PR-driven run can still omit `spec.md` entirely when the PR plus current-head review findings are specific enough
-- add `spec.md` only when the branch/worktree change remains too broad to execute safely from the PR context alone
+- for GitHub PR Codex Bridge, omit `spec.md` by default
+- create or use `spec.md` only when the user explicitly requests a local Council brief or the internal generator/reviewer loop
+- the PR plus current-head GitHub Codex findings are the execution input; optional branch intent belongs in `branch_northstar_summary.md`, not in `spec.md`
 
 Planning-stage note:
 

@@ -8,7 +8,7 @@ It is built for a world where the user often talks to an **outer coding agent** 
 - a novice user who describes the problem poorly
 - a reviewer or operator who needs to resume an existing run safely
 
-The goal of this repo is not just to run two Codex sessions. The goal is to give the outer agent enough structure, rules, and artifacts to reliably turn messy human input into a strong engineering brief, then execute that brief through a generator/reviewer council that can be resumed and audited.
+The goal of this repo is not just to run two Codex sessions. The goal is to give the outer agent enough structure to select the right source of truth first: live PR plus current-head GitHub Codex findings for PR work, or canonical Council docs for local Council work. Only local Council work executes through the Normal Internal Council generator/reviewer loop.
 
 The current runtime lives in [`scripts/codex_tui_supervisor.py`](./scripts/codex_tui_supervisor.py). The recommended outer-agent entrypoint is the [`codex-council` skill](./skills/codex-council/SKILL.md). The main agent operating manual is [`INSTRUCTS.md`](./INSTRUCTS.md). The system reference is [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
@@ -28,8 +28,9 @@ Codex Council is designed to counter those failure modes.
 
 It does that by combining:
 
-- canonical task documents inside the target repo
-- a generator/reviewer runtime with structured artifacts
+- live PR routing where GitHub Codex is the review source and local canonical docs are omitted by default
+- canonical task documents inside the target repo for local Council work
+- a local generator/reviewer runtime with structured artifacts
 - an outer-agent skill that decides how to frame the work before launch
 - an approval layer centered on `contract.md`
 - artifact-driven `continue` rather than guessing from stale state
@@ -53,9 +54,11 @@ When a user asks an outer agent to **use this repo or harness** for some task, t
 
 That means:
 
-- the outer agent should scaffold or update the canonical council docs
-- then `prepare`, `start`, `continue`, or `reopen` the harness as appropriate
-- and let the generator/reviewer council do the actual target-repo implementation work
+- the outer agent first selects the route and source of truth
+- for live PRs, it uses the GitHub PR Codex Bridge without local canonical docs unless explicitly requested
+- for local Council work, it scaffolds or updates canonical council docs
+- then it runs `prepare`, `start`, `continue`, or `reopen` as appropriate
+- and lets the selected harness route do the target-repo implementation or PR-findings work
 
 It must **not**:
 
@@ -248,7 +251,9 @@ Canonical runtime names:
   - local `generator` plus local `reviewer`
   - default `--review-mode internal`
 - **GitHub PR Codex Bridge**
-  - local `generator` plus GitHub PR Codex review findings
+  - GitHub PR Codex is the review source
+  - the PR and current-head GitHub Codex findings are the only brief by default
+  - this is not the Normal Internal Council generator/reviewer loop
   - selected on `start` with `--review-mode github_pr_codex`
 - **Internal Council With Outer Audit**
   - Normal Internal Council plus `--outer-review-fork-session-id`
@@ -261,20 +266,21 @@ Canonical runtime names:
 
 Before applying the normal request classes, check whether the user named an existing GitHub PR by URL, PR number, or wording like "this PR", "the pull request", or "work on PR #123".
 
-If yes, route to the GitHub PR Codex Bridge by default:
+If yes, route exclusively to the GitHub PR Codex Bridge:
 
 - start the run with `--review-mode github_pr_codex`
 - pass `--github-pr <url-or-number>` when known
 - treat the PR plus current-head GitHub Codex findings as the effective brief
-- if the current PR head has no Codex request or findings yet and there are no concrete local docs or fork context, the reviewer bridge should post `@codex` and wait before generator work begins
-- do not seed `review.md` or `contract.md` just to copy PR findings
+- if the current PR head has no Codex request or findings yet, the PR bridge should post `@codex` and wait before generator work begins
+- do not create `task.md`, `review.md`, `spec.md`, or `contract.md` just to hold the PR URL or copy PR findings
 - do not use the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
+- if the URL has `#pullrequestreview-<id>`, preserve that id as the target review; pass the base PR URL to `--github-pr` if needed, but do not drop the review id silently
 
 Quick route table:
 
 | User request | Route | Command shape |
 | --- | --- | --- |
-| Existing PR / PR URL / "this PR" | GitHub PR Codex Bridge | `start --review-mode github_pr_codex --github-pr ...` |
+| Existing PR / PR URL / PR review permalink / "this PR" | GitHub PR Codex Bridge | `start --review-mode github_pr_codex --github-pr ...` |
 | Pasted review notes, no live PR | Normal Internal Council findings fix | `review.md` + `contract.md` + `start` |
 | Concrete bug/feature, no PR | Normal Internal Council | `task.md` + `contract.md` + `start` |
 | Broad/vague/agentic work | Planning Preparation first | `prepare`, then `start` |
@@ -316,7 +322,7 @@ Use when the user provides review comments, logs, repro notes, or debugging find
 - default to `review.md` + `contract.md`
 - add `task.md` only if it materially clarifies the implementation target
 - pasted or off-PR findings use the Normal Internal Council by default
-- live PR findings use the GitHub PR Codex Bridge by default unless the user explicitly requests the internal generator/reviewer execution loop
+- live PR findings are handled exclusively by PR preflight: use the GitHub PR Codex Bridge, omit local canonical docs by default, and do not use the internal generator/reviewer execution loop unless explicitly requested
 
 ### 5. Broad feature or spec work
 
@@ -508,23 +514,23 @@ The public CLI stays intentionally small:
 - `reopen`
   - supersede an approved run with a fresh run linked back to the historical approval
 
-The outer-agent skill should orchestrate those commands rather than inventing a parallel interface. For strong agents, that usually means using `init`, then editing the canonical files directly, then calling `prepare` for broad work or `start` for concrete execution, and later `continue` or `reopen` as appropriate. `write` remains available as a convenience command, not the primary authoring path for agents.
+The outer-agent skill should orchestrate those commands rather than inventing a parallel interface. For live PRs, that means `init` if needed, then `start --review-mode github_pr_codex --github-pr ...` with no local canonical docs by default. For local Council work, strong agents usually use `init`, then editing the canonical files directly, calling `prepare` for broad work or `start` for concrete execution, and later `continue` or `reopen` as appropriate. `write` remains available as a convenience command, not the primary authoring path for agents.
 
 ## Runtime Notes
 
 The TUI supervisor:
 
 - resolves the target directory to its git root by default
-- launches generator and reviewer `codex` sessions in `tmux`
+- launches local role `codex` sessions in `tmux` as needed
 - writes role-scoped prompts, messages, statuses, and terminal summaries per turn
 - advances turns only when the expected artifact pairs exist and validate
 - prefers artifact-driven `continue` over stale run metadata
 - keeps `continue` terminal for approved runs and requires explicit `reopen` to supersede them
 - can bootstrap from forked session context when local task docs are missing
 - validates task documents before `start`
-- can start the GitHub PR Codex Bridge without local `task.md`, `review.md`, or `spec.md`; without local docs or fork context it starts reviewer-bridge-first so it can request or wait on `@codex`
+- can start the GitHub PR Codex Bridge without local `task.md`, `review.md`, `spec.md`, or `contract.md`; without local docs or fork context it requests or waits on `@codex` before generator work begins
 - materializes current-head GitHub review findings into turn-scoped review input artifacts for the generator
-- resumes blocked `github_pr_codex` reviewer turns on the same turn instead of forcing a new turn
+- resumes blocked `github_pr_codex` PR bridge turns on the same turn instead of forcing a new turn
 - can add an Internal Council With Outer Audit layer driven by a persistent `codex fork` outer-review audit agent in tmux
 - keeps approved internal runs terminal for `continue`, but can write durable outer-review handoff/finalization artifacts around that approval lifecycle
 

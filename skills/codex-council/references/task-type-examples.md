@@ -53,7 +53,22 @@ Route:
 - execution review source: GitHub PR Codex Bridge
 - docs: PR and current-head GitHub Codex review findings are the effective brief; add `branch_northstar_summary.md` only if branch intent needs durable local context
 - commands: `init` if needed, then `start --review-mode github_pr_codex --github-pr <pr-url>`
-- do not default to the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
+- do not run planner/critic, create local canonical docs, or default to the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
+
+## Existing PR review permalink
+
+User:
+
+> Rerun a new PR loop on https://github.com/org/repo/pull/87#pullrequestreview-123
+
+Route:
+
+- PR preflight: yes
+- execution review source: GitHub PR Codex Bridge
+- target review id: `123`; preserve it in the route summary and verify the consumed GitHub Codex review id matches before continuing
+- docs: none by default; do not translate the review permalink into `review.md`
+- commands: `init` if needed, then `start --review-mode github_pr_codex --github-pr https://github.com/org/repo/pull/87`
+- do not run planner/critic, Normal Internal Council, `task.md`, `review.md`, `spec.md`, `contract.md`, or a locally invented generator/reviewer loop
 
 ## Existing PR but Normal Internal Council requested
 

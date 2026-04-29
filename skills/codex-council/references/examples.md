@@ -52,7 +52,22 @@ Route:
 - execution review source: GitHub PR Codex Bridge
 - docs: none by default; optional `branch_northstar_summary.md` only if branch intent is unclear
 - commands: `init` if needed, then `start --review-mode github_pr_codex --github-pr <pr-url>`
-- note: do not copy PR findings into `review.md` unless the user explicitly asks for the internal generator/reviewer execution loop
+- note: do not run planner/critic, create local canonical docs, or copy PR findings into `review.md` unless the user explicitly asks for the internal generator/reviewer execution loop
+
+## Example: live PR review permalink
+
+User:
+
+> Rerun a new PR loop on https://github.com/org/repo/pull/87#pullrequestreview-123
+
+Route:
+
+- PR preflight: yes
+- execution review source: GitHub PR Codex Bridge
+- target review id: `123`; preserve it in the route summary and verify the consumed GitHub Codex review id matches before continuing
+- docs: none by default
+- commands: `init` if needed, then `start --review-mode github_pr_codex --github-pr https://github.com/org/repo/pull/87`
+- note: no planner/critic, no Normal Internal Council, no `task.md` / `review.md` / `spec.md` / `contract.md`, and no locally invented generator/reviewer loop
 
 ## Example: broad feature work
 

@@ -10,6 +10,12 @@ Skip it only when the request is:
 - effectively one-step
 - or direct-answer-only
 
+GitHub PR Codex Bridge exception:
+
+- omit `contract.md` by default for live PR bridge runs
+- create or use `contract.md` only when the user explicitly requests a local Council brief or the internal generator/reviewer loop
+- the approval signal for live PR bridge runs is the PR plus current-head GitHub Codex findings, not a locally authored checklist
+
 ## Purpose
 
 `contract.md` gives the reviewer an auditable definition of done.

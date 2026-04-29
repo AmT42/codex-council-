@@ -14,7 +14,9 @@ Typical triggers:
 
 GitHub PR Codex Bridge exception:
 
-- when the findings already live on the PR and the operator is running the GitHub PR Codex Bridge directly, those findings may be materialized into turn-scoped GitHub review input artifacts instead of a canonical `review.md`
+- for GitHub PR Codex Bridge, omit `review.md` by default
+- create or use `review.md` only when the user explicitly requests a local Council brief or the internal generator/reviewer loop
+- when findings already live on the PR, the PR bridge materializes them into turn-scoped GitHub review input artifacts instead of canonical `review.md`
 - `review.md` is canonical findings input for the Normal Internal Council; it is not `turns/.../reviewer/message.md`, it is not the GitHub PR review source in `github_pr_codex`, and it is not the place for broad product requirements
 
 ## Writing rules

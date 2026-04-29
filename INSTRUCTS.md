@@ -40,12 +40,13 @@ If the user says “use this repo to add feature X”, interpret that as:
 - `council-agent` is the tool you must operate
 - your first move is to prepare the council run, not to code the feature directly
 
-If the user points at an existing GitHub PR and says “use Codex Council on this PR” or equivalent, interpret that as:
+If the user points at an existing GitHub PR and says “use Codex Council on this PR” or equivalent, interpret that as an exclusive live-PR route:
 
-- they want the GitHub PR Codex Bridge by default
-- the correct default route is `--review-mode github_pr_codex`
+- they want the GitHub PR Codex Bridge exclusively
+- the correct route is `--review-mode github_pr_codex`
 - the PR and current-head GitHub Codex findings are the effective brief unless the user explicitly asks for a stronger local brief
-- do not default to the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
+- do not run the Normal Internal Council, planner/critic, local generator/reviewer loop, or canonical-doc authoring unless the user explicitly asks for it
+- if the URL has `#pullrequestreview-<id>`, preserve that id as the target review and verify the consumed GitHub Codex review id matches before continuing
 
 ## Non-Negotiable Process Boundary
 
@@ -215,7 +216,7 @@ Choose a route by four independent axes before taking action:
 Canonical runtime names:
 
 - **Normal Internal Council**: local `generator` plus local `reviewer`, default `--review-mode internal`.
-- **GitHub PR Codex Bridge**: local generator plus GitHub PR Codex review findings, selected on `start` with `--review-mode github_pr_codex`.
+- **GitHub PR Codex Bridge**: GitHub PR Codex is the review source; the PR and current-head GitHub Codex findings are the only brief by default; this is not the Normal Internal Council generator/reviewer loop.
 - **Internal Council With Outer Audit**: Normal Internal Council plus `--outer-review-fork-session-id`; additive post-approval audit only, not a review mode, and not compatible with `github_pr_codex`.
 - **Planning Preparation**: planner plus intent critic via `prepare`; a preparation lane before execution, not an execution review source.
 
@@ -223,14 +224,15 @@ Canonical runtime names:
 
 Before applying the normal request classes, check whether the user named an existing GitHub PR by URL, PR number, or wording like “this PR”, “the pull request”, or “work on PR #123”.
 
-If yes, route to the GitHub PR Codex Bridge by default:
+If yes, route exclusively to the GitHub PR Codex Bridge:
 
 - start the run with `--review-mode github_pr_codex`
 - pass `--github-pr <url-or-number>` when known
 - treat the PR plus current-head GitHub Codex findings as the effective brief
-- if the current PR head has no Codex request or findings yet and there are no concrete local docs or fork context, the reviewer bridge should post `@codex` and wait before generator work begins
-- do not seed `review.md` or `contract.md` just to copy PR findings
+- if the current PR head has no Codex request or findings yet, the PR bridge should post `@codex` and wait before generator work begins
+- do not create `task.md`, `review.md`, `spec.md`, or `contract.md` just to hold the PR URL or copy PR findings
 - do not use the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
+- if the URL has `#pullrequestreview-<id>`, preserve that id as the target review; pass the base PR URL to `--github-pr` if needed, but do not drop the review id silently
 
 Quick route table:
 
@@ -305,12 +307,12 @@ Use this for:
 
 Behavior:
 
-- default document set: `review.md` + `contract.md`
-- live PR findings are handled by PR preflight; default to the GitHub PR Codex Bridge and let the PR plus current-head review findings drive the loop
+- default document set for pasted or off-PR findings: `review.md` + `contract.md`
+- live PR findings are handled exclusively by PR preflight; use the GitHub PR Codex Bridge, omit local canonical docs by default, and let the PR plus current-head GitHub Codex findings drive the loop
 - add `task.md` only if a short brief materially improves generator intent
-- run `start` once the docs are ready
+- run `start` once the selected route input is ready
 - do not bypass the council by fixing the findings yourself unless the user explicitly switched tasks and asked you to modify the target repo directly
-- if the findings are already living on an existing PR and the operator is using the GitHub PR Codex Bridge, local `review.md` is optional; prefer `branch_northstar_summary.md` only when the branch/worktree intent would otherwise be underspecified
+- if the findings are already living on an existing PR, do not translate them into `review.md` unless the user explicitly requested a local Council brief or internal generator/reviewer loop
 
 ### 5. Broad feature or spec work
 
