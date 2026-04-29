@@ -107,20 +107,19 @@ Then load only the references needed for the chosen route:
 - Internal Council With Outer Audit is additive, not a separate review mode: it uses `--outer-review-fork-session-id` on `start` to create a persistent forked `outer_review` tmux agent, sends that agent only one final approved-run audit request, and re-enters only through `reopen --reason-kind false_approved` before the triage-only/finalization loop.
 - Do not pass vague user wording directly into the council docs.
 - Do not do the target-repo implementation work yourself when the harness is the requested tool.
-- For broad/spec-driven/vague/agentic work, run a planning stage before locking execution docs.
+- For broad/spec-driven/vague/agentic work, prefer a planning stage before locking execution docs.
 - In that planning stage, use the planner to author docs and the intent critic to reject weak or non-faithful drafts before execution begins.
 - For broad/spec-driven work, do not stop at architecture shape. Write a **decision-complete** `spec.md` that covers the relevant runtime, state, fallback, performance, and validation consequences so the generator does not need to invent policy.
-- For broad/spec-driven work, make `contract.md` a precise approval projection of `spec.md`, not a short paraphrase. Use one top-level `M#` item per major spec section and one cited `M#.A#` sub-check per acceptance criterion so the reviewer cannot mark the section satisfied while any linked acceptance criterion still fails.
+- For broad/spec-driven work, prefer `contract.md` as a precise approval projection of `spec.md`, not a short paraphrase. One top-level `M#` item per major spec section and one cited `M#.A#` sub-check per acceptance criterion is the recommended convention.
 - When the task is agentic, workflow-driven, or prompt-sensitive, make the brief explicit about:
   - the primary user-facing path or intent
   - any maintenance/background/curation paths
   - forbidden substitutions between those paths
   - prompt/system-design consequences that must not be improvised in code
 - When the current run or prior findings include a blocker, timeout, or stall report, normalize that report into the strongest evidence-backed form rather than passing through a guessed root cause. Prefer the narrowest proven claim.
-- Before `prepare`, `start`, or `reopen` on a user-authored council brief, validate the docs with 3 to 5 parallel sub-reviewers whose only job is to critique clarity, completeness, scope control, and compliance with the Codex Council loop requirements.
-- Do not run this sub-reviewer brief-validation loop for live PR bridge requests unless the user explicitly asks for a local Council brief.
+- For high-risk or especially ambiguous user-authored briefs, you may ask 3 to 5 parallel sub-reviewers to critique clarity, completeness, scope control, and compliance with the Codex Council loop requirements.
+- Do not run this optional sub-reviewer brief-validation loop for live PR bridge requests unless the user explicitly asks for a local Council brief.
 - Those sub-reviewers should propose improvements, point out ambiguity, and challenge any place where the generator or reviewer would still need to invent policy.
-- Do not launch the council until that sub-reviewer loop converges and all of them agree the docs are ready.
 - Do not launch `prepare`, `start`, `continue`, or `reopen` and then abandon the supervisor process.
 - This is a process-lifetime rule, not a special built-in Codex background feature.
 - A plain foreground command is fine only when you will stay attached and wait for the supervisor.
@@ -182,7 +181,7 @@ When using `prepare`, `start`, `continue`, or `reopen`, also read [`references/s
 - `spec.md` is only for work that needs deeper structure than a short task brief.
 - `contract.md` is the default acceptance and approval checklist for most non-trivial runs.
 - Exception: when the user explicitly asks you to write the council brief/spec/instructions, always produce `task.md`, `review.md`, `spec.md`, and `contract.md` together.
-- For spec-driven work, require a contract that mirrors the major `M*` sections in `spec.md` with top-level `M#` items and explicit nested `M#.A#` checkable sub-points for every acceptance criterion.
+- For spec-driven work, prefer a contract that mirrors the major `M*` sections in `spec.md` with top-level `M#` items and explicit nested `M#.A#` checkable sub-points for every acceptance criterion.
 - Task-local `AGENTS.md` stays behavioral and stable; do not put task-specific requirements there.
 - GitHub PR Codex Bridge special case: when the user already has a PR and wants GitHub Codex to review the live branch, omit local `task.md`, `review.md`, `spec.md`, and `contract.md` by default. Create or use them only if the user explicitly asks for a local Council brief or the internal generator/reviewer loop.
 - Strong default: user wording like “use Codex Council on this PR”, “work on PR #123”, or a pasted GitHub PR URL should be interpreted as a request for `github_pr_codex` unless they explicitly ask for the internal generator/reviewer execution loop instead.

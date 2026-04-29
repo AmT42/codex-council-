@@ -138,7 +138,7 @@ The preferred route is a planning stage:
 - intent critic checks whether those docs are faithful to the real intent and strong enough for execution
 - only after that review passes should the execution docs be treated as locked inputs for the generator/reviewer loop
 
-When a run uses `spec.md`, the planning target is now explicit:
+When a run uses `spec.md`, a useful planning convention is:
 
 - `spec.md` should break approval-critical behavior into major `M#` sections
 - each `M#` section should contain labeled acceptance criteria such as `A1`, `A2`, `A3`
@@ -212,9 +212,9 @@ Canonical documents:
 - `review.md`
   - findings input for debugging, review-driven work, and external comments
 - `spec.md`
-  - detailed design when `task.md` alone would be too ambiguous; for spec-driven work it should use major `M#` sections with labeled acceptance criteria
+  - detailed design when `task.md` alone would be too ambiguous; major `M#` sections with labeled acceptance criteria are recommended for spec-driven work
 - `contract.md`
-  - default acceptance and approval checklist for most non-trivial runs; for spec-driven work it should mirror `spec.md` with top-level `M#` items and nested `M#.A#` sub-checks
+  - default acceptance and approval checklist for most non-trivial runs; mirroring `spec.md` with top-level `M#` items and nested `M#.A#` sub-checks is recommended for spec-driven work
 - `AGENTS.md`
   - stable council behavior only, not feature requirements
 
@@ -452,7 +452,7 @@ For Normal Internal Council execution only:
 python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo
 ```
 
-`start` validates the current canonical docs directly. An existing planning run is recommended guidance, not a hard prerequisite.
+`start` requires at least one usable local doc for Normal Internal Council routes. Present canonical docs must be non-empty and must not be scaffold placeholders. An existing planning run is recommended guidance, not a hard prerequisite.
 
 For Internal Council With Outer Audit:
 

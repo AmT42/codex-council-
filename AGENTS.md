@@ -45,7 +45,7 @@ The council workspace inside a target repo is:
 - `.codex-council/<task_name>/intent_critic.instructions.md`
   - planning-critic additions for `prepare`
 - `.codex-council/<task_name>/spec-contract-linking-example.md`
-  - task-local worked example for the spec→acceptance criteria→contract model
+  - task-local worked example for the spec→acceptance criteria→contract convention
 - `.codex-council/<task_name>/planning-runs/`
   - auditable planning-loop artifacts separate from execution `runs/`
 
@@ -106,18 +106,15 @@ Important runtime files:
 - Do not modify external target repos while working on this harness unless the user explicitly asks for that.
 - Do not treat test repos like `/Users/amt42/projects/test-git` as part of this repo.
 - Do not put feature requirements into scaffold `AGENTS.md`.
-- Do not accept vague `contract.md` language as sufficient definition of done.
+- Prefer concrete `contract.md` language when authoring or reviewing council briefs.
 - Do not keep `changes_requested` alive for non-auditable business aspirations; that should become `needs_human`.
 - Do not let invalid artifacts silently time out if they can be surfaced or repaired.
 - Do not change runtime behavior without updating templates and tests in the same batch.
 
 ## Current Design Expectations
 
-- `task.md` is titled `# Task`.
-- `review.md` is titled `# Review`.
-- `spec.md` is titled `# Spec`.
-- `contract.md` is titled `# Definition of Done`.
-- `start` validates whichever of those documents are present before launching.
+- Canonical docs are detected by filename: `task.md`, `review.md`, `spec.md`, and `contract.md`.
+- `start` requires usable local docs for Normal Internal Council routes; present docs must be non-empty and must not be scaffold placeholders.
 - `continue` is artifact-driven and session-aware.
 - If a live tmux role session exists, prefer reusing it.
 - If the tmux session is gone, prefer resuming the same Codex conversation when a tracked session id is available.

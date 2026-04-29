@@ -16,7 +16,7 @@ import textwrap
 import time
 import tomllib
 import uuid
-from typing import Literal, cast
+from typing import Literal
 
 
 COUNCIL_DIRNAME = ".codex-council"
@@ -127,14 +127,9 @@ TMUX_CAPTURE_HISTORY_LINES = 1000
 ROLE_ARTIFACT_POLL_SECONDS = 1.0
 TASK_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 GITHUB_PR_URL_RE = re.compile(r"^https?://[^/]+/([^/]+)/([^/]+)/pull/([0-9]+)(?:/.*)?$")
+GITHUB_PR_REVIEW_FRAGMENT_RE = re.compile(r"(?:^|#)pullrequestreview-([0-9]+)(?:$|[/?#].*)")
 CHECKLIST_ITEM_RE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+\S")
 REVIEW_ITEM_RE = re.compile(r"^\s*[-*]\s+\S")
-SPEC_MAJOR_SECTION_RE = re.compile(r"^##\s+(M\d+)\.\s+(.+)$")
-SPEC_ACCEPTANCE_ITEM_RE = re.compile(r"^\s*[-*]\s+A(\d+)\.\s+(.+?)\s*$")
-CONTRACT_SECTION_ITEM_RE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+(M\d+)\.\s+(.+?)\s*$")
-CONTRACT_ACCEPTANCE_ITEM_RE = re.compile(r"^\s{2,}(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+(M\d+)\.A(\d+)\b[.:]?\s+(.+?)\s*$")
-CONTRACT_ANY_ACCEPTANCE_ITEM_RE = re.compile(r"^\s*(?:[-*]\s*)?\[\s*[xX]?\s*\]\s+(M\d+)\.A(\d+)\b[.:]?\s+(.+?)\s*$")
-SPEC_SECTION_ANTI_HEADING_RE = re.compile(r"^###\s+(?:Non-Goals?|Non Goals?|Out of Scope)\b", re.IGNORECASE)
 CONTRACT_PLACEHOLDER_MARKERS = (
     "Write the definition of done for this task here as a checklist.",
     "Bad examples:",
@@ -160,71 +155,6 @@ SPEC_PLACEHOLDER_MARKERS = (
     "Describe how the work should be validated.",
     "List anything that is still undecided or ambiguous.",
 )
-TASK_REQUIRED_HEADINGS = (
-    "# Task",
-    "## Request",
-    "## Context",
-    "## Success Signal",
-)
-SPEC_REQUIRED_HEADINGS = (
-    "# Spec",
-    "## Goal",
-    "## User Outcome",
-    "## In Scope",
-    "## Out of Scope",
-    "## Constraints",
-    "## Existing Context",
-    "## Desired Behavior",
-    "## Technical Boundaries",
-    "## Validation Expectations",
-    "## Open Questions",
-)
-SPEC_DECISION_REQUIRED_HEADINGS = (
-    "### Source of Truth / Ownership",
-    "### Read Path",
-    "### Write Path / Mutation Flow",
-    "### Runtime / Performance Expectations",
-    "### Failure / Fallback / Degraded Behavior",
-    "### State / Integrity / Concurrency Invariants",
-    "### Observability / Validation Hooks",
-)
-TASK_VAGUE_WORDS = ("production-ready", "production ready", "scalable", "viral", "enterprise", "best-in-class")
-GENERIC_SUCCESS_SIGNAL_PHRASES = (
-    "works",
-    "it works",
-    "done",
-    "fixed",
-    "is fixed",
-    "should work",
-    "works correctly",
-)
-GENERIC_REVIEW_FINDING_PHRASES = (
-    "fix this",
-    "fix bug",
-    "bug",
-    "issue",
-    "problem",
-    "still broken",
-    "make it robust",
-)
-CONTRACT_VAGUE_PHRASES = TASK_VAGUE_WORDS + (
-    "good ux",
-    "solid",
-    "robust",
-    "better",
-    "clean up",
-)
-SPEC_NON_DECISION_PHRASES = (
-    "implementation defined",
-    "to be decided",
-    "decide during implementation",
-    "left to implementation",
-    "as appropriate",
-    "handle edge cases appropriately",
-    "reuse existing infrastructure as appropriate",
-    "use best judgment",
-)
-SPEC_NA_PREFIX = "not applicable because"
 VERIFICATION_HINT_WORDS = (
     "test",
     "tests",
@@ -277,18 +207,6 @@ INTEGRITY_HINT_WORDS = (
     "authorization",
     "scope",
     "concurrency",
-)
-BROAD_TASK_HINT_WORDS = (
-    "build",
-    "feature",
-    "dashboard",
-    "workflow",
-    "system",
-    "platform",
-    "redesign",
-    "overhaul",
-    "onboarding",
-    "pipeline",
 )
 ARTIFACT_REPAIR_ATTEMPTS = 1
 SESSION_RECOVERY_ATTEMPTS = 1
@@ -1378,392 +1296,58 @@ def strip_bullet_prefix(line: str) -> str:
     return re.sub(r"^\s*[-*]\s*", "", line).strip()
 
 
-def major_spec_section_ids(spec_text: str) -> list[str]:
-    section_ids: list[str] = []
-    for line in spec_text.splitlines():
-        match = SPEC_MAJOR_SECTION_RE.match(line.strip())
-        if match:
-            section_ids.append(match.group(1))
-    return section_ids
-
-
-def major_spec_section_text(spec_text: str, section_id: str) -> str:
-    for line in spec_text.splitlines():
-        if line.strip().startswith(f"## {section_id}."):
-            return extract_markdown_section(spec_text, line.strip())
-    return ""
-
-
-def major_spec_section_title(spec_text: str, section_id: str) -> str:
-    for line in spec_text.splitlines():
-        match = SPEC_MAJOR_SECTION_RE.match(line.strip())
-        if match and match.group(1) == section_id:
-            return match.group(2).strip()
-    return ""
-
-
-def spec_section_acceptance_items(section_text: str) -> list[tuple[int, str]]:
-    acceptance_text = extract_markdown_subsection(section_text, "### Acceptance Criteria")
-    items: list[tuple[int, str]] = []
-    for line in acceptance_text.splitlines():
-        match = SPEC_ACCEPTANCE_ITEM_RE.match(line)
-        if match:
-            items.append((int(match.group(1)), match.group(2).strip()))
-    return items
-
-
-def contract_spec_projection(contract_text: str) -> tuple[dict[str, dict[str, object]], list[str]]:
-    sections: dict[str, dict[str, object]] = {}
-    errors: list[str] = []
-    current_section_id: str | None = None
-    for line_no, line in enumerate(contract_text.splitlines(), start=1):
-        section_match = CONTRACT_SECTION_ITEM_RE.match(line)
-        if section_match:
-            section_id = section_match.group(1)
-            section = sections.setdefault(section_id, {"line_no": None, "title": "", "acceptance": []})
-            if section["line_no"] is not None:
-                errors.append(f"{CONTRACT_FILENAME} repeats top-level checklist item `{section_id}`")
-            section["line_no"] = line_no
-            section["title"] = section_match.group(2).strip()
-            current_section_id = section_id
-            continue
-        acceptance_match = CONTRACT_ACCEPTANCE_ITEM_RE.match(line)
-        if acceptance_match:
-            section_id = acceptance_match.group(1)
-            section = sections.setdefault(section_id, {"line_no": None, "title": "", "acceptance": []})
-            cast(list[dict[str, object]], section["acceptance"]).append(
-                {
-                    "number": int(acceptance_match.group(2)),
-                    "text": acceptance_match.group(3).strip(),
-                    "line_no": line_no,
-                }
-            )
-            if current_section_id != section_id:
-                errors.append(
-                    f"{CONTRACT_FILENAME} line {line_no} must appear under the top-level `{section_id}` checklist item"
-                )
-            continue
-        malformed_acceptance_match = CONTRACT_ANY_ACCEPTANCE_ITEM_RE.match(line)
-        if malformed_acceptance_match:
-            section_id = malformed_acceptance_match.group(1)
-            criterion_number = malformed_acceptance_match.group(2)
-            errors.append(
-                f"{CONTRACT_FILENAME} line {line_no} acceptance sub-check `{section_id}.A{criterion_number}` must be indented under the top-level `{section_id}` checklist item"
-            )
-            current_section_id = None
-            continue
-        if current_section_id and CHECKLIST_ITEM_RE.match(line) and (line.startswith(" ") or line.startswith("\t")):
-            errors.append(
-                f"{CONTRACT_FILENAME} line {line_no} nested under `{current_section_id}` must cite a linked acceptance criterion as `{current_section_id}.A#`"
-            )
-            continue
-        if CHECKLIST_ITEM_RE.match(line):
-            current_section_id = None
-    return sections, errors
-
-
 def section_contains_placeholder(section_text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in section_text for marker in markers)
 
 
-def section_has_explicit_na_reason(section_text: str) -> bool:
-    normalized = normalize_text(section_text)
-    return normalize_text(SPEC_NA_PREFIX) in normalized and meaningful_word_count(section_text) >= 4
-
-
-def section_has_decision_complete_content(section_text: str, *, minimum_words: int) -> bool:
-    if section_has_explicit_na_reason(section_text):
-        return True
-    if meaningful_word_count(section_text) < minimum_words:
-        return False
-    lowered = section_text.lower()
-    if contains_any_phrase(lowered, SPEC_NON_DECISION_PHRASES):
-        return False
-    return True
-
-
-def task_brief_requires_spec(task_text: str) -> bool:
-    request_text = extract_markdown_section(task_text, "## Request")
-    context_text = extract_markdown_section(task_text, "## Context")
-    success_text = extract_markdown_section(task_text, "## Success Signal")
-    normalized_request = normalize_text(request_text)
-    broad = any(normalize_text(word) in normalized_request for word in BROAD_TASK_HINT_WORDS)
-    if not broad:
-        return False
-    return (
-        meaningful_word_count(request_text) < 16
-        or meaningful_word_count(context_text) < 8
-        or meaningful_word_count(success_text) < 8
-    )
+def lint_canonical_document_readiness(
+    path: Path,
+    *,
+    template_name: str,
+    placeholder_markers: tuple[str, ...],
+) -> tuple[list[str], list[str]]:
+    """Validate only the mechanical minimum needed to start a council run."""
+    doc_text = path.read_text(encoding="utf-8")
+    errors: list[str] = []
+    if not doc_text.strip():
+        errors.append(f"{path.name} is empty")
+    elif doc_text.strip() == read_template("scaffold", template_name).strip():
+        errors.append(f"{path.name} still contains scaffold placeholder text")
+    elif section_contains_placeholder(doc_text, placeholder_markers):
+        errors.append(f"{path.name} still contains scaffold placeholder text")
+    return errors, []
 
 
 def lint_task_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]]:
-    task_text = (task_root / TASK_FILENAME).read_text(encoding="utf-8")
-    errors: list[str] = []
-    warnings: list[str] = []
-    if task_text.strip() == read_template("scaffold", TASK_FILENAME).strip():
-        errors.append(f"{TASK_FILENAME} still contains scaffold placeholder text")
-    for heading in TASK_REQUIRED_HEADINGS:
-        if heading not in task_text:
-            errors.append(f"{TASK_FILENAME} is missing required heading: {heading}")
-    request_text = extract_markdown_section(task_text, "## Request")
-    context_text = extract_markdown_section(task_text, "## Context")
-    success_text = extract_markdown_section(task_text, "## Success Signal")
-    if not request_text or section_contains_placeholder(request_text, TASK_PLACEHOLDER_MARKERS):
-        errors.append(f"{TASK_FILENAME} needs a concrete `## Request` section")
-    elif meaningful_word_count(request_text) < 4:
-        errors.append(f"{TASK_FILENAME} request is too short to be a useful engineering brief")
-    if not context_text or section_contains_placeholder(context_text, TASK_PLACEHOLDER_MARKERS):
-        errors.append(f"{TASK_FILENAME} needs concrete repo or problem context in `## Context`")
-    elif meaningful_word_count(context_text) < 2:
-        errors.append(f"{TASK_FILENAME} context is too thin to act safely")
-    if not success_text or section_contains_placeholder(success_text, TASK_PLACEHOLDER_MARKERS):
-        errors.append(f"{TASK_FILENAME} needs an observable `## Success Signal`")
-    if success_text and contains_any_phrase(success_text, GENERIC_SUCCESS_SIGNAL_PHRASES) and meaningful_word_count(success_text) < 10:
-        errors.append(
-            f"{TASK_FILENAME} success signal is too generic; describe observable completion instead of phrases like `works` or `done`"
-        )
-    elif success_text and meaningful_word_count(success_text) < 4:
-        errors.append(f"{TASK_FILENAME} success signal is too short to be auditable")
-    lowered_task = task_text.lower()
-    for vague_word in TASK_VAGUE_WORDS:
-        if vague_word in lowered_task:
-            warnings.append(
-                f"{TASK_FILENAME} uses vague wording `{vague_word}`; decompose it into concrete task behavior or promote the task into {SPEC_FILENAME}"
-            )
-    return errors, warnings
+    return lint_canonical_document_readiness(
+        task_root / TASK_FILENAME,
+        template_name=TASK_FILENAME,
+        placeholder_markers=TASK_PLACEHOLDER_MARKERS,
+    )
 
 
 def lint_review_workspace_readiness(review_path: Path) -> tuple[list[str], list[str]]:
-    review_text = review_path.read_text(encoding="utf-8")
-    errors: list[str] = []
-    warnings: list[str] = []
-    if review_text.strip() == read_template("scaffold", REVIEW_FILENAME).strip():
-        errors.append(f"{review_path.name} still contains scaffold placeholder text")
-    if "# Review" not in review_text and "# Initial Review" not in review_text:
-        errors.append(f"{review_path.name} must begin with `# Review`")
-    if any(marker in review_text for marker in REVIEW_PLACEHOLDER_MARKERS):
-        errors.append(f"{review_path.name} still contains scaffold placeholder text")
-    items = review_items(review_text)
-    stripped_items = [strip_bullet_prefix(item) for item in items]
-    if not items:
-        errors.append(f"{review_path.name} must contain at least one bullet item")
-    elif all(meaningful_word_count(item) < 4 for item in stripped_items):
-        errors.append(f"{review_path.name} findings are too short to guide generator triage")
-    for item in stripped_items:
-        if contains_any_phrase(item, GENERIC_REVIEW_FINDING_PHRASES) and meaningful_word_count(item) < 8:
-            errors.append(f"{review_path.name} contains a finding that is too generic to be actionable: `{item}`")
-        elif meaningful_word_count(item) < 3:
-            errors.append(f"{review_path.name} contains a finding that is too short to be actionable: `{item}`")
-    return errors, warnings
+    return lint_canonical_document_readiness(
+        review_path,
+        template_name=REVIEW_FILENAME,
+        placeholder_markers=REVIEW_PLACEHOLDER_MARKERS,
+    )
 
 
 def lint_spec_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]]:
-    spec_text = (task_root / SPEC_FILENAME).read_text(encoding="utf-8")
-    errors: list[str] = []
-    warnings: list[str] = []
-    if spec_text.strip() == read_template("scaffold", SPEC_FILENAME).strip():
-        errors.append(f"{SPEC_FILENAME} still contains scaffold placeholder text")
-    for heading in SPEC_REQUIRED_HEADINGS:
-        if heading not in spec_text:
-            errors.append(f"{SPEC_FILENAME} is missing required heading: {heading}")
-    if any(marker in spec_text for marker in SPEC_PLACEHOLDER_MARKERS):
-        errors.append(f"{SPEC_FILENAME} still contains scaffold placeholder text")
-    section_ids = major_spec_section_ids(spec_text)
-    duplicate_section_ids = sorted({section_id for section_id in section_ids if section_ids.count(section_id) > 1})
-    if duplicate_section_ids:
-        errors.append(
-            f"{SPEC_FILENAME} repeats major section ids; each `M#` section must be unique: {', '.join(duplicate_section_ids)}"
-        )
-    if not section_ids:
-        errors.append(
-            f"{SPEC_FILENAME} must organize approval-critical behavior into named major sections such as `M1`, `M2`, `M3`"
-        )
-    for heading, minimum_words in (
-        ("## Goal", 4),
-        ("## User Outcome", 4),
-        ("## Desired Behavior", 6),
-        ("## Validation Expectations", 4),
-    ):
-        section_text = extract_markdown_section(spec_text, heading)
-        if heading == "## Desired Behavior" and section_ids:
-            continue
-        if not section_text or meaningful_word_count(section_text) < minimum_words:
-            errors.append(f"{SPEC_FILENAME} needs a more complete `{heading}` section")
-    for heading in ("## In Scope", "## Out of Scope", "## Constraints", "## Technical Boundaries"):
-        section_text = extract_markdown_section(spec_text, heading)
-        if meaningful_word_count(section_text) < 2:
-            warnings.append(f"{SPEC_FILENAME} should make `{heading}` more explicit for safe execution")
-    for section_id in section_ids:
-        section_text = major_spec_section_text(spec_text, section_id)
-        for line in section_text.splitlines():
-            if SPEC_SECTION_ANTI_HEADING_RE.match(line.strip()):
-                errors.append(
-                    f"{SPEC_FILENAME} section `{section_id}` should express exclusions through acceptance criteria or the global scope sections, not `{line.strip()}`"
-                )
-        acceptance_text = extract_markdown_subsection(section_text, "### Acceptance Criteria")
-        if not acceptance_text:
-            errors.append(f"{SPEC_FILENAME} section `{section_id}` is missing `### Acceptance Criteria`")
-            continue
-        acceptance_lines = [line.strip() for line in acceptance_text.splitlines() if line.strip()]
-        if not acceptance_lines:
-            errors.append(f"{SPEC_FILENAME} section `{section_id}` must include bullet acceptance criteria")
-            continue
-        if any(not REVIEW_ITEM_RE.match(line) for line in acceptance_lines):
-            errors.append(f"{SPEC_FILENAME} section `{section_id}` must use only bullet items under `### Acceptance Criteria`")
-            continue
-        parsed_items: list[tuple[int, str]] = []
-        unlabeled_items = False
-        for line in acceptance_lines:
-            match = SPEC_ACCEPTANCE_ITEM_RE.match(line)
-            if not match:
-                unlabeled_items = True
-                continue
-            parsed_items.append((int(match.group(1)), match.group(2).strip()))
-        if unlabeled_items:
-            errors.append(
-                f"{SPEC_FILENAME} section `{section_id}` must label acceptance criteria as `- A1. ...`, `- A2. ...`, and so on"
-            )
-            continue
-        expected_numbers = list(range(1, len(parsed_items) + 1))
-        actual_numbers = [number for number, _ in parsed_items]
-        if actual_numbers != expected_numbers:
-            errors.append(
-                f"{SPEC_FILENAME} section `{section_id}` must number acceptance criteria consecutively as `A1`, `A2`, `A3`, ..."
-            )
-            continue
-        if any(meaningful_word_count(text) < 4 for _, text in parsed_items):
-            errors.append(f"{SPEC_FILENAME} section `{section_id}` has acceptance criteria that are too short to be auditable")
-    for heading in SPEC_DECISION_REQUIRED_HEADINGS:
-        subsection_text = extract_markdown_subsection(spec_text, heading)
-        if not subsection_text:
-            errors.append(f"{SPEC_FILENAME} is missing required decision-completeness subsection: {heading}")
-            continue
-        if not section_has_decision_complete_content(subsection_text, minimum_words=5):
-            errors.append(
-                f"{SPEC_FILENAME} must make `{heading}` decision-complete or explicitly mark it `Not applicable because ...`"
-            )
-    lowered_spec = spec_text.lower()
-    for vague_word in TASK_VAGUE_WORDS:
-        if vague_word in lowered_spec:
-            warnings.append(
-                f"{SPEC_FILENAME} uses vague wording `{vague_word}`; decompose it into concrete behavior or constraints"
-            )
-    return errors, warnings
+    return lint_canonical_document_readiness(
+        task_root / SPEC_FILENAME,
+        template_name=SPEC_FILENAME,
+        placeholder_markers=SPEC_PLACEHOLDER_MARKERS,
+    )
 
 
 def lint_contract_workspace_readiness(task_root: Path) -> tuple[list[str], list[str]]:
-    contract_text = (task_root / CONTRACT_FILENAME).read_text(encoding="utf-8")
-    errors: list[str] = []
-    warnings: list[str] = []
-    if any(marker in contract_text for marker in CONTRACT_PLACEHOLDER_MARKERS):
-        errors.append(f"{CONTRACT_FILENAME} still contains scaffold placeholder text")
-    if "# Definition of Done" not in contract_text:
-        errors.append(f"{CONTRACT_FILENAME} must begin with `# Definition of Done`")
-    checklist_items = contract_checklist_items(contract_text)
-    normalized_items = [strip_checklist_prefix(item) for item in checklist_items]
-    if not checklist_items:
-        errors.append(f"{CONTRACT_FILENAME} must contain at least one checklist item")
-    elif len(checklist_items) < 2:
-        warnings.append(f"{CONTRACT_FILENAME} usually needs more than one checklist item to be auditable")
-    for item in normalized_items:
-        if meaningful_word_count(item) < 4:
-            errors.append(f"{CONTRACT_FILENAME} item is too short to be auditable: `{item}`")
-        if contains_any_phrase(item, CONTRACT_VAGUE_PHRASES):
-            errors.append(f"{CONTRACT_FILENAME} item is too vague or aspirational: `{item}`")
-    if normalized_items and not any(contains_any_phrase(item, VERIFICATION_HINT_WORDS) for item in normalized_items):
-        warnings.append(f"{CONTRACT_FILENAME} should usually include at least one explicit verification item")
-    if normalized_items and not any(not contains_any_phrase(item, VERIFICATION_HINT_WORDS) for item in normalized_items):
-        warnings.append(
-            f"{CONTRACT_FILENAME} should usually include at least one behavior or integrity item in addition to verification"
-        )
-    return errors, warnings
-
-
-def lint_broad_spec_contract_alignment(task_root: Path) -> tuple[list[str], list[str]]:
-    spec_text = (task_root / SPEC_FILENAME).read_text(encoding="utf-8")
-    contract_text = (task_root / CONTRACT_FILENAME).read_text(encoding="utf-8")
-    checklist_items = [strip_checklist_prefix(item) for item in contract_checklist_items(contract_text)]
-    errors: list[str] = []
-    warnings: list[str] = []
-    if not checklist_items:
-        return errors, warnings
-    section_ids = major_spec_section_ids(spec_text)
-    section_projection, projection_errors = contract_spec_projection(contract_text)
-    errors.extend(projection_errors)
-    if section_ids:
-        missing_links = [
-            section_id
-            for section_id in section_ids
-            if section_projection.get(section_id, {}).get("line_no") is None
-        ]
-        if missing_links:
-            errors.append(
-                f"{CONTRACT_FILENAME} must trace every major spec section into its own top-level checklist item; missing linkage for: {', '.join(missing_links)}"
-            )
-        for section_id in section_ids:
-            spec_acceptance = spec_section_acceptance_items(major_spec_section_text(spec_text, section_id))
-            spec_title = major_spec_section_title(spec_text, section_id)
-            contract_title = str(section_projection.get(section_id, {}).get("title", "")).strip()
-            if contract_title and spec_title and normalize_projection_text(contract_title) != normalize_projection_text(spec_title):
-                errors.append(
-                    f"{CONTRACT_FILENAME} top-level item `{section_id}` must use the same section title as {SPEC_FILENAME}: `{spec_title}`"
-                )
-            if not spec_acceptance:
-                continue
-            contract_acceptance = cast(list[dict[str, object]], section_projection.get(section_id, {}).get("acceptance", []))
-            if not contract_acceptance:
-                errors.append(
-                    f"{CONTRACT_FILENAME} section `{section_id}` must cite every acceptance criterion as indented sub-checks (`{section_id}.A1`, `{section_id}.A2`, ...)"
-                )
-                continue
-            numbers = [int(item["number"]) for item in contract_acceptance]
-            duplicate_numbers = sorted({number for number in numbers if numbers.count(number) > 1})
-            if duplicate_numbers:
-                duplicates = ", ".join(f"{section_id}.A{number}" for number in duplicate_numbers)
-                errors.append(f"{CONTRACT_FILENAME} repeats acceptance sub-checks for `{section_id}`: {duplicates}")
-            expected_numbers = [number for number, _ in spec_acceptance]
-            missing_acceptance = [number for number in expected_numbers if number not in numbers]
-            extra_acceptance = [number for number in numbers if number not in expected_numbers]
-            if missing_acceptance or extra_acceptance:
-                details: list[str] = []
-                if missing_acceptance:
-                    details.append("missing " + ", ".join(f"{section_id}.A{number}" for number in missing_acceptance))
-                if extra_acceptance:
-                    details.append("unexpected " + ", ".join(f"{section_id}.A{number}" for number in extra_acceptance))
-                errors.append(
-                    f"{CONTRACT_FILENAME} section `{section_id}` must cite every linked acceptance criterion exactly once; " + "; ".join(details)
-                )
-            contract_by_number = {
-                int(item["number"]): str(item["text"])
-                for item in contract_acceptance
-            }
-            for number, spec_text_for_number in spec_acceptance:
-                contract_text_for_number = contract_by_number.get(number)
-                if contract_text_for_number is None:
-                    continue
-                if normalize_projection_text(contract_text_for_number) != normalize_projection_text(spec_text_for_number):
-                    errors.append(
-                        f"{CONTRACT_FILENAME} sub-check `{section_id}.A{number}` must cite the linked acceptance criterion text from {SPEC_FILENAME} without paraphrasing away approval-critical detail"
-                    )
-    has_verification = any(contains_any_phrase(item, VERIFICATION_HINT_WORDS) for item in checklist_items)
-    has_integrity_guardrail = any(contains_any_phrase(item, INTEGRITY_HINT_WORDS) for item in checklist_items)
-    has_behavior_outcome = any(
-        not contains_any_phrase(item, VERIFICATION_HINT_WORDS) for item in checklist_items
+    return lint_canonical_document_readiness(
+        task_root / CONTRACT_FILENAME,
+        template_name=CONTRACT_FILENAME,
+        placeholder_markers=CONTRACT_PLACEHOLDER_MARKERS,
     )
-    if not has_verification:
-        errors.append(
-            f"{CONTRACT_FILENAME} for spec-driven work must include at least one explicit verification item"
-        )
-    if not has_integrity_guardrail:
-        errors.append(
-            f"{CONTRACT_FILENAME} for spec-driven work must include at least one regression, integrity, fallback, or state guardrail"
-        )
-    if not has_behavior_outcome:
-        errors.append(
-            f"{CONTRACT_FILENAME} for spec-driven work must include at least one concrete behavior or outcome item"
-        )
-    return errors, warnings
 
 
 def load_council_config(repo_root: Path) -> dict:
@@ -2870,6 +2454,54 @@ def wait_for_artifact_pair(
                             "last_error": last_error,
                         },
                     )
+        if not tmux_session_exists(tmux_name):
+            if session_recovery_attempts < SESSION_RECOVERY_ATTEMPTS:
+                session_recovery_attempts += 1
+                repair_prompt = role_prompt_path(current_turn_dir, role).read_text(encoding="utf-8")
+                append_run_event(
+                    run_dir,
+                    f"{role}_session_restarted_after_disappearance",
+                    turn_number=turn_number,
+                    role=role,
+                    details={"attempt": session_recovery_attempts, "tmux_session": tmux_name},
+                )
+                restart_role_session(
+                    tmux_name,
+                    repo_root=repo_root,
+                    council_config=council_config,
+                    role_state=(
+                        load_json(run_dir / "state.json")["roles"].get(role, {})
+                        if (run_dir / "state.json").exists()
+                        else None
+                    ),
+                    role=role,
+                )
+                wait_for_tmux_prompt(
+                    tmux_name,
+                    timeout_seconds,
+                    phase=f"{phase}_session_restart_ready",
+                    role=role,
+                )
+                tmux_send_prompt(
+                    tmux_name,
+                    repair_prompt,
+                    phase=f"{phase}_session_restart_prompt",
+                    role=role,
+                    turn_dir=current_turn_dir,
+                    dispatch_reason="session_restart_after_disappearance",
+                )
+                time.sleep(TMUX_PASTE_SETTLE_SECONDS)
+                continue
+            raise SupervisorRuntimeError(
+                phase,
+                f"tmux session disappeared while waiting for {role} artifacts: {tmux_name}",
+                role=role,
+                details={
+                    "artifact_path": str(artifact_path),
+                    "status_path": str(status_path),
+                    "tmux_session": tmux_name,
+                },
+            )
         pane_text = tmux_capture_pane(tmux_name)
         pane_state = classify_tmux_pane(pane_text)
         if (
@@ -4220,6 +3852,8 @@ def format_review_bridge_block(state: dict, inspection: dict, *, turn_dir: Path,
         lines.append(
             f"- No PR has been resolved yet; after your push, the harness will reuse or create the PR for branch `{github_state['branch']}`."
         )
+    if isinstance(github_state.get("target_review_id"), int):
+        lines.append(f"- Target GitHub review ID: `{github_state['target_review_id']}`.")
     lines.extend(
         [
             f"- The harness will post the `@codex` review request comment and poll GitHub for the response; do not perform that PR bookkeeping manually.",
@@ -5815,49 +5449,36 @@ def has_any_fork_parent(generator_fork_id: str | None, reviewer_fork_id: str | N
     return bool(generator_fork_id or reviewer_fork_id)
 
 
-def validate_task_workspace_for_start(task_root: Path, inspection: dict, *, review_mode: str = "internal") -> None:
+def validate_task_workspace_for_start(
+    task_root: Path,
+    inspection: dict,
+    *,
+    review_mode: str = "internal",
+    allow_undocumented: bool = False,
+) -> None:
     errors: list[str] = []
-    warnings: list[str] = []
-    task_text = ""
-    if inspection["doc_paths"]["task"] is not None:
-        task_text = (task_root / TASK_FILENAME).read_text(encoding="utf-8")
-        task_errors, task_warnings = lint_task_workspace_readiness(task_root)
-        errors.extend(task_errors)
-        warnings.extend(task_warnings)
-    if inspection["doc_paths"]["review"] is not None:
-        review_errors, review_warnings = lint_review_workspace_readiness(inspection["doc_paths"]["review"])
-        errors.extend(review_errors)
-        warnings.extend(review_warnings)
-    if inspection["doc_paths"]["spec"] is not None:
-        spec_errors, spec_warnings = lint_spec_workspace_readiness(task_root)
-        errors.extend(spec_errors)
-        warnings.extend(spec_warnings)
-    if inspection["doc_paths"]["contract"] is not None:
-        contract_errors, contract_warnings = lint_contract_workspace_readiness(task_root)
-        errors.extend(contract_errors)
-        warnings.extend(contract_warnings)
-        if inspection["doc_paths"]["spec"] is not None:
-            broad_contract_errors, broad_contract_warnings = lint_broad_spec_contract_alignment(task_root)
-            errors.extend(broad_contract_errors)
-            warnings.extend(broad_contract_warnings)
-    if inspection["doc_paths"]["spec"] is not None and inspection["doc_paths"]["contract"] is None:
-        errors.append(f"{SPEC_FILENAME} should be paired with {CONTRACT_FILENAME} so approval stays auditable")
-    elif inspection["doc_paths"]["contract"] is None and inspection["present_docs"]:
-        warnings.append(
-            f"starting without {CONTRACT_FILENAME} removes the explicit approval bar; add it unless this task is truly trivial. For broad work, prefer `prepare <task_name>` first."
-        )
-    if task_text and inspection["doc_paths"]["spec"] is None and task_brief_requires_spec(task_text):
+    if not inspection["present_docs"] and review_mode != "github_pr_codex" and not allow_undocumented:
         errors.append(
-            f"{TASK_FILENAME} looks broad enough and requires {SPEC_FILENAME}; add a spec or narrow the task brief before start. For broad work, prefer `prepare <task_name>` first."
+            f"no canonical input documents found; add at least one of {TASK_FILENAME}, {REVIEW_FILENAME}, {SPEC_FILENAME}, or {CONTRACT_FILENAME}"
         )
+    if inspection["doc_paths"]["task"] is not None:
+        task_errors, _ = lint_task_workspace_readiness(task_root)
+        errors.extend(task_errors)
+    if inspection["doc_paths"]["review"] is not None:
+        review_errors, _ = lint_review_workspace_readiness(inspection["doc_paths"]["review"])
+        errors.extend(review_errors)
+    if inspection["doc_paths"]["spec"] is not None:
+        spec_errors, _ = lint_spec_workspace_readiness(task_root)
+        errors.extend(spec_errors)
+    if inspection["doc_paths"]["contract"] is not None:
+        contract_errors, _ = lint_contract_workspace_readiness(task_root)
+        errors.extend(contract_errors)
     if errors:
         formatted = "\n".join(f"- {item}" for item in errors)
         raise SystemExit(
             f"{task_root} is not ready for start.\n"
             f"Fix these issues first:\n{formatted}"
         )
-    for warning in warnings:
-        print(f"warning: {warning}")
 
 
 def determine_start_role(
@@ -5951,14 +5572,19 @@ def parse_github_pr_ref(value: str) -> dict:
             "ref": normalized,
             "number": int(normalized),
             "repo_name_with_owner": None,
+            "target_review_id": None,
         }
-    match = GITHUB_PR_URL_RE.match(normalized)
+    fragment_match = GITHUB_PR_REVIEW_FRAGMENT_RE.search(normalized)
+    target_review_id = int(fragment_match.group(1)) if fragment_match else None
+    ref_without_fragment = normalized.split("#", 1)[0]
+    match = GITHUB_PR_URL_RE.match(ref_without_fragment)
     if match:
         owner, repo, number = match.groups()
         return {
-            "ref": normalized,
+            "ref": ref_without_fragment,
             "number": int(number),
             "repo_name_with_owner": f"{owner}/{repo}",
+            "target_review_id": target_review_id,
         }
     raise SystemExit("--github-pr must be a pull request number or GitHub pull request URL")
 
@@ -6315,12 +5941,14 @@ def build_review_bridge_state(
     pr_url = None
     pr_head_sha = None
     pr_created_at = None
+    target_review_id = None
     branch_source = "auto"
     branch = github_branch_value or git_state["current_branch"]
     base_branch = github_base_value or DEFAULT_GITHUB_PR_BASE_BRANCH
 
     if github_pr_value:
         parsed_pr = parse_github_pr_ref(github_pr_value)
+        target_review_id = parsed_pr.get("target_review_id")
         if (
             parsed_pr["repo_name_with_owner"]
             and parsed_pr["repo_name_with_owner"] != repo_meta["name_with_owner"]
@@ -6377,6 +6005,7 @@ def build_review_bridge_state(
             "repo": repo_meta["repo"],
             "repo_url": repo_meta["url"],
             "review_wait": new_github_review_wait_state(),
+            "target_review_id": target_review_id,
         },
     }
 
@@ -6861,6 +6490,7 @@ def build_github_inline_review_snapshot(
     request_comment_created_at: str | None = None,
     last_consumed_review_id: int | None = None,
     latest_allowed_created_at: str | None = None,
+    target_review_id: int | None = None,
 ) -> dict | None:
     threshold_epoch = current_head_review_threshold_epoch(
         current_head_started_at=current_head_started_at,
@@ -6868,17 +6498,40 @@ def build_github_inline_review_snapshot(
     )
     latest_allowed_epoch = parse_utc_timestamp(latest_allowed_created_at)
     review_candidates: dict[int, dict] = {}
+    target_review_seen = False
+    target_reject_reasons: list[str] = []
     for raw_review in reviews:
+        raw_review_id = raw_review.get("databaseId")
+        if target_review_id is not None and raw_review_id != target_review_id:
+            continue
+        if target_review_id is not None and raw_review_id == target_review_id:
+            target_review_seen = True
         review = normalize_github_review_candidate(raw_review)
         if review is None:
+            if target_review_id is not None and raw_review_id == target_review_id:
+                target_reject_reasons.append("target review is not a usable GitHub Codex review candidate")
             continue
         if review["commit_oid"] and review["commit_oid"] != current_head_sha:
+            if target_review_id is not None and review["id"] == target_review_id:
+                target_reject_reasons.append(
+                    f"target review commit `{review['commit_oid']}` does not match current head `{current_head_sha}`"
+                )
             continue
         if threshold_epoch is not None and review["submitted_at_epoch"] < threshold_epoch:
+            if target_review_id is not None and review["id"] == target_review_id:
+                target_reject_reasons.append(
+                    f"target review was submitted before the current review scope `{ts_from_epoch(threshold_epoch)}`"
+                )
             continue
         if latest_allowed_epoch is not None and review["submitted_at_epoch"] > latest_allowed_epoch:
+            if target_review_id is not None and review["id"] == target_review_id:
+                target_reject_reasons.append(
+                    f"target review was submitted after the wait deadline `{ts_from_epoch(latest_allowed_epoch)}`"
+                )
             continue
         if last_consumed_review_id is not None and review["id"] == last_consumed_review_id:
+            if target_review_id is not None and review["id"] == target_review_id:
+                target_reject_reasons.append("target review was already consumed by this run")
             continue
         review_candidates[review["id"]] = review
 
@@ -6888,18 +6541,40 @@ def build_github_inline_review_snapshot(
         for raw_comment in comments:
             if not isinstance(raw_comment, dict):
                 continue
+            raw_review = raw_comment.get("pullRequestReview")
+            raw_review_id = raw_review.get("databaseId") if isinstance(raw_review, dict) else None
+            if target_review_id is not None and raw_review_id != target_review_id:
+                continue
+            if target_review_id is not None and raw_review_id == target_review_id:
+                target_review_seen = True
             comment = normalize_github_review_thread_comment(thread, raw_comment)
             if comment is None:
+                if target_review_id is not None and raw_review_id == target_review_id:
+                    target_reject_reasons.append("target review thread comment is not a usable GitHub Codex review comment")
                 continue
             review_id = comment["review_id"]
             review_epoch = comment["review_submitted_at_epoch"]
             if comment["commit_oid"] and comment["commit_oid"] != current_head_sha:
+                if target_review_id is not None and review_id == target_review_id:
+                    target_reject_reasons.append(
+                        f"target review thread commit `{comment['commit_oid']}` does not match current head `{current_head_sha}`"
+                    )
                 continue
             if threshold_epoch is not None and review_epoch < threshold_epoch:
+                if target_review_id is not None and review_id == target_review_id:
+                    target_reject_reasons.append(
+                        f"target review thread was submitted before the current review scope `{ts_from_epoch(threshold_epoch)}`"
+                    )
                 continue
             if latest_allowed_epoch is not None and review_epoch > latest_allowed_epoch:
+                if target_review_id is not None and review_id == target_review_id:
+                    target_reject_reasons.append(
+                        f"target review thread was submitted after the wait deadline `{ts_from_epoch(latest_allowed_epoch)}`"
+                    )
                 continue
             if last_consumed_review_id is not None and review_id == last_consumed_review_id:
+                if target_review_id is not None and review_id == target_review_id:
+                    target_reject_reasons.append("target review was already consumed by this run")
                 continue
             review_candidates.setdefault(
                 review_id,
@@ -6927,11 +6602,33 @@ def build_github_inline_review_snapshot(
                 per_review_threads[str(comment["thread_id"])] = comment
 
     if not review_candidates:
+        if target_review_id is not None:
+            reason = (
+                "; ".join(dedupe_preserving_order(target_reject_reasons))
+                if target_reject_reasons
+                else "target review was not found among GitHub Codex reviews or review-thread comments"
+            )
+            raise SupervisorRuntimeError(
+                "github_target_review_unusable",
+                f"target GitHub Codex review `{target_review_id}` is not usable for current PR head `{current_head_sha}`: {reason}",
+                role="reviewer",
+                details={
+                    "current_head_sha": current_head_sha,
+                    "current_head_started_at": current_head_started_at,
+                    "pr_number": pr_number,
+                    "target_review_id": target_review_id,
+                    "target_review_seen": target_review_seen,
+                    "reason": reason,
+                },
+            )
         return None
-    selected_review = sorted(
-        review_candidates.values(),
-        key=lambda item: (item["submitted_at"], item["id"]),
-    )[-1]
+    if target_review_id is not None:
+        selected_review = review_candidates[target_review_id]
+    else:
+        selected_review = sorted(
+            review_candidates.values(),
+            key=lambda item: (item["submitted_at"], item["id"]),
+        )[-1]
     active_threads = list(thread_candidates.get(selected_review["id"], {}).values())
     active_threads.sort(key=lambda item: (item["path"], item.get("line") or 0, item["comment_id"]))
     return {
@@ -8080,6 +7777,8 @@ def record_consumed_github_codex_review_snapshot(
     github_state["last_consumed_review_comment_body_sha256"] = hash_text(markdown)
     github_state["last_consumed_review_comment_created_at"] = review["submitted_at"]
     github_state["last_consumed_review_comment_id"] = review["id"]
+    if github_state.get("target_review_id") == review["id"]:
+        github_state["target_review_id"] = None
     save_run_state(run_dir, state)
     append_run_event(
         run_dir,
@@ -8166,7 +7865,11 @@ def inspect_github_pr_review_state_for_current_head(
     )
     latest_request = issue_review_state["request_comment"]
     latest_reply = issue_review_state["reply_comment"]
-    if isinstance(latest_reply, dict) and is_github_codex_approved_comment(latest_reply["body"]):
+    if (
+        github_state.get("target_review_id") is None
+        and isinstance(latest_reply, dict)
+        and is_github_codex_approved_comment(latest_reply["body"])
+    ):
         adopt_github_review_request_comment(
             github_state,
             turn_number,
@@ -8193,9 +7896,14 @@ def inspect_github_pr_review_state_for_current_head(
             pr_number=pr_number,
             pr_url=github_state.get("pr_url"),
             request_comment_created_at=latest_request["created_at"] if isinstance(latest_request, dict) else None,
+            target_review_id=github_state.get("target_review_id"),
         )
     except SupervisorRuntimeError:
-        if isinstance(latest_reply, dict) and is_github_codex_approved_comment(latest_reply["body"]):
+        if (
+            github_state.get("target_review_id") is None
+            and isinstance(latest_reply, dict)
+            and is_github_codex_approved_comment(latest_reply["body"])
+        ):
             adopt_github_review_request_comment(
                 github_state,
                 turn_number,
@@ -8548,12 +8256,16 @@ def wait_for_new_github_inline_review_snapshot(
             repo=github_state["repo"],
             pr_number=pr_number,
         )
-        approval_comment = select_latest_unconsumed_github_codex_approved_comment(
-            issue_comments,
-            request_comment_id=request_comment_id,
-            request_comment_created_at=request_comment_created_at,
-            last_consumed_comment_id=github_state.get("last_consumed_review_comment_id"),
-            latest_allowed_created_at=wait_state.get("deadline_at"),
+        approval_comment = (
+            None
+            if github_state.get("target_review_id") is not None
+            else select_latest_unconsumed_github_codex_approved_comment(
+                issue_comments,
+                request_comment_id=request_comment_id,
+                request_comment_created_at=request_comment_created_at,
+                last_consumed_comment_id=github_state.get("last_consumed_review_comment_id"),
+                latest_allowed_created_at=wait_state.get("deadline_at"),
+            )
         )
         if approval_comment is not None:
             record_consumed_github_codex_review_comment(run_dir, state, turn_number, approval_comment)
@@ -8586,14 +8298,19 @@ def wait_for_new_github_inline_review_snapshot(
                 request_comment_created_at=request_comment_created_at,
                 last_consumed_review_id=last_consumed_github_review_id(github_state),
                 latest_allowed_created_at=wait_state.get("deadline_at"),
+                target_review_id=github_state.get("target_review_id"),
             )
         except SupervisorRuntimeError:
-            approval_comment = select_latest_unconsumed_github_codex_approved_comment(
-                issue_comments,
-                request_comment_id=request_comment_id,
-                request_comment_created_at=request_comment_created_at,
-                last_consumed_comment_id=github_state.get("last_consumed_review_comment_id"),
-                latest_allowed_created_at=wait_state.get("deadline_at"),
+            approval_comment = (
+                None
+                if github_state.get("target_review_id") is not None
+                else select_latest_unconsumed_github_codex_approved_comment(
+                    issue_comments,
+                    request_comment_id=request_comment_id,
+                    request_comment_created_at=request_comment_created_at,
+                    last_consumed_comment_id=github_state.get("last_consumed_review_comment_id"),
+                    latest_allowed_created_at=wait_state.get("deadline_at"),
+                )
             )
             if approval_comment is not None:
                 record_consumed_github_codex_review_comment(run_dir, state, turn_number, approval_comment)
@@ -8768,6 +8485,8 @@ def build_github_review_bridge_prompt(
         f"Base branch: {github_state['base_branch']}",
         f"Action: {action}",
     ]
+    if isinstance(github_state.get("target_review_id"), int):
+        lines.append(f"Target review ID: {github_state['target_review_id']}")
     if continue_context_block:
         lines.extend(["", continue_context_block])
     reopen_context_block = format_reopen_context_block(state)
@@ -10869,7 +10588,12 @@ def start_run(args: argparse.Namespace) -> int:
         raise SystemExit("fork start requires a git worktree and cannot be used with --allow-non-git")
     if not is_git and outer_review_is_configured({"outer_review": requested_outer_review}):
         raise SystemExit("outer-review fork start requires a git worktree and cannot be used with --allow-non-git")
-    validate_task_workspace_for_start(task_root, inspection, review_mode=review_mode)
+    validate_task_workspace_for_start(
+        task_root,
+        inspection,
+        review_mode=review_mode,
+        allow_undocumented=fork_enabled,
+    )
     start_role, bootstrap_phase = determine_start_role(
         inspection=inspection,
         fork_enabled=fork_enabled,
@@ -12310,6 +12034,7 @@ def clone_review_bridge_state_for_new_run(previous_state: dict) -> dict:
             "repo": previous["repo"],
             "repo_url": previous["repo_url"],
             "review_wait": new_github_review_wait_state(),
+            "target_review_id": previous.get("target_review_id"),
         },
     }
 

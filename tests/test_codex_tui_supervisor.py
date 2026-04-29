@@ -457,6 +457,76 @@ reviewer_reset_mode = "wrong"
             with self.assertRaises(MODULE.SupervisorRuntimeError):
                 MODULE.tmux_send_prompt("demo-session", "hello", phase="demo", role="generator")
 
+    def test_wait_for_artifacts_restarts_disappeared_role_session_and_resends_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            run_dir = Path(tmp_dir) / "run"
+            turn_dir = run_dir / "turns" / "0001"
+            (turn_dir / "generator").mkdir(parents=True)
+            (turn_dir / "generator" / "prompt.md").write_text("do the work", encoding="utf-8")
+            council_config = self.build_council_config()
+
+            def write_artifacts(*args, **kwargs) -> None:
+                del args, kwargs
+                (turn_dir / "generator" / "message.md").write_text("implemented", encoding="utf-8")
+                MODULE.save_json(
+                    turn_dir / "generator" / "status.json",
+                    {
+                        "result": "implemented",
+                        "summary": "Recovered and finished.",
+                        "changed_files": ["src/app.py"],
+                    },
+                )
+
+            with mock.patch.object(MODULE, "tmux_session_exists", return_value=False), mock.patch.object(
+                MODULE,
+                "restart_role_session",
+                return_value=None,
+            ) as restart_role_session, mock.patch.object(
+                MODULE,
+                "wait_for_tmux_prompt",
+                return_value=None,
+            ) as wait_for_tmux_prompt, mock.patch.object(
+                MODULE,
+                "tmux_send_prompt",
+                side_effect=write_artifacts,
+            ) as tmux_send_prompt, mock.patch.object(
+                MODULE.time,
+                "sleep",
+                return_value=None,
+            ):
+                _, _, status = MODULE.wait_for_role_artifacts(
+                    turn_dir,
+                    "generator",
+                    validator=MODULE.validate_generator_status,
+                    timeout_seconds=5,
+                    phase="generator_artifacts",
+                    tmux_name="gen",
+                    turn_number=1,
+                    repo_root=repo_root,
+                    council_config=council_config,
+                )
+
+            self.assertEqual(status["result"], "implemented")
+            restart_role_session.assert_called_once_with(
+                "gen",
+                repo_root=repo_root,
+                council_config=council_config,
+                role_state=None,
+                role="generator",
+            )
+            wait_for_tmux_prompt.assert_called_once_with(
+                "gen",
+                5,
+                phase="generator_artifacts_session_restart_ready",
+                role="generator",
+            )
+            tmux_send_prompt.assert_called_once()
+            self.assertEqual(tmux_send_prompt.call_args.args[:2], ("gen", "do the work"))
+            self.assertEqual(tmux_send_prompt.call_args.kwargs["dispatch_reason"], "session_restart_after_disappearance")
+            events = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+            self.assertIn("generator_session_restarted_after_disappearance", events)
+
     def test_scaffold_task_root_creates_base_files_only_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir)
@@ -528,10 +598,14 @@ reviewer_reset_mode = "wrong"
             with self.assertRaises(SystemExit):
                 MODULE.inspect_task_workspace(task_root)
 
-    def test_lint_task_review_spec_and_contract_reject_placeholders(self) -> None:
+    def test_lint_task_review_spec_and_contract_reject_empty_and_placeholders(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
+            (task_root / MODULE.TASK_FILENAME).write_text("", encoding="utf-8")
+            task_errors, _ = MODULE.lint_task_workspace_readiness(task_root)
+            self.assertTrue(any("is empty" in item for item in task_errors))
+
             (task_root / MODULE.TASK_FILENAME).write_text(MODULE.read_template("scaffold", MODULE.TASK_FILENAME), encoding="utf-8")
             self.assertTrue(MODULE.lint_task_workspace_readiness(task_root)[0])
 
@@ -545,22 +619,32 @@ reviewer_reset_mode = "wrong"
             (task_root / MODULE.CONTRACT_FILENAME).write_text(MODULE.read_template("scaffold", MODULE.CONTRACT_FILENAME), encoding="utf-8")
             self.assertTrue(MODULE.lint_contract_workspace_readiness(task_root)[0])
 
-    def test_golden_brief_quality_examples_pass_lints(self) -> None:
+    def test_minimal_readiness_lints_accept_varied_markdown_quality(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
-            brief_root = FIXTURES_ROOT / "brief_quality"
-            (task_root / MODULE.TASK_FILENAME).write_text((brief_root / "good_task.md").read_text(encoding="utf-8"), encoding="utf-8")
-            (task_root / MODULE.REVIEW_FILENAME).write_text((brief_root / "good_review.md").read_text(encoding="utf-8"), encoding="utf-8")
-            (task_root / MODULE.SPEC_FILENAME).write_text((brief_root / "good_spec.md").read_text(encoding="utf-8"), encoding="utf-8")
-            (task_root / MODULE.CONTRACT_FILENAME).write_text((brief_root / "good_contract.md").read_text(encoding="utf-8"), encoding="utf-8")
+            (task_root / MODULE.TASK_FILENAME).write_text("# Task\n\n## Request\n\nWorks.\n", encoding="utf-8")
+            (task_root / MODULE.REVIEW_FILENAME).write_text(
+                "# Review\n\n## Context\n\n"
+                "- skills/pylabrobot/SKILL.md\n"
+                "- eve_app/src/tools/core/spec.py\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n## Goal\n\nShip it.\n\n## Out Of Scope\n\n- none\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition Of Done\n\n- [ ] Better UX overall\n",
+                encoding="utf-8",
+            )
 
             self.assertEqual(MODULE.lint_task_workspace_readiness(task_root)[0], [])
             self.assertEqual(MODULE.lint_review_workspace_readiness(task_root / MODULE.REVIEW_FILENAME)[0], [])
             self.assertEqual(MODULE.lint_spec_workspace_readiness(task_root)[0], [])
             self.assertEqual(MODULE.lint_contract_workspace_readiness(task_root)[0], [])
 
-    def test_golden_brief_quality_examples_pass_start_validation(self) -> None:
+    def test_golden_brief_quality_examples_still_pass_start_validation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
@@ -571,7 +655,78 @@ reviewer_reset_mode = "wrong"
             inspection = MODULE.inspect_task_workspace(task_root)
             MODULE.validate_task_workspace_for_start(task_root, inspection)
 
-    def test_lint_task_rejects_generic_success_signal(self) -> None:
+    def test_start_validation_accepts_task_only_and_spec_without_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text=None)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\n## Request\n\nBuild a billing dashboard for finance operators.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            MODULE.validate_task_workspace_for_start(task_root, inspection)
+
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n## M1. Workflow Surface\n\nShip the dashboard.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            MODULE.validate_task_workspace_for_start(task_root, inspection)
+
+    def test_start_validation_rejects_no_canonical_docs_and_empty_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text=None)
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as no_docs:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("no canonical input documents found", str(no_docs.exception))
+
+            (task_root / MODULE.TASK_FILENAME).write_text("", encoding="utf-8")
+            inspection = MODULE.inspect_task_workspace(task_root)
+            with self.assertRaises(SystemExit) as empty_doc:
+                MODULE.validate_task_workspace_for_start(task_root, inspection)
+            self.assertIn("task.md is empty", str(empty_doc.exception))
+
+    def test_start_validation_allows_github_pr_codex_without_local_docs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text=None)
+            inspection = MODULE.inspect_task_workspace(task_root)
+            MODULE.validate_task_workspace_for_start(task_root, inspection, review_mode="github_pr_codex")
+
+    def test_start_validation_accepts_lab_automation_style_brief_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
+            MODULE.scaffold_task_root(task_root, initial_task_text=None)
+            (task_root / MODULE.TASK_FILENAME).write_text(
+                "# Task\n\nImplement Eve lab automation V1 as ToolSpec function calling.\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.REVIEW_FILENAME).write_text(
+                "# Review\n\n## Context\n\n"
+                "- skills/pylabrobot/SKILL.md\n"
+                "- eve_app/src/tools/core/spec.py\n"
+                "- eve_app/src/tools/core/runner.py\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.SPEC_FILENAME).write_text(
+                "# Spec\n\n"
+                "## Goal\n\nAdd lab_* ToolSpec functions.\n\n"
+                "## Out Of Scope\n\nReal hardware execution.\n\n"
+                "## M1. Tool Runtime\n\nUse Eve ToolSpec/function-calling.\n\n",
+                encoding="utf-8",
+            )
+            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+                "# Definition Of Done\n\n"
+                "- [ ] M1. ToolSpec Runtime And Module Structure\n"
+                "  - [ ] M1.A1 Tools are registered.\n",
+                encoding="utf-8",
+            )
+            inspection = MODULE.inspect_task_workspace(task_root)
+            MODULE.validate_task_workspace_for_start(task_root, inspection)
+
+    def test_lint_task_accepts_generic_success_signal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
@@ -580,16 +735,16 @@ reviewer_reset_mode = "wrong"
                 encoding="utf-8",
             )
             errors, _ = MODULE.lint_task_workspace_readiness(task_root)
-            self.assertTrue(any("success signal is too generic" in item for item in errors))
+            self.assertEqual(errors, [])
 
-    def test_lint_review_rejects_generic_findings(self) -> None:
+    def test_lint_review_accepts_generic_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             review_path = Path(tmp_dir) / "review.md"
             review_path.write_text("# Review\n\n## Findings\n\n- Fix this\n\n## Context\n\n- logs pending\n", encoding="utf-8")
             errors, _ = MODULE.lint_review_workspace_readiness(review_path)
-            self.assertTrue(any("too generic" in item for item in errors))
+            self.assertEqual(errors, [])
 
-    def test_lint_spec_rejects_unfilled_core_sections(self) -> None:
+    def test_lint_spec_accepts_unfilled_core_sections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
@@ -598,9 +753,9 @@ reviewer_reset_mode = "wrong"
                 encoding="utf-8",
             )
             errors, _ = MODULE.lint_spec_workspace_readiness(task_root)
-            self.assertTrue(any("decision-complete" in item for item in errors))
+            self.assertEqual(errors, [])
 
-    def test_lint_spec_requires_decision_complete_subsections(self) -> None:
+    def test_lint_spec_accepts_decision_incomplete_subsections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
@@ -626,7 +781,7 @@ reviewer_reset_mode = "wrong"
                 encoding="utf-8",
             )
             errors, _ = MODULE.lint_spec_workspace_readiness(task_root)
-            self.assertTrue(any("decision-complete" in item for item in errors))
+            self.assertEqual(errors, [])
 
     def test_lint_spec_accepts_explicit_not_applicable_reason(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -662,7 +817,7 @@ reviewer_reset_mode = "wrong"
             errors, _ = MODULE.lint_spec_workspace_readiness(task_root)
             self.assertEqual(errors, [])
 
-    def test_lint_contract_rejects_vague_items_and_warns_without_verification(self) -> None:
+    def test_lint_contract_accepts_vague_items_without_verification(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
@@ -671,10 +826,10 @@ reviewer_reset_mode = "wrong"
                 encoding="utf-8",
             )
             errors, warnings = MODULE.lint_contract_workspace_readiness(task_root)
-            self.assertTrue(any("too vague or aspirational" in item for item in errors))
-            self.assertTrue(any("verification item" in item for item in warnings))
+            self.assertEqual(errors, [])
+            self.assertEqual(warnings, [])
 
-    def test_validate_start_rejects_spec_contract_without_integrity_guardrail(self) -> None:
+    def test_validate_start_accepts_spec_contract_without_integrity_guardrail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
             task_root.mkdir(parents=True)
@@ -688,38 +843,7 @@ reviewer_reset_mode = "wrong"
                 encoding="utf-8",
             )
             inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as exc:
-                MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("regression, integrity, fallback, or state guardrail", str(exc.exception))
-
-    def test_validate_start_rejects_broad_task_without_spec(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
-            MODULE.scaffold_task_root(task_root, initial_task_text=None)
-            (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nBuild a billing dashboard for finance operators.\n\n## Context\n\n- The work spans summary metrics, retry state, and recent invoice failures.\n- Preserve the existing route and API boundaries.\n\n## Success Signal\n\nFinance operators can inspect billing health from one dashboard and the relevant verification passes.\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.CONTRACT_FILENAME).write_text(
-                "# Definition of Done\n\n- [ ] Finance operators can inspect billing health from one dashboard.\n- [ ] Relevant automated verification for the changed behavior is present and passing.\n",
-                encoding="utf-8",
-            )
-            inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as exc:
-                MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("requires spec.md", str(exc.exception))
-
-    def test_validate_start_rejects_spec_without_contract(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
-            MODULE.scaffold_task_root(task_root, initial_task_text=None)
-            brief_root = FIXTURES_ROOT / "brief_quality"
-            (task_root / MODULE.TASK_FILENAME).write_text((brief_root / "good_task.md").read_text(encoding="utf-8"), encoding="utf-8")
-            (task_root / MODULE.SPEC_FILENAME).write_text((brief_root / "good_spec.md").read_text(encoding="utf-8"), encoding="utf-8")
-            inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as exc:
-                MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("spec.md should be paired with contract.md", str(exc.exception))
+            MODULE.validate_task_workspace_for_start(task_root, inspection)
 
     def test_write_document_command_writes_requested_doc(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1714,6 +1838,52 @@ reviewer_reset_mode = "wrong"
         self.assertEqual(state["github"]["branch"], "feature/pr")
         self.assertEqual(state["github"]["base_branch"], "main")
 
+    def test_parse_github_pr_ref_preserves_pullrequestreview_fragment(self) -> None:
+        parsed = MODULE.parse_github_pr_ref("https://github.com/acme/repo/pull/42#pullrequestreview-4196080626")
+        self.assertEqual(parsed["ref"], "https://github.com/acme/repo/pull/42")
+        self.assertEqual(parsed["number"], 42)
+        self.assertEqual(parsed["repo_name_with_owner"], "acme/repo")
+        self.assertEqual(parsed["target_review_id"], 4196080626)
+
+    def test_build_review_bridge_state_stores_target_review_id_from_pr_permalink(self) -> None:
+        args = argparse.Namespace(
+            review_mode="github_pr_codex",
+            github_pr="https://github.com/acme/repo/pull/42#pullrequestreview-4196080626",
+            github_branch=None,
+            github_base=None,
+            start_role="auto",
+        )
+        with mock.patch.object(
+            MODULE,
+            "load_github_repo_metadata",
+            return_value={
+                "default_branch": "main",
+                "name_with_owner": "acme/repo",
+                "owner": "acme",
+                "repo": "repo",
+                "url": "https://github.com/acme/repo",
+            },
+        ), mock.patch.object(
+            MODULE,
+            "resolve_github_pr_reference",
+            return_value={
+                "number": 42,
+                "url": "https://github.com/acme/repo/pull/42",
+                "head_ref_name": "feature/pr",
+                "base_ref_name": "main",
+                "head_ref_oid": "abc123",
+                "title": "Fix issue",
+            },
+        ) as resolve_pr:
+            state = MODULE.build_review_bridge_state(
+                Path("/repo"),
+                Path("/repo/.codex-council/demo-task"),
+                {"current_branch": "local-branch"},
+                args,
+            )
+        resolve_pr.assert_called_once_with(Path("/repo"), "https://github.com/acme/repo/pull/42")
+        self.assertEqual(state["github"]["target_review_id"], 4196080626)
+
     def test_build_review_bridge_state_defaults_new_pr_base_branch_to_staging(self) -> None:
         args = argparse.Namespace(
             review_mode="github_pr_codex",
@@ -1859,6 +2029,116 @@ reviewer_reset_mode = "wrong"
             pr_created_at="2026-04-12T00:00:00Z",
         )
         self.assertEqual(started_at, "2026-04-12T00:15:00Z")
+
+    def test_build_github_inline_review_snapshot_honors_target_review_id(self) -> None:
+        reviews = [
+            {
+                "databaseId": 202,
+                "submittedAt": "2026-04-12T01:10:00Z",
+                "author": {"login": "chatgpt-codex-connector"},
+                "body": "Target review",
+                "commit": {"oid": "deadbeef"},
+                "state": "COMMENTED",
+            },
+            {
+                "databaseId": 303,
+                "submittedAt": "2026-04-12T01:20:00Z",
+                "author": {"login": "chatgpt-codex-connector"},
+                "body": "Newer review",
+                "commit": {"oid": "deadbeef"},
+                "state": "COMMENTED",
+            },
+        ]
+        review_threads = [
+            {
+                "id": "thread-target",
+                "isOutdated": False,
+                "isResolved": False,
+                "path": "src/a.py",
+                "comments": {
+                    "nodes": [
+                        {
+                            "databaseId": 55,
+                            "createdAt": "2026-04-12T01:10:01Z",
+                            "author": {"login": "chatgpt-codex-connector"},
+                            "body": "Fix the target issue.",
+                            "commit": {"oid": "deadbeef"},
+                            "path": "src/a.py",
+                            "line": 10,
+                            "pullRequestReview": {
+                                "databaseId": 202,
+                                "submittedAt": "2026-04-12T01:10:00Z",
+                                "author": {"login": "chatgpt-codex-connector"},
+                                "body": "Target review",
+                                "state": "COMMENTED",
+                            },
+                        }
+                    ]
+                },
+            },
+            {
+                "id": "thread-newer",
+                "isOutdated": False,
+                "isResolved": False,
+                "path": "src/b.py",
+                "comments": {
+                    "nodes": [
+                        {
+                            "databaseId": 66,
+                            "createdAt": "2026-04-12T01:20:01Z",
+                            "author": {"login": "chatgpt-codex-connector"},
+                            "body": "Fix the newer issue.",
+                            "commit": {"oid": "deadbeef"},
+                            "path": "src/b.py",
+                            "line": 20,
+                            "pullRequestReview": {
+                                "databaseId": 303,
+                                "submittedAt": "2026-04-12T01:20:00Z",
+                                "author": {"login": "chatgpt-codex-connector"},
+                                "body": "Newer review",
+                                "state": "COMMENTED",
+                            },
+                        }
+                    ]
+                },
+            },
+        ]
+        snapshot = MODULE.build_github_inline_review_snapshot(
+            reviews,
+            review_threads,
+            current_head_sha="deadbeef",
+            current_head_started_at="2026-04-12T01:00:00Z",
+            pr_number=9,
+            pr_url="https://github.com/acme/repo/pull/9",
+            target_review_id=202,
+        )
+        assert snapshot is not None
+        self.assertEqual(snapshot["review"]["id"], 202)
+        self.assertEqual(snapshot["active_threads"][0]["path"], "src/a.py")
+
+    def test_build_github_inline_review_snapshot_blocks_unusable_target_review_id(self) -> None:
+        with self.assertRaises(MODULE.SupervisorRuntimeError) as ctx:
+            MODULE.build_github_inline_review_snapshot(
+                [
+                    {
+                        "databaseId": 202,
+                        "submittedAt": "2026-04-12T01:10:00Z",
+                        "author": {"login": "chatgpt-codex-connector"},
+                        "body": "Target review",
+                        "commit": {"oid": "oldhead"},
+                        "state": "COMMENTED",
+                    }
+                ],
+                [],
+                current_head_sha="deadbeef",
+                current_head_started_at="2026-04-12T01:00:00Z",
+                pr_number=9,
+                pr_url="https://github.com/acme/repo/pull/9",
+                target_review_id=202,
+            )
+        self.assertEqual(ctx.exception.phase, "github_target_review_unusable")
+        self.assertIn("oldhead", str(ctx.exception))
+        self.assertEqual(ctx.exception.details["target_review_id"], 202)
 
     def test_inspect_github_pr_review_state_for_current_head_ignores_old_request_before_generator_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -5321,187 +5601,49 @@ reviewer_reset_mode = "wrong"
             self.assertIn("planner", payload["latest_role_milestones"])
             self.assertIn("intent_critic", payload["latest_role_milestones"])
 
-    def test_validate_task_workspace_for_start_rejects_missing_section_acceptance_criteria(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            repo_root = Path(tmp_dir)
-            task_root = self.scaffold_base_workspace(repo_root)
-            (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.SPEC_FILENAME).write_text(
-                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.CONTRACT_FILENAME).write_text(
-                "# Definition of Done\n\n- [ ] M1. Workflow matches Spec M1 and validation passes.\n- [ ] Validation and branch quality gate.\n",
-                encoding="utf-8",
-            )
-            inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("missing `### Acceptance Criteria`", str(ctx.exception))
-
-    def test_validate_task_workspace_for_start_rejects_unlabeled_acceptance_criteria(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            repo_root = Path(tmp_dir)
-            task_root = self.scaffold_base_workspace(repo_root)
-            (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.SPEC_FILENAME).write_text(
-                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Acceptance Criteria\n- The primary workflow works on the intended path.\n- Validation covers the changed behavior.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.CONTRACT_FILENAME).write_text(
-                "# Definition of Done\n\n- [ ] The workflow works.\n- [ ] Validation and branch quality gate.\n",
-                encoding="utf-8",
-            )
-            inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("must label acceptance criteria as `- A1. ...`", str(ctx.exception))
-
-    def test_validate_task_workspace_for_start_rejects_missing_contract_acceptance_subchecks(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            repo_root = Path(tmp_dir)
-            task_root = self.scaffold_base_workspace(repo_root)
-            (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.SPEC_FILENAME).write_text(
-                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Acceptance Criteria\n- A1. The primary workflow works on the intended path.\n- A2. Validation covers the changed behavior.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.CONTRACT_FILENAME).write_text(
+    def test_validate_task_workspace_for_start_accepts_varied_spec_contract_shape(self) -> None:
+        cases = {
+            "missing section acceptance criteria": (
+                "# Spec\n\n## M1. Workflow Surface\n\nThe workflow exists.\n",
+                "# Definition of Done\n\n- [ ] M1. Workflow matches Spec M1 and validation passes.\n",
+            ),
+            "unlabeled acceptance criteria": (
+                "# Spec\n\n## M1. Workflow Surface\n\n### Acceptance Criteria\n- The primary workflow works.\n",
+                "# Definition of Done\n\n- [ ] The workflow works.\n",
+            ),
+            "missing contract acceptance subchecks": (
+                "# Spec\n\n## M1. Workflow Surface\n\n### Acceptance Criteria\n- A1. The primary workflow works.\n",
                 "# Definition of Done\n\n- [ ] M1. Workflow Surface\n",
-                encoding="utf-8",
-            )
-            inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as ctx:
+            ),
+            "contract text drift": (
+                "# Spec\n\n## M1. Workflow Surface\n\n### Acceptance Criteria\n- A1. p99 latency stays <= 500 ms.\n",
+                "# Definition of Done\n\n- [ ] M1. Totally Unrelated Title\n  - [ ] M1.A1 p99 latency stays >= 500 ms.\n",
+            ),
+            "top level acceptance subcheck": (
+                "# Spec\n\n## M1. Workflow Surface\n\n### Acceptance Criteria\n- A1. The first path works.\n",
+                "# Definition of Done\n\n- [ ] M1.A99 Totally unrelated top-level item.\n",
+            ),
+            "duplicate major spec sections": (
+                "# Spec\n\n## M1. First Surface\n\nBody.\n\n## M1. Duplicate Surface\n\nBody.\n",
+                "# Definition of Done\n\n- [ ] M1. First surface works.\n",
+            ),
+            "m1 and m10 partial linkage": (
+                "# Spec\n\n## M1. First Surface\n\nBody.\n\n## M10. Tenth Surface\n\nBody.\n",
+                "# Definition of Done\n\n- [ ] M10. The tenth surface works and validation passes.\n",
+            ),
+        }
+        for label, (spec_text, contract_text) in cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp_dir:
+                repo_root = Path(tmp_dir)
+                task_root = self.scaffold_base_workspace(repo_root)
+                (task_root / MODULE.TASK_FILENAME).write_text(
+                    "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n",
+                    encoding="utf-8",
+                )
+                (task_root / MODULE.SPEC_FILENAME).write_text(spec_text, encoding="utf-8")
+                (task_root / MODULE.CONTRACT_FILENAME).write_text(contract_text, encoding="utf-8")
+                inspection = MODULE.inspect_task_workspace(task_root)
                 MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("must cite every acceptance criterion as indented sub-checks", str(ctx.exception))
-
-    def test_validate_task_workspace_for_start_rejects_contract_acceptance_text_drift(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            repo_root = Path(tmp_dir)
-            task_root = self.scaffold_base_workspace(repo_root)
-            (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.SPEC_FILENAME).write_text(
-                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Acceptance Criteria\n- A1. The primary workflow works on the intended path.\n- A2. Validation covers the changed behavior.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.CONTRACT_FILENAME).write_text(
-                "# Definition of Done\n\n- [ ] M1. Workflow Surface\n  - [ ] M1.A1 The wrong path works instead.\n  - [ ] M1.A2 Validation covers the changed behavior.\n",
-                encoding="utf-8",
-            )
-            inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("must cite the linked acceptance criterion text", str(ctx.exception))
-
-    def test_validate_task_workspace_for_start_rejects_contract_section_title_drift(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            repo_root = Path(tmp_dir)
-            task_root = self.scaffold_base_workspace(repo_root)
-            (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.SPEC_FILENAME).write_text(
-                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Acceptance Criteria\n- A1. The primary workflow works on the intended path.\n- A2. Validation covers the changed behavior.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.CONTRACT_FILENAME).write_text(
-                "# Definition of Done\n\n- [ ] M1. Totally Unrelated Title\n  - [ ] M1.A1 The primary workflow works on the intended path.\n  - [ ] M1.A2 Validation covers the changed behavior.\n",
-                encoding="utf-8",
-            )
-            inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("must use the same section title", str(ctx.exception))
-
-    def test_validate_task_workspace_for_start_rejects_contract_acceptance_operator_drift(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            repo_root = Path(tmp_dir)
-            task_root = self.scaffold_base_workspace(repo_root)
-            (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.SPEC_FILENAME).write_text(
-                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. Workflow Surface\n\nDescribe the behavior.\n\n### Acceptance Criteria\n- A1. p99 latency stays <= 500 ms for the primary workflow.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.CONTRACT_FILENAME).write_text(
-                "# Definition of Done\n\n- [ ] M1. Workflow Surface\n  - [ ] M1.A1 p99 latency stays >= 500 ms for the primary workflow.\n",
-                encoding="utf-8",
-            )
-            inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("must cite the linked acceptance criterion text", str(ctx.exception))
-
-    def test_validate_task_workspace_for_start_rejects_top_level_acceptance_subcheck(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            task_root = Path(tmp_dir) / ".codex-council" / "demo-task"
-            task_root.mkdir(parents=True)
-            brief_root = FIXTURES_ROOT / "brief_quality"
-            (task_root / MODULE.TASK_FILENAME).write_text((brief_root / "good_task.md").read_text(encoding="utf-8"), encoding="utf-8")
-            (task_root / MODULE.SPEC_FILENAME).write_text((brief_root / "good_spec.md").read_text(encoding="utf-8"), encoding="utf-8")
-            contract_text = (brief_root / "good_contract.md").read_text(encoding="utf-8") + "\n- [ ] M1.A99 Totally unrelated top-level item.\n"
-            (task_root / MODULE.CONTRACT_FILENAME).write_text(contract_text, encoding="utf-8")
-            inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("must be indented under the top-level `M1` checklist item", str(ctx.exception))
-
-    def test_validate_task_workspace_for_start_rejects_duplicate_major_spec_sections(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            repo_root = Path(tmp_dir)
-            task_root = self.scaffold_base_workspace(repo_root)
-            (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.SPEC_FILENAME).write_text(
-                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. First Workflow Surface\n\nDescribe the first behavior.\n\n### Acceptance Criteria\n- A1. The first workflow path works.\n\n## M1. Duplicate Workflow Surface\n\nDescribe the duplicate behavior.\n\n### Acceptance Criteria\n- A1. The duplicate workflow path works.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.CONTRACT_FILENAME).write_text(
-                "# Definition of Done\n\n- [ ] M1. First Workflow Surface\n  - [ ] M1.A1 The first workflow path works.\n",
-                encoding="utf-8",
-            )
-            inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("repeats major section ids", str(ctx.exception))
-
-    def test_validate_task_workspace_for_start_does_not_confuse_m1_with_m10_linkage(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            repo_root = Path(tmp_dir)
-            task_root = self.scaffold_base_workspace(repo_root)
-            (task_root / MODULE.TASK_FILENAME).write_text(
-                "# Task\n\n## Request\n\nBuild a broad workflow feature safely.\n\n## Context\n\nThe feature spans multiple product and runtime surfaces.\n\n## Success Signal\n\nThe behavior is implemented and remains auditable.\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.SPEC_FILENAME).write_text(
-                "# Spec\n\n## Goal\n\nDesign a broad feature safely.\n\n## User Outcome\n\nUsers can complete the workflow safely.\n\n## In Scope\n\n- Workflow\n\n## Out of Scope\n\n- Unrelated systems\n\n## Constraints\n\n- Stay auditable\n\n## Existing Context\n\nContext.\n\n## Desired Behavior\n\n## M1. First Surface\n\nDescribe the first behavior.\n\n### Acceptance Criteria\n- A1. The first surface works.\n- A2. The first validation exists.\n\n## M10. Tenth Surface\n\nDescribe the tenth behavior.\n\n### Acceptance Criteria\n- A1. The tenth surface works.\n- A2. The tenth validation exists.\n\n### Source of Truth / Ownership\n\nNot applicable because none.\n\n### Read Path\n\nNot applicable because none.\n\n### Write Path / Mutation Flow\n\nNot applicable because none.\n\n### Runtime / Performance Expectations\n\nNot applicable because none.\n\n### Failure / Fallback / Degraded Behavior\n\nNot applicable because none.\n\n### State / Integrity / Concurrency Invariants\n\nNot applicable because none.\n\n### Observability / Validation Hooks\n\nNot applicable because none.\n\n## Technical Boundaries\n\nbounds\n\n## Validation Expectations\n\nvalidate well\n\n## Open Questions\n\n- none\n",
-                encoding="utf-8",
-            )
-            (task_root / MODULE.CONTRACT_FILENAME).write_text(
-                "# Definition of Done\n\n- [ ] M10. The tenth surface works and validation passes.\n- [ ] Validation and branch quality gate.\n",
-                encoding="utf-8",
-            )
-            inspection = MODULE.inspect_task_workspace(task_root)
-            with self.assertRaises(SystemExit) as ctx:
-                MODULE.validate_task_workspace_for_start(task_root, inspection)
-            self.assertIn("missing linkage for: M1", str(ctx.exception))
 
     def test_latest_named_run_dir_uses_state_created_at_not_directory_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
