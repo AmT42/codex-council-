@@ -4235,9 +4235,9 @@ def format_review_bridge_block(state: dict, inspection: dict, *, turn_dir: Path,
         if has_github_review_input:
             lines.append("- Existing inline PR review findings for the current head have been materialized for this turn; triage them before making changes.")
         else:
-            lines.append("- If no inline PR review findings are currently materialized for this head, inspect the branch/worktree, make the next implementation step, push, and let the harness request GitHub Codex review.")
+            lines.append("- If no inline PR review findings are currently materialized for this head, do not invent PR-review work. Use only concrete local task/review/spec docs or fork context as the implementation brief; otherwise stop and let the reviewer bridge request GitHub Codex review.")
         if has_local_docs:
-            lines.append("- Local task documents are supporting context for what this branch/worktree is trying to accomplish; keep the active GitHub review findings as the fix queue when they are present.")
+            lines.append("- Local council documents are supporting context for what this branch/worktree is trying to accomplish; keep the active GitHub review findings as the fix queue when they are present.")
         task_root_value = state.get("task_root")
         if isinstance(task_root_value, str) and task_root_value:
             northstar_path = branch_northstar_summary_path(Path(task_root_value))
@@ -5881,7 +5881,7 @@ def determine_start_role(
 
     if requested_role == "reviewer":
         if review_mode == "github_pr_codex":
-            raise SystemExit("github_pr_codex review mode cannot start with reviewer")
+            return "reviewer", None
         if has_docs:
             return "reviewer", None
         if fork_enabled:
@@ -5892,7 +5892,11 @@ def determine_start_role(
         return "generator", None
     if has_task:
         return "generator", None
+    if has_spec:
+        return "generator", None
     if review_mode == "github_pr_codex":
+        if not fork_enabled:
+            return "reviewer", None
         return "generator", "fork_to_generator_github_pr" if fork_enabled else None
     if fork_enabled:
         return "reviewer", "fork_to_review"
@@ -6293,8 +6297,6 @@ def build_review_bridge_state(
         return {"mode": "internal"}
     if git_state is None:
         raise SystemExit("github_pr_codex review mode requires a git worktree")
-    if getattr(args, "start_role", "auto") == "reviewer":
-        raise SystemExit("github_pr_codex review mode cannot start with reviewer")
     repo_meta = load_github_repo_metadata(repo_root)
     github_pr_value = normalize_optional_text(
         getattr(args, "github_pr", None),

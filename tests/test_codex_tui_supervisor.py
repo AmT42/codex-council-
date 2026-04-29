@@ -893,6 +893,10 @@ reviewer_reset_mode = "wrong"
                 inline_context=True,
             )
             self.assertIn("You are working to get this PR merge-ready on the current branch/worktree.", prompt)
+            self.assertIn("do not invent PR-review work", prompt)
+            self.assertIn("local task/review/spec docs", prompt)
+            self.assertIn("let the reviewer bridge request GitHub Codex review", prompt)
+            self.assertNotIn("make the next implementation step", prompt)
             self.assertIn(str(task_root / MODULE.BRANCH_NORTHSTAR_SUMMARY_FILENAME), prompt)
 
     def test_build_planner_prompt_includes_planner_status_schema(self) -> None:
@@ -1360,9 +1364,11 @@ reviewer_reset_mode = "wrong"
         undocumented = {"doc_paths": {"task": None, "review": None, "spec": None, "contract": None}, "present_docs": (), "profile": "undocumented"}
         task_only = {"doc_paths": {"task": Path("/tmp/task.md"), "review": None, "spec": None, "contract": None}, "present_docs": ("task",), "profile": "task"}
         review_only = {"doc_paths": {"task": None, "review": Path("/tmp/review.md"), "spec": None, "contract": None}, "present_docs": ("review",), "profile": "review"}
+        spec_only = {"doc_paths": {"task": None, "review": None, "spec": Path("/tmp/spec.md"), "contract": Path("/tmp/contract.md")}, "present_docs": ("spec", "contract"), "profile": "spec+contract"}
 
         self.assertEqual(MODULE.determine_start_role(inspection=review_only, fork_enabled=False, requested_role="auto"), ("generator", None))
         self.assertEqual(MODULE.determine_start_role(inspection=task_only, fork_enabled=False, requested_role="auto"), ("generator", None))
+        self.assertEqual(MODULE.determine_start_role(inspection=spec_only, fork_enabled=False, requested_role="auto", review_mode="github_pr_codex"), ("generator", None))
         self.assertEqual(MODULE.determine_start_role(inspection=undocumented, fork_enabled=True, requested_role="auto"), ("reviewer", "fork_to_review"))
         with self.assertRaises(SystemExit):
             MODULE.determine_start_role(inspection=undocumented, fork_enabled=False, requested_role="auto")
@@ -1398,7 +1404,7 @@ reviewer_reset_mode = "wrong"
             self.assertEqual(state["roles"]["generator"]["fork_parent_session_id"], "parent-id")
             self.assertEqual(state["roles"]["reviewer"]["fork_parent_session_id"], "parent-id")
 
-    def test_start_run_allows_github_pr_codex_without_local_docs(self) -> None:
+    def test_start_run_uses_github_pr_codex_bridge_first_without_local_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir) / "repo"
             self.init_git_repo(repo_root)
@@ -1456,10 +1462,70 @@ reviewer_reset_mode = "wrong"
             ) as supervisor_loop, contextlib.redirect_stdout(io.StringIO()):
                 result = MODULE.start_run(args)
             self.assertEqual(result, 0)
-            self.assertEqual(supervisor_loop.call_args.kwargs["start_role"], "generator")
+            self.assertEqual(supervisor_loop.call_args.kwargs["start_role"], "reviewer")
             state = MODULE.load_json(task_root / "runs" / "run-1" / "state.json")
             self.assertEqual(state["workspace_profile"], "undocumented")
             self.assertEqual(state["review_bridge"]["mode"], "github_pr_codex")
+
+    def test_start_run_allows_explicit_github_pr_codex_reviewer_start(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo"
+            self.init_git_repo(repo_root)
+            task_root = self.scaffold_base_workspace(repo_root)
+            self.commit_repo_changes(repo_root, "scaffold workspace")
+            args = argparse.Namespace(
+                task_name="demo-task",
+                dir=str(repo_root),
+                allow_non_git=False,
+                run_id="run-1",
+                generator_session="gen",
+                reviewer_session=None,
+                fork_session_id=None,
+                generator_fork_session_id=None,
+                reviewer_fork_session_id=None,
+                review_mode="github_pr_codex",
+                github_pr="https://github.com/acme/repo/pull/42",
+                github_branch=None,
+                github_base=None,
+                start_role="reviewer",
+            )
+            with mock.patch.object(MODULE, "read_codex_session_index", return_value=[]), mock.patch.object(
+                MODULE,
+                "load_github_repo_metadata",
+                return_value={
+                    "default_branch": "main",
+                    "name_with_owner": "acme/repo",
+                    "owner": "acme",
+                    "repo": "repo",
+                    "url": "https://github.com/acme/repo",
+                },
+            ), mock.patch.object(
+                MODULE,
+                "resolve_github_pr_reference",
+                return_value={
+                    "number": 42,
+                    "url": "https://github.com/acme/repo/pull/42",
+                    "head_ref_name": "feature/pr",
+                    "base_ref_name": "main",
+                    "head_ref_oid": "abc123",
+                    "title": "Fix issue",
+                },
+            ), mock.patch.object(
+                MODULE,
+                "create_tmux_sessions",
+                return_value=None,
+            ), mock.patch.object(
+                MODULE,
+                "wait_for_tmux_sessions_ready",
+                return_value=None,
+            ), mock.patch.object(
+                MODULE,
+                "supervisor_loop_from",
+                return_value=None,
+            ) as supervisor_loop, contextlib.redirect_stdout(io.StringIO()):
+                result = MODULE.start_run(args)
+            self.assertEqual(result, 0)
+            self.assertEqual(supervisor_loop.call_args.kwargs["start_role"], "reviewer")
 
     def test_start_run_allows_github_pr_codex_generator_fork_bootstrap_without_local_docs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -96,6 +96,7 @@ Rules:
 
 - `--review-mode github_pr_codex` is a `start` flag, not a `continue` flag
 - PR plus current-head GitHub review findings act as the effective brief
+- when a PR-bridge run starts without local docs or fork context, the reviewer bridge runs first so it can post or wait on `@codex` before generator work begins
 - local `task.md`, `review.md`, or `spec.md` may be omitted when the PR context is enough
 - `branch_northstar_summary.md` is optional supporting context when the branch/worktree intent needs to be stated explicitly
 - do not add outer-review flags; the GitHub PR Codex Bridge is not compatible with Internal Council With Outer Audit

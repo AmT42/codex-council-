@@ -51,6 +51,7 @@ If yes, default to the GitHub PR Codex Bridge:
 - start new PR runs with `--review-mode github_pr_codex`
 - pass `--github-pr <url-or-number>` when known
 - treat the PR plus current-head GitHub Codex findings as the effective brief
+- if the current PR head has no Codex request or findings yet and there are no concrete local docs or fork context, the reviewer bridge should post `@codex` and wait before generator work begins
 - do not seed `review.md` or `contract.md` just to copy PR findings
 - do not use the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
 - add `branch_northstar_summary.md` only when branch intent needs durable local context

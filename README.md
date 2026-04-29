@@ -266,6 +266,7 @@ If yes, route to the GitHub PR Codex Bridge by default:
 - start the run with `--review-mode github_pr_codex`
 - pass `--github-pr <url-or-number>` when known
 - treat the PR plus current-head GitHub Codex findings as the effective brief
+- if the current PR head has no Codex request or findings yet and there are no concrete local docs or fork context, the reviewer bridge should post `@codex` and wait before generator work begins
 - do not seed `review.md` or `contract.md` just to copy PR findings
 - do not use the Normal Internal Council unless the user explicitly asks for the internal generator/reviewer execution loop
 
@@ -521,7 +522,7 @@ The TUI supervisor:
 - keeps `continue` terminal for approved runs and requires explicit `reopen` to supersede them
 - can bootstrap from forked session context when local task docs are missing
 - validates task documents before `start`
-- can start the GitHub PR Codex Bridge generator-first without local `task.md`, `review.md`, or `spec.md`
+- can start the GitHub PR Codex Bridge without local `task.md`, `review.md`, or `spec.md`; without local docs or fork context it starts reviewer-bridge-first so it can request or wait on `@codex`
 - materializes current-head GitHub review findings into turn-scoped review input artifacts for the generator
 - resumes blocked `github_pr_codex` reviewer turns on the same turn instead of forcing a new turn
 - can add an Internal Council With Outer Audit layer driven by a persistent `codex fork` outer-review audit agent in tmux
