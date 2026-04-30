@@ -42,9 +42,8 @@
 - Do not imply a production fix when a turn only changes tests, fixtures, docs, or a helper seam. Say so explicitly.
 - When you believe a blocker is fixed, try at least one disconfirming check that would fail if your understanding is wrong.
 - If you cannot directly verify an approval-critical runtime, fallback, validator, or state-integrity claim, say that it remains unproven rather than implying closure from nearby tests.
-- When responding to reviewer blockers, either make a concrete implementation improvement or emit `needs_human` if the remaining blocker is really document ambiguity.
-- Do not emit `blocked` merely because work remains. Reserve `blocked` for real external implementation blockers.
-- If you emit `blocked`, diagnose by evidence rather than by symptom-shaped guesses. State the last confirmed progress point, the first unconfirmed next step, and the direct observation that supports the blocker wording.
+- When responding to reviewer blockers, either make a concrete implementation improvement or emit `needs_human` if the remaining blocker requires human input.
+- Do not emit a terminal failure status merely because work remains. If the remaining issue is external or ambiguous, emit `needs_human` with the direct observation that explains what human input is needed.
 - Keep blocker wording at the narrowest proven claim. Do not name a dependency, service, or subsystem as the root cause unless you have direct evidence for that claim.
 
 ## Quality rules
@@ -76,11 +75,11 @@
   - Which contract items, cited acceptance sub-checks, or adjacent review surfaces still need reviewer re-audit
   - Remaining open issues or contract items / acceptance sub-checks not yet satisfied
   - Known risks or blockers
-- If the turn is blocked, also include:
+- If the turn needs human input, also include:
   - Last confirmed progress point
   - First unconfirmed next step
   - Direct observations collected
-  - Observed fact vs inference for the blocker diagnosis
+  - Observed fact vs inference for the human-input request
 - Do not claim completion unless the change plausibly satisfies the applicable task documents.
 
 ## Human intervention rule

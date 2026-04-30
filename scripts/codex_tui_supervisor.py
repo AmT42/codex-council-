@@ -85,10 +85,10 @@ CANONICAL_FILE_ORDER = (
     "generator",
     "reviewer",
 )
-GENERATOR_RESULTS = {"implemented", "no_changes_needed", "blocked", "needs_human"}
-REVIEWER_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
-PLANNER_RESULTS = {"drafted", "blocked", "needs_human"}
-INTENT_CRITIC_VERDICTS = {"approved", "changes_requested", "blocked", "needs_human"}
+GENERATOR_RESULTS = {"implemented", "no_changes_needed", "needs_human"}
+REVIEWER_VERDICTS = {"approved", "changes_requested", "needs_human"}
+PLANNER_RESULTS = {"drafted", "needs_human"}
+INTENT_CRITIC_VERDICTS = {"approved", "changes_requested", "needs_human"}
 OUTER_REVIEW_DISPATCH_STATUSES = {
     "skipped_unconfigured",
     "skipped_duplicate",
@@ -3517,7 +3517,7 @@ def format_generator_status_schema_block() -> str:
 
 
 def format_reviewer_status_schema_block(*, bootstrap_review: bool = False) -> str:
-    reviewer_verdicts = ("changes_requested", "blocked", "needs_human") if bootstrap_review else tuple(sorted(REVIEWER_VERDICTS))
+    reviewer_verdicts = ("changes_requested", "needs_human") if bootstrap_review else tuple(sorted(REVIEWER_VERDICTS))
     lines = [
         "`reviewer/status.json` must use exactly this schema:",
         _format_status_enum_block("verdict", reviewer_verdicts),
@@ -4443,7 +4443,7 @@ def format_reviewer_message_requirements_block(task_root: Path, inspection: dict
         "- Evidence Basis for Approval-Critical Claims (`runtime repro`, `end-to-end command`, `unit/integration test`, `code inspection`)",
         "- Which claims remain indirect, proxy-based, or only partially proven, if any",
         "- What remains unproven after this turn, if anything",
-        "- Blocker Diagnosis Check when the generator emitted `blocked` or made a root-cause blocker claim",
+        "- Blocker Diagnosis Check when the generator made a root-cause blocker claim",
     ]
     if has_review:
         lines.append("- Disagreement Adjudication")
@@ -4475,7 +4475,7 @@ def format_fork_bootstrap_review_block(task_root: Path) -> str:
         - {review_path}
 
         In that file, capture concrete findings, blockers, or risks the generator should address next.
-        Unless you must use `needs_human` or `blocked`, emit `changes_requested` so the next turn goes to the generator with the newly materialized review.
+        Unless you must use `needs_human`, emit `changes_requested` so the next turn goes to the generator with the newly materialized review.
         """
     ).rstrip()
 
@@ -8448,7 +8448,7 @@ def build_github_reviewer_message(
     elif comment is not None:
         lines.append("- Imported an already-present Codex review comment for the current pushed head without posting a new request.")
     if error is not None:
-        lines.append("- Surfaced the GitHub review bridge failure explicitly as a blocked reviewer artifact.")
+        lines.append("- Surfaced the GitHub review bridge failure explicitly as a reviewer artifact requiring human attention.")
     else:
         lines.append("- Stored the latest unconsumed GitHub review findings in the reviewer turn artifacts for the next generator turn.")
     lines.extend(["", "## Residual Risks or Follow-up Notes", ""])
@@ -8889,11 +8889,6 @@ def mirror_chunk_contract_reviewer_artifacts(turn_dir: Path) -> None:
     if contract_status["verdict"] == "changes_requested":
         critical_dimensions = {
             key: ("fail" if key == "correctness_vs_intent" else "uncertain")
-            for key in critical_review_dimension_keys()
-        }
-    elif contract_status["verdict"] == "blocked":
-        critical_dimensions = {
-            key: ("fail" if key == "failure_mode_and_fallback" else "uncertain")
             for key in critical_review_dimension_keys()
         }
     else:
@@ -9465,19 +9460,6 @@ def planning_loop_from(
                     human_source=planner_status["human_source"],
                 )
                 return
-            if planner_status["result"] == "blocked":
-                state["status"] = "blocked"
-                state["stop_reason"] = planner_status["summary"]
-                save_run_state(run_dir, state)
-                save_turn_metadata(
-                    current_turn_dir,
-                    turn_number,
-                    "blocked",
-                    role="planner",
-                    details={"summary": planner_status["summary"]},
-                )
-                append_run_event(run_dir, "blocked", turn_number=turn_number, role="planner", details={"summary": planner_status["summary"]})
-                return
             critic_status = run_intent_critic_phase(
                 run_dir,
                 state,
@@ -9523,19 +9505,6 @@ def planning_loop_from(
                 human_source=critic_status["human_source"],
             )
             return
-        if critic_status["verdict"] == "blocked":
-            state["status"] = "blocked"
-            state["stop_reason"] = critic_status["summary"]
-            save_run_state(run_dir, state)
-            save_turn_metadata(
-                current_turn_dir,
-                turn_number,
-                "blocked",
-                role="intent_critic",
-                details={"summary": critic_status["summary"]},
-            )
-            append_run_event(run_dir, "blocked", turn_number=turn_number, role="intent_critic", details={"summary": critic_status["summary"]})
-            return
         if critic_status["verdict"] == "changes_requested":
             next_turn_number = turn_number + 1
             if next_turn_number > last_turn:
@@ -9577,16 +9546,18 @@ def planning_loop(run_dir: Path, state: dict, task_root: Path) -> None:
     )
 
 
-def blocked_github_reviewer_status(summary: str) -> dict:
+def needs_human_github_reviewer_status(summary: str) -> dict:
     dimensions = {
         key: ("fail" if key == "failure_mode_and_fallback" else "uncertain")
         for key in critical_review_dimension_keys()
     }
     return validate_reviewer_status(
         {
-            "verdict": "blocked",
+            "verdict": "needs_human",
             "summary": summary,
             "blocking_issues": [summary],
+            "human_source": "repo_state",
+            "human_message": summary,
             "critical_dimensions": dimensions,
         }
     )
@@ -9749,7 +9720,7 @@ def run_github_codex_review_phase(
         )
         return reviewer_status
     except SupervisorRuntimeError as error:
-        reviewer_status = blocked_github_reviewer_status(str(error))
+        reviewer_status = needs_human_github_reviewer_status(str(error))
         reviewer_message = build_github_reviewer_message(
             state,
             turn_number,
@@ -9763,7 +9734,7 @@ def run_github_codex_review_phase(
         save_json(role_status_path(current_turn_dir, "reviewer"), reviewer_status)
         write_text(
             role_raw_output_path(current_turn_dir, "reviewer"),
-            f"[github review bridge blocked]\n{error.phase}: {error}\n",
+            f"[github review bridge needs human]\n{error.phase}: {error}\n",
         )
         save_json(
             role_capture_status_path(current_turn_dir, "reviewer"),
@@ -9771,7 +9742,7 @@ def run_github_codex_review_phase(
         )
         append_run_event(
             run_dir,
-            "github_review_blocked",
+            "github_review_needs_human",
             turn_number=turn_number,
             role="reviewer",
             details={"phase": error.phase, "summary": str(error)},
@@ -9855,25 +9826,6 @@ def supervisor_loop_from(
                     summary=generator_status["summary"],
                     human_message=generator_status["human_message"],
                     human_source=generator_status["human_source"],
-                )
-                return
-            if generator_status["result"] == "blocked":
-                state["status"] = "blocked"
-                state["stop_reason"] = generator_status["summary"]
-                save_run_state(run_dir, state)
-                save_turn_metadata(
-                    current_turn_dir,
-                    turn_number,
-                    "blocked",
-                    role="generator",
-                    details={"summary": generator_status["summary"]},
-                )
-                append_run_event(
-                    run_dir,
-                    "blocked",
-                    turn_number=turn_number,
-                    role="generator",
-                    details={"summary": generator_status["summary"]},
                 )
                 return
             if outer_review_triage_required(current_turn_dir):
@@ -9975,25 +9927,6 @@ def supervisor_loop_from(
                 summary=reviewer_status["summary"],
                 human_message=reviewer_status["human_message"],
                 human_source=reviewer_status["human_source"],
-            )
-            return
-        if reviewer_status["verdict"] == "blocked":
-            state["status"] = "blocked"
-            state["stop_reason"] = reviewer_status["summary"]
-            save_run_state(run_dir, state)
-            save_turn_metadata(
-                current_turn_dir,
-                turn_number,
-                "blocked",
-                role="reviewer",
-                details={"summary": reviewer_status["summary"]},
-            )
-            append_run_event(
-                run_dir,
-                "blocked",
-                turn_number=turn_number,
-                role="reviewer",
-                details={"summary": reviewer_status["summary"]},
             )
             return
         if reviewer_status["verdict"] == "changes_requested":
@@ -10993,7 +10926,6 @@ ArtifactContinuationState = Literal[
     "generator_pending",
     "generator_invalid",
     "generator_needs_human",
-    "generator_blocked",
     "outer_review_pending_finalization",
     "chunk_contract_waiting_reviewer",
     "chunk_contract_reviewer_pending",
@@ -11003,7 +10935,6 @@ ArtifactContinuationState = Literal[
     "reviewer_invalid",
     "reviewer_changes_requested",
     "reviewer_needs_human",
-    "reviewer_blocked",
     "reviewer_approved",
     "closed_no_remaining_outer_findings",
 ]
@@ -11092,15 +11023,11 @@ def classify_turn_continuation_state(turn: dict) -> str:
                 return "reviewer_changes_requested"
             if reviewer_verdict == "needs_human":
                 return "reviewer_needs_human"
-            if reviewer_verdict == "blocked":
-                return "reviewer_blocked"
         if reviewer["state"] == "pending" and reviewer["activity_exists"]:
             return "chunk_contract_reviewer_pending"
         return "chunk_contract_waiting_reviewer"
     if generator_result == "needs_human":
         return "ambiguous" if reviewer["activity_exists"] else "generator_needs_human"
-    if generator_result == "blocked":
-        return "ambiguous" if reviewer["activity_exists"] else "generator_blocked"
 
     if reviewer["state"] == "invalid":
         return "reviewer_invalid"
@@ -11114,7 +11041,7 @@ def classify_turn_continuation_state(turn: dict) -> str:
         return "reviewer_changes_requested"
     if reviewer_verdict == "needs_human":
         return "reviewer_needs_human"
-    return "reviewer_blocked"
+    return "ambiguous"
 
 
 def inspect_turn_for_continuation(turn_dir: Path) -> dict:
@@ -11140,13 +11067,11 @@ PlanningArtifactContinuationState = Literal[
     "planner_pending",
     "planner_invalid",
     "planner_needs_human",
-    "planner_blocked",
     "planner_complete_waiting_intent_critic",
     "intent_critic_pending",
     "intent_critic_invalid",
     "intent_critic_changes_requested",
     "intent_critic_needs_human",
-    "intent_critic_blocked",
     "intent_critic_approved",
 ]
 
@@ -11166,8 +11091,6 @@ def classify_planning_turn_continuation_state(turn: dict) -> str:
     planner_result = planner["validated_status"]["result"]
     if planner_result == "needs_human":
         return "ambiguous" if critic["activity_exists"] else "planner_needs_human"
-    if planner_result == "blocked":
-        return "ambiguous" if critic["activity_exists"] else "planner_blocked"
     if critic["state"] == "invalid":
         return "intent_critic_invalid"
     if critic["state"] == "pending":
@@ -11179,7 +11102,7 @@ def classify_planning_turn_continuation_state(turn: dict) -> str:
         return "intent_critic_changes_requested"
     if critic_verdict == "needs_human":
         return "intent_critic_needs_human"
-    return "intent_critic_blocked"
+    return "ambiguous"
 
 
 def inspect_planning_turn_for_continuation(turn_dir: Path) -> dict:
@@ -11257,11 +11180,9 @@ def next_turn_expectation(turn: dict, continuation_state: str, review_mode: str)
     turn_number = turn["turn_number"]
     if continuation_state == "reviewer_changes_requested":
         role = "generator"
-    elif continuation_state in {"generator_needs_human", "generator_blocked"}:
+    elif continuation_state == "generator_needs_human":
         role = "generator"
-    elif continuation_state in {"reviewer_needs_human", "reviewer_blocked"}:
-        if continuation_state == "reviewer_blocked" and review_mode == "github_pr_codex":
-            return None
+    elif continuation_state == "reviewer_needs_human":
         role = "reviewer"
     else:
         return None
@@ -11510,27 +11431,6 @@ def resolve_turn_continuation(
             turn_number=turn["turn_number"],
             continuation_state=continuation_state,
             reason=f"turn {turn_label} is approved; this run should not continue. Use `reopen` to supersede the approval explicitly.",
-            ignored_turns=ignored_turns,
-        )
-
-    if continuation_state == "reviewer_blocked" and review_bridge_mode(state) == "github_pr_codex":
-        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
-        if conflicts:
-            raise ContinuationResolutionError(
-                f"turn {turn_label} still needs the GitHub reviewer bridge, but later turns contain conflicting activity",
-                details={"turn": turn_label, "conflicts": conflicts},
-            )
-        return continuation_plan(
-            turn_dir=turn["turn_dir"],
-            turn_number=turn["turn_number"],
-            role="reviewer",
-            create_new_turn=False,
-            reuse_existing_turn_for_first=True,
-            prior_status=continuation_state,
-            continuation_state=continuation_state,
-            reason=f"turn {turn_label} is blocked in the GitHub reviewer bridge; resume reviewer on the same turn.",
-            reference_turn_dir=turn["turn_dir"],
-            source_turn_number=turn["turn_number"],
             ignored_turns=ignored_turns,
         )
 
@@ -11819,36 +11719,6 @@ def resolve_planning_turn_continuation(
             turn_number=turn["turn_number"],
             continuation_state=continuation_state,
             reason=f"planning turn {turn_label} is approved; the docs are already prepared for execution.",
-            ignored_turns=ignored_turns,
-        )
-
-    if continuation_state == "planner_blocked":
-        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
-        if conflicts:
-            raise ContinuationResolutionError(
-                f"planning turn {turn_label} is blocked, but later turns contain conflicting activity",
-                details={"turn": turn_label, "conflicts": conflicts},
-            )
-        return terminal_continuation_plan(
-            turn_dir=turn["turn_dir"],
-            turn_number=turn["turn_number"],
-            continuation_state=continuation_state,
-            reason=f"planning turn {turn_label} is blocked.",
-            ignored_turns=ignored_turns,
-        )
-
-    if continuation_state == "intent_critic_blocked":
-        ignored_turns, conflicts = collect_ignored_future_turns(turns, index)
-        if conflicts:
-            raise ContinuationResolutionError(
-                f"planning turn {turn_label} is blocked in intent critic review, but later turns contain conflicting activity",
-                details={"turn": turn_label, "conflicts": conflicts},
-            )
-        return terminal_continuation_plan(
-            turn_dir=turn["turn_dir"],
-            turn_number=turn["turn_number"],
-            continuation_state=continuation_state,
-            reason=f"planning turn {turn_label} is blocked in intent critic review.",
             ignored_turns=ignored_turns,
         )
 

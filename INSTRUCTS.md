@@ -666,7 +666,7 @@ Internal outer-review exact path:
 
 - an internally approved run with configured outer review writes `outer_review_handoff.*` when approval is recorded
 - configured outer review sends the persistent outer-review audit agent only the final approved-run audit request
-- generator/reviewer `blocked` and `needs_human` states do not notify the persistent outer-review audit agent
+- generator/reviewer `needs_human` states do not notify the persistent outer-review audit agent
 - only `reopen --reason-kind false_approved` on that internally approved run with a recorded handoff enters the explicit outer-review path
 - the first generator turn of that reopen is triage-only
 - after triage, the persistent outer-review audit agent finalizes the surviving findings through canonical `review.md` and runs `continue`

@@ -26,7 +26,7 @@ In the `prepare` loop, the planner writes:
 
 `planner/status.json` uses:
 
-- `result`: `drafted` | `blocked` | `needs_human`
+- `result`: `drafted` | `needs_human`
 - `summary`
 - `docs_updated`
 - `human_source` / `human_message` only for `needs_human`

@@ -478,7 +478,7 @@ Internal outer-review audit layer:
 
 - when an internal run with `--outer-review-fork-session-id` starts, the harness creates a persistent `outer_review` role with its own tmux session
 - when the internal loop reaches reviewer `approved`, the harness sends one short final-audit request to that persistent outer-review audit agent and writes turn-scoped outer-review handoff/notification artifacts
-- generator/reviewer `blocked` and `needs_human` states do not notify the persistent outer-review audit agent; they remain normal inner-loop terminal or pause states for the operator
+- generator/reviewer `needs_human` states do not notify the persistent outer-review audit agent; they remain normal inner-loop pauses for the operator
 - the persistent outer-review audit agent re-verifies the whole task against current branch state and intended behavior
 - only `reopen --reason-kind false_approved` on that approved internal run with a prior outer-review handoff enters the explicit outer-review path
 - the first generator turn of that reopen is triage-only and must classify every active finding as `agree`, `disagree`, or `uncertain`
@@ -530,7 +530,7 @@ The TUI supervisor:
 - validates task documents before `start`
 - can start the GitHub PR Codex Bridge without local `task.md`, `review.md`, `spec.md`, or `contract.md`; without local docs or fork context it requests or waits on `@codex` before generator work begins
 - materializes current-head GitHub review findings into turn-scoped review input artifacts for the generator
-- resumes blocked `github_pr_codex` PR bridge turns on the same turn instead of forcing a new turn
+- pauses `github_pr_codex` PR bridge failures with `needs_human` instead of asking the reviewer to author a failure verdict
 - can add an Internal Council With Outer Audit layer driven by a persistent `codex fork` outer-review audit agent in tmux
 - keeps approved internal runs terminal for `continue`, but can write durable outer-review handoff/finalization artifacts around that approval lifecycle
 

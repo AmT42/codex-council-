@@ -31,7 +31,7 @@
   - how `contract.md` items were derived from named spec sections
   - remaining weak points, assumptions, or unresolved ambiguities
 - `planner/status.json` must use:
-  - `result`: `drafted` | `blocked` | `needs_human`
+  - `result`: `drafted` | `needs_human`
   - `summary`: short non-empty string
   - `docs_updated`: list of canonical doc filenames actually updated in this turn
   - `human_source` and `human_message` only when `result` is `needs_human`

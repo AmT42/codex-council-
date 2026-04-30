@@ -35,13 +35,12 @@
 ## Approval bar
 - Use `approved` only when no blocking issues remain and every critical review dimension passes.
 - Use `changes_requested` for fixable implementation or verification issues the generator can address in the repo.
-- Use `blocked` only for external blockers unrelated to plan quality.
-- Use `needs_human` when the task documents themselves are flawed, contradictory, unsafe, or require a product/architecture decision beyond reviewer judgment.
+- Use `needs_human` when review cannot safely continue without human input, including flawed, contradictory, unsafe, or decision-incomplete task documents.
 - Passing tests or a satisfied-looking contract are not enough for approval if the branch still fails required adjacent verification, hides contradictions, or remains subsystem-not-clean.
 - Do not newly approve a production/runtime criterion from tests-only, docs-only, fixture-only, or council-artifact-only changes unless independent runtime or adversarial verification on current branch state proves the real path now holds.
 - If your evidence for a checked box is only proxy evidence (for example helper logic looks right, reserve math looks right, or adjacent tests passed), leave it unchecked or mark the relevant dimension `uncertain`.
 - A local fix to one surface never implies whole-task approval while any other contract item remains unchecked, only proxy-proven, or merely presumed unchanged.
-- If the latest turn only repairs tests, fixtures, docs, or a helper seam, treat approval as still blocked until the real path and the rest of the approval surface are rechecked.
+- If the latest turn only repairs tests, fixtures, docs, or a helper seam, treat the branch as not approval-ready until the real path and the rest of the approval surface are rechecked.
 - Approval is invalid if you have only rechecked the latest local fix while leaving other approval-critical areas merely presumed unchanged.
 - Approval is also invalid if you only rechecked the latest open blocker or only the currently unchecked contract items.
 - Treat vague or aspirational `contract.md` items as document-quality failures, not as grounds to guess approval.

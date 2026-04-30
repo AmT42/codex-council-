@@ -137,7 +137,7 @@ Continuation selector:
 | --- | --- |
 | Planning run active or paused | `status --planning`, then `prepare` |
 | Internal execution run active or paused | `status`, then `continue` |
-| GitHub PR Codex Bridge run blocked/paused | `status`, then `continue` with no `--review-mode` |
+| GitHub PR Codex Bridge run paused | `status`, then `continue` with no `--review-mode` |
 | Approved run that is now wrong or obsolete | `reopen` |
 | Outer-review finalization pause | finalize `review.md`, then `continue` |
 

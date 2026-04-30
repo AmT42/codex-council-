@@ -23,7 +23,7 @@
   - spec-to-contract linkage problems
   - minimum changes required for approval
 - `intent_critic/status.json` must use:
-  - `verdict`: `approved` | `changes_requested` | `blocked` | `needs_human`
+  - `verdict`: `approved` | `changes_requested` | `needs_human`
   - `summary`: short non-empty string
   - `blocking_issues`: list of strings
   - `critical_dimensions`: full planning dimension map

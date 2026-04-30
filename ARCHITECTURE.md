@@ -117,7 +117,7 @@ In runtime terms, that stage is now `prepare`:
 
 - it writes auditable planning artifacts under `planning-runs/`
 - it preserves `source_intent.md` per planning run
-- it loops planner and intent critic until `approved`, `blocked`, `needs_human`, or planning max turns
+- it loops planner and intent critic until `approved`, `needs_human`, or planning max turns
 
 This stage is where `hard` mode belongs.
 
@@ -340,7 +340,7 @@ Internal Council With Outer Audit is an additive lifecycle on top of that rule, 
 - an internal run may optionally carry an outer-review fork parent session id and persistent `outer_review` tmux role
 - when such a run reaches reviewer `approved`, the run stays terminal for `continue`
 - the supervisor writes durable outer-review handoff `outer_review_handoff.*` artifacts and sends the audit request to the persistent outer-review audit agent
-- the supervisor does not notify that persistent outer-review audit agent for generator/reviewer `blocked` or `needs_human`; those are handled by the normal inner-loop operator path
+- the supervisor does not notify that persistent outer-review audit agent for generator/reviewer `needs_human`; those pauses are handled by the normal inner-loop operator path
 - if the persistent outer-review audit agent later finds blockers under unchanged requirements, the re-entry path is still explicit `reopen --reason-kind false_approved`
 - only that precise false-approved reopen of an internally approved run with a prior outer-review handoff enters the outer-review path
 - the first generator turn of that reopen is triage-only

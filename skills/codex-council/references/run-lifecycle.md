@@ -180,7 +180,7 @@ Prefer `continue` over a new run when:
 - the run paused for `needs_human`
 - the reviewer returned `changes_requested`
 - the human edited task docs and wants the same run to proceed
-- the run is blocked in the GitHub PR Codex Bridge and should resume the same PR bridge turn
+- the run paused for human attention during the GitHub PR Codex Bridge
 - the run is paused for outer-review finalization and the persistent outer-review audit agent already finalized canonical `review.md`
 
 ```bash
@@ -204,7 +204,6 @@ Internal outer-review audit special case:
 
 GitHub PR Codex Bridge special case:
 
-- a blocked PR bridge should usually resume on the same turn
 - do not pass `--review-mode` to `continue`; the review source is stored in the run state
 - if the latest pushed head has no matching `@codex` request, a correct resume path should post a fresh literal `@codex` rather than reusing an older request from a previous head
 
@@ -227,7 +226,7 @@ Exact Internal Council With Outer Audit loop:
 
 - approved internal run with configured outer review writes `outer_review_handoff.*`
 - configured outer review sends the persistent outer-review audit agent only one final approved-run audit request
-- generator/reviewer `blocked` and `needs_human` states do not notify the persistent outer-review audit agent
+- generator/reviewer `needs_human` states do not notify the persistent outer-review audit agent
 - the persistent outer-review audit agent re-verifies the whole task against intended behavior and current branch state
 - if blockers remain under unchanged requirements, update canonical `review.md` and use `reopen --reason-kind false_approved`
 - only that precise false-approved reopen of an internally approved run with a prior handoff enters the explicit outer-review path

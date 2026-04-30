@@ -137,6 +137,38 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             )
         self.assertIn("invalid generator result: changed", str(ctx.exception))
 
+    def test_role_status_validators_reject_blocked_outputs(self) -> None:
+        with self.assertRaises(ValueError):
+            MODULE.validate_generator_status(
+                {"result": "blocked", "summary": "blocked", "changed_files": []}
+            )
+        with self.assertRaises(ValueError):
+            MODULE.validate_planner_status(
+                {"result": "blocked", "summary": "blocked", "docs_updated": []}
+            )
+        with self.assertRaises(ValueError):
+            MODULE.validate_reviewer_status(
+                {
+                    "verdict": "blocked",
+                    "summary": "blocked",
+                    "blocking_issues": ["blocked"],
+                    "critical_dimensions": {
+                        key: "uncertain" for key in MODULE.critical_review_dimension_keys()
+                    },
+                }
+            )
+        with self.assertRaises(ValueError):
+            MODULE.validate_intent_critic_status(
+                {
+                    "verdict": "blocked",
+                    "summary": "blocked",
+                    "blocking_issues": ["blocked"],
+                    "critical_dimensions": {
+                        key: "uncertain" for key in MODULE.planning_review_dimension_keys()
+                    },
+                }
+            )
+
     def test_validate_generator_status_accepts_outer_review_triage(self) -> None:
         status = MODULE.validate_generator_status(
             {
@@ -983,8 +1015,8 @@ reviewer_reset_mode = "wrong"
             self.assertIn("`generator/status.json` must use exactly this schema:", prompt)
             self.assertIn("`implemented`", prompt)
             self.assertIn("`no_changes_needed`", prompt)
-            self.assertIn("`blocked`", prompt)
             self.assertIn("`needs_human`", prompt)
+            self.assertNotIn("`blocked`", prompt)
 
     def test_build_generator_prompt_mentions_pr_only_northstar_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1040,8 +1072,8 @@ reviewer_reset_mode = "wrong"
             )
             self.assertIn("`planner/status.json` must use exactly this schema:", prompt)
             self.assertIn("`drafted`", prompt)
-            self.assertIn("`blocked`", prompt)
             self.assertIn("`needs_human`", prompt)
+            self.assertNotIn("`blocked`", prompt)
 
     def test_build_intent_critic_prompt_includes_status_schema(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1061,8 +1093,8 @@ reviewer_reset_mode = "wrong"
             self.assertIn("`intent_critic/status.json` must use exactly this schema:", prompt)
             self.assertIn("`approved`", prompt)
             self.assertIn("`changes_requested`", prompt)
-            self.assertIn("`blocked`", prompt)
             self.assertIn("`needs_human`", prompt)
+            self.assertNotIn("`blocked`", prompt)
 
     def test_build_reviewer_initial_prompt_includes_contract_checklist_only_when_present(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1113,8 +1145,8 @@ reviewer_reset_mode = "wrong"
             self.assertIn("`reviewer/status.json` must use exactly this schema:", prompt)
             self.assertIn("`approved`", prompt)
             self.assertIn("`changes_requested`", prompt)
-            self.assertIn("`blocked`", prompt)
             self.assertIn("`needs_human`", prompt)
+            self.assertNotIn("`blocked`", prompt)
 
     def test_build_artifact_repair_prompt_includes_role_schema_block(self) -> None:
         prompt = MODULE.build_artifact_repair_prompt_for_paths(
@@ -2967,7 +2999,8 @@ reviewer_reset_mode = "wrong"
                 side_effect=error,
             ):
                 reviewer_status = MODULE.run_github_codex_review_phase(run_dir, state, task_root, 1, turn_dir)
-            self.assertEqual(reviewer_status["verdict"], "blocked")
+            self.assertEqual(reviewer_status["verdict"], "needs_human")
+            self.assertEqual(reviewer_status["human_source"], "repo_state")
             self.assertIn("timed out waiting for Codex", reviewer_status["summary"])
             reviewer_message = (turn_dir / "reviewer" / "message.md").read_text(encoding="utf-8")
             self.assertIn("GitHub review bridge failed", reviewer_message)
@@ -3243,7 +3276,7 @@ reviewer_reset_mode = "wrong"
             self.assertIn("Imported Codex review comment ID: `202`", reviewer_message)
             self.assertNotIn("Waited 10 minutes", reviewer_message)
 
-    def test_determine_continue_target_reuses_same_turn_for_github_review_bridge_blocked_reviewer(self) -> None:
+    def test_determine_continue_target_reports_reviewer_needs_human_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             run_dir = Path(tmp_dir) / "run"
             latest_turn = run_dir / "turns" / "0001"
@@ -3257,14 +3290,14 @@ reviewer_reset_mode = "wrong"
                     "turn_number": 1,
                     "role": "reviewer",
                     "create_new_turn": False,
-                    "prior_status": "reviewer_blocked",
+                    "prior_status": "reviewer_needs_human",
                 },
             ):
                 result = MODULE.determine_continue_target(
                     run_dir,
                     {"review_bridge": {"mode": "github_pr_codex"}},
                 )
-            self.assertEqual(result, (latest_turn, 1, "reviewer", False, "reviewer_blocked"))
+            self.assertEqual(result, (latest_turn, 1, "reviewer", False, "reviewer_needs_human"))
 
     def test_determine_continue_target_ignores_stray_future_turn_when_reviewer_should_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -4552,8 +4585,8 @@ reviewer_reset_mode = "wrong"
                     turn_one,
                     1,
                     role="generator",
-                    verdict="blocked",
-                    summary="blocked",
+                    verdict="needs_human",
+                    summary="needs human",
                 )
             self.assertEqual(status, "skipped_non_final")
             dispatch.assert_not_called()
@@ -4649,7 +4682,7 @@ reviewer_reset_mode = "wrong"
                 MODULE.supervisor_loop_from(run_dir, state, task_root, start_turn=1, start_role="generator")
             notify.assert_not_called()
 
-    def test_supervisor_loop_does_not_notify_outer_review_on_generator_blocked(self) -> None:
+    def test_supervisor_loop_does_not_notify_outer_review_on_generator_needs_human(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir) / "repo"
             self.init_git_repo(repo_root)
@@ -4675,7 +4708,13 @@ reviewer_reset_mode = "wrong"
             with mock.patch.object(
                 MODULE,
                 "run_generator_phase",
-                return_value={"result": "blocked", "summary": "blocked", "changed_files": [], "human_message": None, "human_source": None},
+                return_value={
+                    "result": "needs_human",
+                    "summary": "Needs human input.",
+                    "changed_files": [],
+                    "human_message": "Need clarification.",
+                    "human_source": MODULE.TASK_FILENAME,
+                },
             ), mock.patch.object(MODULE, "notify_outer_review_for_status") as notify:
                 MODULE.supervisor_loop_from(run_dir, state, task_root, start_turn=1, start_role="generator")
             notify.assert_not_called()
@@ -6050,7 +6089,7 @@ reviewer_reset_mode = "wrong"
                 result = MODULE.start_run(args)
             self.assertEqual(result, 0)
 
-    def test_start_run_ignores_latest_blocked_planning_run(self) -> None:
+    def test_start_run_ignores_latest_needs_human_planning_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             repo_root = Path(tmp_dir) / "repo"
             self.init_git_repo(repo_root)
@@ -6063,13 +6102,13 @@ reviewer_reset_mode = "wrong"
                 "# Definition of Done\n\n- [ ] The retry path no longer writes duplicate rows during sync.\n- [ ] Required verification for the changed retry path is present and passing.\n",
                 encoding="utf-8",
             )
-            blocked_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "blocked-run"
-            (blocked_dir / "turns").mkdir(parents=True)
+            paused_dir = task_root / MODULE.PLANNING_RUNS_DIRNAME / "needs-human-run"
+            (paused_dir / "turns").mkdir(parents=True)
             state = MODULE.create_planning_run_state(
                 repo_root=repo_root,
                 task_root=task_root,
                 task_name="demo-task",
-                run_id="blocked-run",
+                run_id="needs-human-run",
                 workspace_profile="undocumented",
                 council_config=self.build_council_config(),
                 planner_session="planner-session",
@@ -6077,12 +6116,12 @@ reviewer_reset_mode = "wrong"
                 hard_mode=False,
             )
             state["created_at"] = "2026-04-18T12:00:00Z"
-            MODULE.save_run_state(blocked_dir, state)
-            MODULE.write_text(blocked_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
-            turn_one = MODULE.prepare_planning_turn(blocked_dir, 1, task_root)
+            MODULE.save_run_state(paused_dir, state)
+            MODULE.write_text(paused_dir / MODULE.PLANNING_SOURCE_INTENT_FILENAME, "# Source Intent\n")
+            turn_one = MODULE.prepare_planning_turn(paused_dir, 1, task_root)
             self.write_planner_status(turn_one, result="drafted")
-            self.write_intent_critic_status(turn_one, verdict="blocked")
-            self.commit_repo_changes(repo_root, message="prepare docs with blocked planning run present")
+            self.write_intent_critic_status(turn_one, verdict="needs_human")
+            self.commit_repo_changes(repo_root, message="prepare docs with needs-human planning run present")
             args = argparse.Namespace(
                 task_name="demo-task",
                 dir=str(repo_root),
