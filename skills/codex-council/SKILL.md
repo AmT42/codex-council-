@@ -90,6 +90,7 @@ Then load only the references needed for the chosen route:
 - [`references/spec-doc.md`](./references/spec-doc.md)
 - [`references/contract-doc.md`](./references/contract-doc.md)
 - [`references/run-lifecycle.md`](./references/run-lifecycle.md)
+- [`references/supervisor-lifetime.md`](./references/supervisor-lifetime.md)
 - [`references/failure-recovery.md`](./references/failure-recovery.md)
 - [`references/user-sophistication-examples.md`](./references/user-sophistication-examples.md)
 - [`references/task-type-examples.md`](./references/task-type-examples.md)
@@ -124,6 +125,7 @@ Then load only the references needed for the chosen route:
 - This is a process-lifetime rule, not a special built-in Codex background feature.
 - A plain foreground command is fine only when you will stay attached and wait for the supervisor.
 - If you need the supervisor to outlive the current outer-agent shell, prefer launching the supervisor command inside a dedicated `tmux` session.
+- After launching or resuming, do a quick launch sanity check before moving on: wait a few seconds, run `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions` for execution runs, or add `--planning --sessions` for planning runs, and verify the expected role session is past local Codex interstitials such as update, auth, trust, or install prompts.
 - Summarize the chosen route to the user before launching the harness.
 
 ## Required Routing

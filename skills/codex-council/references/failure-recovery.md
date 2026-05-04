@@ -48,6 +48,19 @@ If the supervisor died mid-run:
 - when restarting orchestration, keep the new supervisor process alive
 - if you are not going to wait in the foreground, relaunch that supervisor command inside a dedicated `tmux` session rather than another transient outer-agent shell
 
+## Launch-interstitial failure
+
+If a role appears stuck immediately after launch or resume:
+
+- do not rewrite the task docs or start a new run first
+- run `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions`, or add `--planning --sessions`
+- inspect the expected role tmux pane with `tmux capture-pane -p -t <session> | tail -80`
+- if Codex is asking to update, install, authenticate, trust the directory, or complete first-run setup, clear that prompt as an operator action
+- after the normal Codex prompt is available, let the current supervisor continue if it is still alive
+- if the supervisor already failed during boot, recover with `continue` for execution or `prepare` for planning
+
+Only kill and recreate a role session when no council prompt was delivered and no role artifacts were written. Then resume the existing execution run with `continue`, or resume the existing planning run with `prepare`; keep the recovery tied to the same task and run unless `status` proves the run should be reopened or superseded.
+
 ## Superseded-approval failure
 
 If `status` shows that the selected run is already approved, but that approval is no longer the right source of truth:

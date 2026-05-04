@@ -14,6 +14,24 @@ The current runtime lives in [`scripts/codex_tui_supervisor.py`](./scripts/codex
 
 This repo follows the same broad harness ideas discussed in Anthropic's [Harness design for long-running application development](https://www.anthropic.com/engineering/harness-design-long-running-apps) and OpenAI's [Harness engineering](https://openai.com/fr-FR/index/harness-engineering/): structured artifacts, explicit evaluator roles, context handoffs, and repo-embedded operating knowledge.
 
+## Quick Install
+
+For a user who has access to the GitHub repository:
+
+```bash
+git clone https://github.com/AmT42/codex-council-.git
+cd codex-council-
+./install.sh
+```
+
+The installer symlinks `skills/codex-council` into `$CODEX_HOME/skills/` or `~/.codex/skills/`, then installs a `codex-council` command wrapper into `~/.local/bin/`. Keep the cloned checkout in place; both the symlink and wrapper point back to it. If you move the checkout, rerun `./install.sh --force`. Restart Codex or open a new Codex session after installation so the skill is discovered.
+
+If `~/.local/bin` is not on `PATH`, either add it to your shell profile or call the supervisor directly:
+
+```bash
+python3 /path/to/codex-council-/scripts/codex_tui_supervisor.py --help
+```
+
 ## The Problem It Solves
 
 AI coding assistants fail in predictable ways when they are treated as a single generic brain:
@@ -183,7 +201,7 @@ If an outer Codex agent has access to this repo, point it at:
 
 The `codex-council` skill is the intended user-facing interface for v1. It is a **single front door** backed by a large reference pack. The skill should decide how to route the request instead of forcing the user to understand the internal document model.
 
-If you want Codex to discover the skill as an installed skill, copy or symlink `skills/codex-council` into `$CODEX_HOME/skills/` or `~/.codex/skills/`.
+If you want Codex to discover the skill as an installed skill, run [`install.sh`](./install.sh). Manual install is also possible by copying or symlinking `skills/codex-council` into `$CODEX_HOME/skills/` or `~/.codex/skills/`.
 
 ## Document Model
 
@@ -533,6 +551,8 @@ The TUI supervisor:
 - pauses `github_pr_codex` PR bridge failures with `needs_human` instead of asking the reviewer to author a failure verdict
 - can add an Internal Council With Outer Audit layer driven by a persistent `codex fork` outer-review audit agent in tmux
 - keeps approved internal runs terminal for `continue`, but can write durable outer-review handoff/finalization artifacts around that approval lifecycle
+
+After `prepare`, `start`, `continue`, or `reopen`, the outer agent should do a quick launch sanity check before moving on: wait a few seconds, run `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions` for execution runs, or add `--planning --sessions` for planning runs, and inspect the expected role tmux pane if it still looks booting. Clear local Codex update, install, auth, trust, or first-run prompts as operator setup issues, then resume the same run with `continue` or `prepare` if the supervisor already failed during boot.
 
 `continue` is the intended path after:
 

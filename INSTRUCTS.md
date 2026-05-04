@@ -69,6 +69,8 @@ Preferred default:
 - if you can keep the command attached and wait, a normal foreground command is fine
 - if you need the supervisor to outlive the current outer-agent shell, use a dedicated `tmux` session for the supervisor itself
 - use detached background jobs like `nohup` only when a dedicated `tmux` session is not practical
+- after launching or resuming, wait a few seconds and do a launch sanity check with `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions`, or add `--planning --sessions`
+- if the expected role did not start, inspect the role tmux pane and clear local Codex interstitials such as update, install, auth, trust, or first-run prompts before treating the run as failed
 
 Safe patterns:
 
@@ -607,6 +609,7 @@ Process rule:
 - or run it in a persistent environment
 - if you are an outer Codex agent and do not plan to wait on the foreground process, prefer a dedicated `tmux` session for the supervisor command itself
 - do not fire-and-forget from an outer-agent session that may exit
+- after 5 to 10 seconds, run `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions`; if the expected role still has not started, inspect its tmux pane and clear any local Codex update/auth/setup prompt
 
 ### Inspect a run
 
@@ -637,6 +640,7 @@ Preferred default for an outer Codex agent:
 
 - run `continue` as a normal foreground command only if you will stay attached and wait
 - otherwise launch the supervisor command inside a dedicated `tmux` session and keep that session alive
+- after 5 to 10 seconds, run `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions` and clear any local Codex interstitial blocking the resumed role; add `--planning --sessions` when resuming a planning run
 
 Approved runs are terminal for `continue`. If `status` shows an approved run and that approval must be superseded, use `reopen` instead.
 
