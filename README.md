@@ -552,7 +552,7 @@ The TUI supervisor:
 - can add an Internal Council With Outer Audit layer driven by a persistent `codex fork` outer-review audit agent in tmux
 - keeps approved internal runs terminal for `continue`, but can write durable outer-review handoff/finalization artifacts around that approval lifecycle
 
-After `prepare`, `start`, `continue`, or `reopen`, the outer agent should do a quick launch sanity check before moving on: wait a few seconds, run `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions` for execution runs, or add `--planning --sessions` for planning runs, and inspect the expected role tmux pane if it still looks booting. Clear local Codex update, install, auth, trust, or first-run prompts as operator setup issues, then resume the same run with `continue` or `prepare` if the supervisor already failed during boot.
+After `prepare`, `start`, `continue`, or `reopen`, the outer agent should do a quick launch sanity check before moving on: wait a few seconds, run `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions` for execution runs, or add `--planning --sessions` for planning runs, and inspect the expected role tmux pane if it still looks booting. Treat local Codex update, install, auth, trust, or first-run prompts as operator setup issues; report them and get explicit user approval before accepting updates, running install commands, authenticating, or trusting a directory. Then resume the same run with `continue` or `prepare` if the supervisor already failed during boot.
 
 `continue` is the intended path after:
 

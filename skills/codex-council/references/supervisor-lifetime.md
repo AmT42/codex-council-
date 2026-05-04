@@ -62,7 +62,7 @@ Use the printed attach command, or capture the pane directly:
 tmux capture-pane -p -t <role-tmux-session> | tail -80
 ```
 
-If the pane shows a local Codex interstitial, resolve that local prompt before judging the council run:
+If the pane shows a local Codex interstitial, treat it as operator setup rather than a council failure:
 
 - update or install prompt
 - login or auth prompt
@@ -70,7 +70,7 @@ If the pane shows a local Codex interstitial, resolve that local prompt before j
 - first-run setup prompt
 - model/version selection prompt
 
-Prefer the smallest manual action that gets Codex to the normal prompt. For example, accept a default update prompt, run the displayed install command, or complete auth. Once the normal Codex prompt is available, let the existing supervisor continue if it is still alive. If the supervisor already failed during boot, use `status` and then resume with `continue` for execution runs or `prepare` for planning runs.
+Report the prompt clearly. Get explicit user approval before accepting updates, running install commands, authenticating, or trusting a directory. Once the normal Codex prompt is available, let the existing supervisor continue if it is still alive. If the supervisor already failed during boot, use `status` and then resume with `continue` for execution runs or `prepare` for planning runs.
 
 If no council prompt was ever delivered to the role and no role artifacts were written, it is safe to kill and recreate only that blocked role session. Then inspect `status` and resume the existing execution run with `continue`, or inspect `status --planning` and resume the existing planning run with `prepare`. Do not rerun `start` or `reopen` just because Codex itself needed an update.
 
@@ -92,7 +92,7 @@ If you suspect this happened:
 1. run `status` or `status --planning`
 2. inspect `derived_continuation`
 3. run `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions`, or add `--planning --sessions`, and inspect any role session that failed to start
-4. resolve local Codex interstitials before changing council docs or creating a new run
+4. report local Codex interstitials before changing council docs or creating a new run; get explicit user approval before accepting updates, running installs, authenticating, or trusting a directory
 5. run `continue` for execution runs, or `prepare` for planning runs, if the next role is now derivable from the artifacts
 6. use `reopen` only when the selected execution run is already approved but must be superseded
 7. keep the new supervisor process alive this time
