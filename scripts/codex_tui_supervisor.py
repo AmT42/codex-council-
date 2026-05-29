@@ -1400,6 +1400,11 @@ def load_council_config(repo_root: Path) -> dict:
                 "xhigh",
                 "codex.model_reasoning_effort",
             ),
+            "service_tier": coerce_str(
+                codex_cfg.get("service_tier"),
+                "fast",
+                "codex.service_tier",
+            ),
             "no_alt_screen": coerce_bool(
                 codex_cfg.get("no_alt_screen"),
                 True,
@@ -1517,6 +1522,8 @@ def build_codex_command(repo_root: Path, codex_cfg: dict) -> list[str]:
         cmd.extend(["--model", codex_cfg["model"]])
     if codex_cfg["model_reasoning_effort"]:
         cmd.extend(["-c", f'model_reasoning_effort="{codex_cfg["model_reasoning_effort"]}"'])
+    if codex_cfg["service_tier"]:
+        cmd.extend(["-c", f'service_tier="{codex_cfg["service_tier"]}"'])
     if codex_cfg["dangerously_bypass_approvals_and_sandbox"]:
         cmd.append("--dangerously-bypass-approvals-and-sandbox")
     if codex_cfg["no_alt_screen"]:
@@ -1534,6 +1541,8 @@ def build_codex_fork_command(
         cmd.extend(["--model", codex_cfg["model"]])
     if codex_cfg["model_reasoning_effort"]:
         cmd.extend(["-c", f'model_reasoning_effort="{codex_cfg["model_reasoning_effort"]}"'])
+    if codex_cfg["service_tier"]:
+        cmd.extend(["-c", f'service_tier="{codex_cfg["service_tier"]}"'])
     if codex_cfg["dangerously_bypass_approvals_and_sandbox"]:
         cmd.append("--dangerously-bypass-approvals-and-sandbox")
     if codex_cfg["no_alt_screen"]:
@@ -1552,6 +1561,8 @@ def build_codex_resume_command(
         cmd.extend(["--model", codex_cfg["model"]])
     if codex_cfg["model_reasoning_effort"]:
         cmd.extend(["-c", f'model_reasoning_effort="{codex_cfg["model_reasoning_effort"]}"'])
+    if codex_cfg["service_tier"]:
+        cmd.extend(["-c", f'service_tier="{codex_cfg["service_tier"]}"'])
     if codex_cfg["dangerously_bypass_approvals_and_sandbox"]:
         cmd.append("--dangerously-bypass-approvals-and-sandbox")
     if codex_cfg["no_alt_screen"]:
