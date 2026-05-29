@@ -1,6 +1,7 @@
 [codex]
 model = "gpt-5.4"
 model_reasoning_effort = "xhigh"
+service_tier = "fast"
 dangerously_bypass_approvals_and_sandbox = true
 no_alt_screen = true
 

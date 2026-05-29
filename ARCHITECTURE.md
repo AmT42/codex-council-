@@ -467,6 +467,7 @@ Preferred operator default:
 - if the outer agent can stay attached, run the supervisor command in the foreground and wait
 - if the outer agent cannot guarantee that, launch the supervisor command in its own dedicated `tmux` session
 - treat detached background jobs as a fallback, not the default operator path
+- after launching or resuming, the outer agent should perform a short launch sanity check: run `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions` for execution runs, or add `--planning --sessions` for planning runs; verify the expected role reached a normal Codex prompt or started writing artifacts; and report local Codex update/auth/setup prompts before classifying the council run as failed, getting explicit user approval before accepting updates, installing, authenticating, or trusting a directory
 
 Invalid pattern:
 

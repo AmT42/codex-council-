@@ -48,6 +48,7 @@ class CodexTuiSupervisorTests(unittest.TestCase):
             "codex": {
                 "model": "gpt-5.4",
                 "model_reasoning_effort": "xhigh",
+                "service_tier": "fast",
                 "dangerously_bypass_approvals_and_sandbox": True,
                 "no_alt_screen": True,
             },
@@ -286,6 +287,7 @@ commands = ["pytest -q tests/test_workspace.py"]
                 encoding="utf-8",
             )
             config = MODULE.load_council_config(repo_root)
+            self.assertEqual(config["codex"]["service_tier"], "fast")
             self.assertFalse(config["review"]["fresh_reviewer_session_per_turn"])
             self.assertEqual(config["review"]["reviewer_reset_mode"], "restart")
             self.assertEqual(
@@ -293,6 +295,18 @@ commands = ["pytest -q tests/test_workspace.py"]
                 ["git diff --check", "pytest -q tests/test_example.py"],
             )
             self.assertEqual(config["review"]["path_rules"][0]["name"], "workspace")
+
+    def test_build_codex_commands_include_service_tier(self) -> None:
+        repo_root = Path("/tmp/example")
+        codex_cfg = self.build_council_config()["codex"]
+
+        command = MODULE.build_codex_command(repo_root, codex_cfg)
+        fork_command = MODULE.build_codex_fork_command(repo_root, codex_cfg, "session-1")
+        resume_command = MODULE.build_codex_resume_command(repo_root, codex_cfg, "session-1")
+
+        for cmd in (command, fork_command, resume_command):
+            self.assertIn("-c", cmd)
+            self.assertIn('service_tier="fast"', cmd)
 
     def test_load_council_config_rejects_unknown_reviewer_reset_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

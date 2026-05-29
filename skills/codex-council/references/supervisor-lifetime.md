@@ -48,6 +48,32 @@ Example:
 tmux new-session -d -s council-supervisor 'python3 /path/to/council-agent/scripts/codex_tui_supervisor.py start my-task --dir /path/to/target-repo'
 ```
 
+## Launch sanity check
+
+After any `prepare`, `start`, `continue`, or `reopen` that launches or resumes live sessions, do one quick operator check before moving on:
+
+1. wait about 5 to 10 seconds
+2. run `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions` for execution runs, or add `--planning --sessions` for planning runs
+3. inspect the expected role session if the run still looks like it is booting or no first artifact appears
+
+Use the printed attach command, or capture the pane directly:
+
+```bash
+tmux capture-pane -p -t <role-tmux-session> | tail -80
+```
+
+If the pane shows a local Codex interstitial, treat it as operator setup rather than a council failure:
+
+- update or install prompt
+- login or auth prompt
+- trust-this-directory prompt
+- first-run setup prompt
+- model/version selection prompt
+
+Report the prompt clearly. Get explicit user approval before accepting updates, running install commands, authenticating, or trusting a directory. Once the normal Codex prompt is available, let the existing supervisor continue if it is still alive. If the supervisor already failed during boot, use `status` and then resume with `continue` for execution runs or `prepare` for planning runs.
+
+If no council prompt was ever delivered to the role and no role artifacts were written, it is safe to kill and recreate only that blocked role session. Then inspect `status` and resume the existing execution run with `continue`, or inspect `status --planning` and resume the existing planning run with `prepare`. Do not rerun `start` or `reopen` just because Codex itself needed an update.
+
 ## Unsafe pattern
 
 - launch `python3 ... codex_tui_supervisor.py start ...` from an outer-agent shell
@@ -65,6 +91,8 @@ If you suspect this happened:
 
 1. run `status` or `status --planning`
 2. inspect `derived_continuation`
-3. run `continue` for execution runs, or `prepare` for planning runs, if the next role is now derivable from the artifacts
-4. use `reopen` only when the selected execution run is already approved but must be superseded
-5. keep the new supervisor process alive this time
+3. run `python3 /path/to/council-agent/scripts/codex_tui_supervisor.py status <task> --dir <target-repo> --sessions`, or add `--planning --sessions`, and inspect any role session that failed to start
+4. report local Codex interstitials before changing council docs or creating a new run; get explicit user approval before accepting updates, running installs, authenticating, or trusting a directory
+5. run `continue` for execution runs, or `prepare` for planning runs, if the next role is now derivable from the artifacts
+6. use `reopen` only when the selected execution run is already approved but must be superseded
+7. keep the new supervisor process alive this time

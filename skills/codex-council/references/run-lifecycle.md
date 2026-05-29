@@ -149,6 +149,7 @@ Process rule:
 - or run it in a truly persistent environment
 - if you are an outer Codex agent and do not want to stay attached, prefer a dedicated `tmux` session for the supervisor command itself
 - never fire-and-forget from an outer-agent session that may exit
+- after launch, perform the launch sanity check from `supervisor-lifetime.md` before moving on; local Codex update/auth/setup prompts are operator issues to clear, not task failures
 
 Preferred persistent command example:
 
@@ -192,6 +193,7 @@ Process rule:
 - `continue` is also a live supervisor process
 - it needs the same lifetime guarantees as `start`
 - if you will not wait in the foreground, prefer running the `continue` command inside a dedicated `tmux` session
+- after resuming, perform the same launch sanity check used after `start`
 
 Approved runs are terminal for `continue`.
 
